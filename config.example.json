@@ -60,6 +60,8 @@
   "// ===== 网络 / 浏览器 =====": "",
   "// proxy": "注册机主代理：Chromium + 邮箱 HTTP。可带账号 http://user:pass@host:port。优先于系统 https_proxy。",
   "proxy": "http://127.0.0.1:7890",
+  "// browser_headless": "true=无头 Chromium 注册；Turnstile 成功率可能下降。CLI --headless/--no-headless 可覆盖。",
+  "browser_headless": false,
   "// user_agent": "Chromium UA；一般保持默认 Chrome 桌面串即可。",
   "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
   "// enable_nsfw": "注册成功后是否尝试打开 NSFW（历史字段；与 CPA 无关）",

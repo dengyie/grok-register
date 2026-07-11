@@ -575,12 +575,19 @@ def main() -> int:
     parser.add_argument("--browser-recycle-every", type=int, default=25, help="复用 N 次后完整回收")
     parser.add_argument("--cookie-snapshot", action="store_true", help="注册成功写 cookie 快照（默认关，fast）")
     parser.add_argument("--inline-mint", action="store_true", help="强制注册线程内联 mint（调试用）")
+    parser.add_argument("--headless", action="store_true", help="无头 Chromium 注册（覆盖 config.browser_headless）")
+    parser.add_argument("--no-headless", action="store_true", help="强制有头浏览器")
     args = parser.parse_args()
 
     reg.load_config()
     cfg0 = getattr(reg, "config", {}) or {}
     threads = max(1, min(args.threads, 10))
     fast = bool(args.fast) and not bool(args.no_fast)
+    if getattr(args, "headless", False):
+        reg.config["browser_headless"] = True
+    if getattr(args, "no_headless", False):
+        reg.config["browser_headless"] = False
+    print(f"[*] browser_headless = {bool(reg.config.get('browser_headless'))}", flush=True)
 
     mint_workers = resolve_mint_workers(
         cli_value=args.mint_workers,

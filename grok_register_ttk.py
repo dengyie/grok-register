@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     "cloudflare_path_token": "/token",
     "cloudflare_path_messages": "/messages",
     "proxy": "http://127.0.0.1:7890",
+    "browser_headless": False,
     "enable_nsfw": True,
     "register_count": 1,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -626,8 +627,33 @@ def create_browser_options():
     options.set_timeouts(base=1)
     for flag in CHROMIUM_SLIM_FLAGS:
         options.set_argument(flag)
+    # headless: Turnstile 在无头下成功率可能更低；默认有头。
+    headless = bool(config.get("browser_headless", False))
+    if headless:
+        try:
+            options.headless(True)
+        except Exception:
+            try:
+                options.set_argument("--headless=new")
+            except Exception:
+                options.set_argument("--headless")
+        # 无头下仍尽量伪装桌面 UA，降低被拦概率
+        ua = (config.get("user_agent") or "").strip()
+        if ua:
+            try:
+                options.set_user_agent(ua)
+            except Exception:
+                pass
+        try:
+            options.set_argument("--window-size=1280,900")
+        except Exception:
+            pass
     if os.path.exists(EXTENSION_PATH):
-        options.add_extension(EXTENSION_PATH)
+        # 传统 headless 不支持扩展；headless=new 下尽量加载 turnstilePatch
+        try:
+            options.add_extension(EXTENSION_PATH)
+        except Exception:
+            pass
     # Apply config.json "proxy" to Chromium. Without this, only HTTP helpers
     # used get_proxies(); the browser itself fell through to system/env proxy.
     proxy = (config.get("proxy") or "").strip()
