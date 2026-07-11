@@ -201,6 +201,59 @@ def _ensure_browser(worker_id: int, force_recycle: bool = False):
         reg.start_browser(log_callback=lambda m: log(worker_id, m))
 
 
+def classify_email_stage_failure(msg: str) -> str:
+    """Classify email/code stage failure for retry policy.
+
+    Returns:
+      progress_fail — code filled but profile not reached (do not swap mailbox as mail-miss)
+      mail_miss     — verification code not received / IMAP path
+      other         — navigation/form/browser hard failure
+    """
+    text = str(msg or "")
+    if ("未进入资料页" in text) or ("验证码已填写" in text):
+        return "progress_fail"
+    if (
+        ("未收到验证码" in text)
+        or ("获取验证码失败" in text)
+        or (
+            ("验证码" in text)
+            and any(
+                k in text
+                for k in (
+                    "未收到",
+                    "自动填写/提交失败",
+                    "IMAP",
+                )
+            )
+        )
+    ):
+        return "mail_miss"
+    return "other"
+
+
+def _soft_recycle_browser(worker_id: int) -> None:
+    """Prefer clear_session; only full restart when reuse is impossible."""
+    try:
+        if reg.TabPool.get_browser() is not None:
+            if reg.TabPool.clear_session(log_callback=lambda m: log(worker_id, m)):
+                log(worker_id, "[*] 软回收：会话已清理，复用浏览器进程")
+                return
+    except Exception as exc:
+        log(worker_id, f"[Debug] clear_session 失败，改完整重启: {exc}")
+    try:
+        reg.restart_browser(log_callback=lambda m: log(worker_id, m))
+    except Exception:
+        pass
+
+
+def _hard_recycle_browser(worker_id: int) -> None:
+    """Full Chromium quit+create for stuck pages / unknown failures."""
+    try:
+        reg.restart_browser(log_callback=lambda m: log(worker_id, m))
+    except Exception:
+        pass
+
+
 def register_one(
     worker_id: int,
     idx: int,
@@ -251,40 +304,30 @@ def register_one(
             break
         except Exception as exc:
             msg = str(exc)
-            # 码已填但未进资料页：推进失败，禁止当“没收到验证码”换邮箱
-            progress_fail = ("未进入资料页" in msg) or ("验证码已填写" in msg)
-            mail_miss = (not progress_fail) and (
-                ("未收到验证码" in msg)
-                or ("获取验证码失败" in msg)
-                or (
-                    ("验证码" in msg)
-                    and any(
-                        k in msg
-                        for k in (
-                            "未收到",
-                            "自动填写/提交失败",
-                            "IMAP",
-                        )
-                    )
-                )
-            )
-            if mail_miss and mail_try < max_mail_retry:
+            kind = classify_email_stage_failure(msg)
+            if kind == "mail_miss" and mail_try < max_mail_retry:
                 log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
                 _mark_email_stage_error(email, msg)
-                try:
-                    reg.restart_browser(log_callback=lambda m: log(worker_id, m))
-                except Exception:
-                    pass
+                # 收码失败通常不是浏览器崩溃；优先软回收避免进程爆炸
+                _soft_recycle_browser(worker_id)
                 reg.sleep_with_cancel(1, cancel)
                 continue
-            log(worker_id, f"! 邮箱阶段失败: {msg}")
+            if kind == "progress_fail":
+                log(
+                    worker_id,
+                    f"! 验证码阶段推进失败(不换邮箱当 mail-miss): {msg}",
+                )
+                _mark_email_stage_error(email, msg)
+                traceback.print_exc()
+                _inc("reg_fail")
+                # 页面可能卡在中间态，强制完整回收
+                _hard_recycle_browser(worker_id)
+                return None
+            log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
             _mark_email_stage_error(email, msg)
             traceback.print_exc()
             _inc("reg_fail")
-            try:
-                reg.restart_browser(log_callback=lambda m: log(worker_id, m))
-            except Exception:
-                pass
+            _hard_recycle_browser(worker_id)
             return None
 
     try:

@@ -951,7 +951,7 @@ def yyds_create_account(address=None, domain=None, api_key=None, jwt=None):
     data = resp.json()
     if data.get("success"):
         return data.get("data", {})
-    raise Exception(f"YYDS 鍒涘缓閭澶辫触: {data}")
+    raise Exception(f"YYDS 创建邮箱失败: {data}")
 
 
 def yyds_get_token(address, api_key=None, jwt=None):
@@ -969,7 +969,7 @@ def yyds_get_token(address, api_key=None, jwt=None):
     data = resp.json()
     if data.get("success"):
         return data.get("data", {}).get("token")
-    raise Exception(f"YYDS 鑾峰彇token澶辫触: {data}")
+    raise Exception(f"YYDS 获取token失败: {data}")
 
 
 def yyds_get_messages(address, token=None, api_key=None, jwt=None):
@@ -1005,7 +1005,7 @@ def yyds_get_message_detail(message_id, token=None, api_key=None, jwt=None):
     data = resp.json()
     if data.get("success"):
         return data.get("data", {})
-    raise Exception(f"YYDS 鑾峰彇閭欢璇︽儏澶辫触: {data}")
+    raise Exception(f"YYDS 获取邮件详情失败: {data}")
 
 
 def yyds_generate_username(length=10):
@@ -1016,7 +1016,7 @@ def yyds_generate_username(length=10):
 def yyds_pick_domain(api_key=None, jwt=None):
     domains = yyds_get_domains(api_key=api_key, jwt=jwt)
     if not domains:
-        raise Exception("YYDS 娌℃湁杩斿洖浠讳綍鍙敤鍩熷悕")
+        raise Exception("YYDS 没有返回任何可用域名")
     private = [d for d in domains if d.get("isVerified") and not d.get("isPublic")]
     if private:
         return private[0]["domain"]
@@ -1026,7 +1026,7 @@ def yyds_pick_domain(api_key=None, jwt=None):
     verified = [d for d in domains if d.get("isVerified")]
     if verified:
         return verified[0]["domain"]
-    raise Exception("YYDS 鏃犲凡楠岃瘉鍩熷悕鍙敤")
+    raise Exception("YYDS 无已验证域名可用")
 
 
 def yyds_get_email_and_token(api_key=None, jwt=None):
@@ -1044,8 +1044,8 @@ def yyds_get_email_and_token(api_key=None, jwt=None):
     if not temp_token:
         temp_token = yyds_get_token(address, api_key=key, jwt=token)
     if not temp_token:
-        raise Exception("鑾峰彇 YYDS token 澶辫触")
-    print(f"[*] 宸插垱寤?YYDS 閭: {address}")
+        raise Exception("获取 YYDS token 失败")
+    print(f"[*] 已创建 YYDS 邮箱: {address}")
     return address, temp_token
 
 
@@ -1066,7 +1066,7 @@ def yyds_get_oai_code(
             messages = yyds_get_messages(address, token=token, jwt=jwt)
         except Exception as exc:
             if log_callback:
-                log_callback(f"[Debug] YYDS 鎷夊彇閭欢鍒楄〃澶辫触: {exc}")
+                log_callback(f"[Debug] YYDS 拉取邮件列表失败: {exc}")
             sleep_with_cancel(poll_interval, cancel_callback)
             continue
         for msg in messages:
@@ -1081,7 +1081,7 @@ def yyds_get_oai_code(
                 detail = yyds_get_message_detail(msg_id, token=token, jwt=jwt)
             except Exception as exc:
                 if log_callback:
-                    log_callback(f"[Debug] YYDS 鑾峰彇閭欢璇︽儏澶辫触: {exc}")
+                    log_callback(f"[Debug] YYDS 获取邮件详情失败: {exc}")
                 continue
             parts = []
             text_body = detail.get("text") or ""
@@ -1093,11 +1093,11 @@ def yyds_get_oai_code(
             combined = "\n".join(parts)
             subject = detail.get("subject", "")
             if log_callback:
-                log_callback(f"[Debug] YYDS 鏀跺埌閭欢: {subject}")
+                log_callback(f"[Debug] YYDS 收到邮件: {subject}")
             code = extract_verification_code(combined, subject)
             if code:
                 if log_callback:
-                    log_callback(f"[*] YYDS 浠庨偖浠朵腑鎻愬彇鍒伴獙璇佺爜: {code}")
+                    log_callback(f"[*] YYDS 从邮件中提取到验证码: {code}")
                 return code
         sleep_with_cancel(poll_interval, cancel_callback)
     raise Exception(f"YYDS 在 {timeout}s 内未收到验证码邮件")
@@ -1111,7 +1111,7 @@ def generate_username(length=10):
 def pick_domain(api_key=None):
     domains = get_domains(api_key=api_key)
     if not domains:
-        raise Exception("DuckMail 娌℃湁杩斿洖浠讳綍鍙敤鍩熷悕")
+        raise Exception("DuckMail 没有返回任何可用域名")
     private = [d for d in domains if d.get("ownerId")]
     verified_private = [d for d in private if d.get("isVerified")]
     if verified_private:
@@ -1119,7 +1119,7 @@ def pick_domain(api_key=None):
     public = [d for d in domains if d.get("isVerified")]
     if public:
         return public[0]["domain"]
-    raise Exception("DuckMail 鏃犲凡楠岃瘉鍩熷悕鍙敤")
+    raise Exception("DuckMail 无已验证域名可用")
 
 
 # ──────────────────────── CloudMail (maillab/cloud-mail) ────────────────────────
@@ -1980,7 +1980,7 @@ def get_email_and_token(api_key=None):
     create_account(address, password, api_key=key, expires_in=0)
     token = get_token(address, password)
     if not token:
-        raise Exception("鑾峰彇 DuckMail token 澶辫触")
+        raise Exception("获取 DuckMail token 失败")
     return address, token
 
 
@@ -2080,7 +2080,7 @@ def duckmail_get_oai_code(
             messages = get_messages(dev_token)
         except Exception as exc:
             if log_callback:
-                log_callback(f"[Debug] 鎷夊彇閭欢鍒楄〃澶辫触: {exc}")
+                log_callback(f"[Debug] 拉取邮件列表失败: {exc}")
             sleep_with_cancel(poll_interval, cancel_callback)
             continue
         for msg in messages:
@@ -2095,7 +2095,7 @@ def duckmail_get_oai_code(
                 detail = get_message_detail(dev_token, msg_id)
             except Exception as exc:
                 if log_callback:
-                    log_callback(f"[Debug] 鑾峰彇閭欢璇︽儏澶辫触: {exc}")
+                    log_callback(f"[Debug] 获取邮件详情失败: {exc}")
                 continue
             parts = []
             text_body = detail.get("text") or ""
@@ -2107,11 +2107,11 @@ def duckmail_get_oai_code(
             combined = "\n".join(parts)
             subject = detail.get("subject", "")
             if log_callback:
-                log_callback(f"[Debug] 鏀跺埌閭欢: {subject}")
+                log_callback(f"[Debug] 收到邮件: {subject}")
             code = extract_verification_code(combined, subject)
             if code:
                 if log_callback:
-                    log_callback(f"[*] 浠庨偖浠朵腑鎻愬彇鍒伴獙璇佺爜: {code}")
+                    log_callback(f"[*] 从邮件中提取到验证码: {code}")
                 return code
         sleep_with_cancel(poll_interval, cancel_callback)
     raise Exception(f"在 {timeout}s 内未收到验证码邮件")
@@ -2244,7 +2244,7 @@ def set_birth_date(session, log_callback=None):
         return res.status_code == 200
     except Exception as e:
         if log_callback:
-            log_callback(f"[set_birth_date] 寮傚父: {e}")
+            log_callback(f"[set_birth_date] 异常: {e}")
         return False
 
 
@@ -2266,7 +2266,7 @@ def set_tos_accepted(session, log_callback=None):
         return res.status_code == 200
     except Exception as e:
         if log_callback:
-            log_callback(f"[set_tos_accepted] 寮傚父: {e}")
+            log_callback(f"[set_tos_accepted] 异常: {e}")
         return False
 
 
@@ -2296,7 +2296,7 @@ def update_nsfw_settings(session, log_callback=None):
         return res.status_code == 200
     except Exception as e:
         if log_callback:
-            log_callback(f"[update_nsfw] 寮傚父: {e}")
+            log_callback(f"[update_nsfw] 异常: {e}")
         return False
 
 
@@ -2312,14 +2312,14 @@ def enable_nsfw_for_token(token, cf_clearance="", log_callback=None):
                 }
             )
             if not set_tos_accepted(session, log_callback):
-                return False, "set_tos_accepted 澶辫触!"
+                return False, "set_tos_accepted 失败!"
             if not set_birth_date(session, log_callback):
-                return False, "set_birth_date 澶辫触!"
+                return False, "set_birth_date 失败!"
             if not update_nsfw_settings(session, log_callback):
-                return False, "update_nsfw_settings 澶辫触!"
-            return True, "鎴愬姛寮€鍚疦SFW"
+                return False, "update_nsfw_settings 失败!"
+            return True, "成功开启 NSFW"
     except Exception as e:
-        return False, f"寮傚父: {str(e)}"
+        return False, f"异常: {str(e)}"
 
 
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
@@ -2467,29 +2467,44 @@ return true;
 
 
 def open_signup_page(log_callback=None, cancel_callback=None):
+    """打开注册页。release/restart 后必须重建 browser，禁止对 None page 调 get。"""
+    raise_if_cancelled(cancel_callback)
     browser = _get_browser()
     page = _get_page()
-    raise_if_cancelled(cancel_callback)
-    if browser is None:
-        browser, page = start_browser()
+    if browser is None or page is None:
+        browser, page = start_browser(log_callback=log_callback)
         if log_callback:
             log_callback("[*] 浏览器已启动")
+
+    def _goto_signup(active_page):
+        if active_page is None:
+            raise RuntimeError("page is None before signup navigation")
+        active_page.get(SIGNUP_URL)
+        return active_page
+
     try:
         page = _get_page()
-        page.get(SIGNUP_URL)
+        page = _goto_signup(page)
     except Exception as e:
         if log_callback:
             log_callback(f"[Debug] 打开URL异常: {e}")
         try:
+            # release_tab 后 _get_page() 会返回 None，必须 start_browser 重建
             TabPool.release_tab()
-            page = _get_page()
-            page.get(SIGNUP_URL)
+            browser, page = start_browser(log_callback=log_callback)
+            page = _goto_signup(page)
         except Exception as e2:
             if log_callback:
-                log_callback(f"[Debug] 创建新标签页异常: {e2}")
-            restart_browser()
+                log_callback(f"[Debug] 重建浏览器后打开失败: {e2}")
+            browser, page = restart_browser(log_callback=log_callback)
             page = _get_page()
-            page.get(SIGNUP_URL)
+            if page is None:
+                raise Exception(f"打开注册页失败: {e2}") from e2
+            page = _goto_signup(page)
+
+    page = _get_page()
+    if page is None:
+        raise Exception("打开注册页失败: 页面未就绪")
     page.wait.doc_loaded()
     dump_state(page, "signup-loaded")
     take_screenshot(page, "signup")
@@ -2668,9 +2683,11 @@ def fill_email_and_submit(timeout=15, log_callback=None, cancel_callback=None):
     check_timeout(time.time())
     email, dev_token = get_email_and_token()
     if not email or not dev_token:
-        raise Exception("鑾峰彇閭澶辫触")
+        raise Exception("获取邮箱失败")
+    if page is None:
+        raise Exception("页面未就绪，无法填写邮箱")
     if log_callback:
-        log_callback(f"[*] 宸插垱寤洪偖绠? {email}")
+        log_callback(f"[*] 已创建邮箱: {email}")
     deadline = time.time() + timeout
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
