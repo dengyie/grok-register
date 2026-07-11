@@ -64,6 +64,203 @@ def export_cookies_from_page(page: Any) -> list[dict]:
     return []
 
 
+
+def _config_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in {"1", "true", "yes", "on", "y"}:
+        return True
+    if s in {"0", "false", "no", "off", "n", ""}:
+        return False
+    return default
+
+
+def _resolve_remote_ssh_password(cfg: dict) -> str:
+    """Resolve password for tebi/Bohrium SSH without printing it.
+
+    Priority:
+      1) env CPA_REMOTE_SSHPASS / SSHPASS
+      2) cfg.cpa_remote_ssh_password (not recommended)
+      3) credentials file (default ~/.ssh/bohrium_credentials)
+         format: alias|host|user|port|password
+    """
+    for key in ("CPA_REMOTE_SSHPASS", "SSHPASS"):
+        v = (os.environ.get(key) or "").strip()
+        if v:
+            return v
+    inline = str(cfg.get("cpa_remote_ssh_password") or "").strip()
+    if inline:
+        return inline
+
+    cred_file = (cfg.get("cpa_remote_credentials_file") or "~/.ssh/bohrium_credentials").strip()
+    path = Path(cred_file).expanduser()
+    if not path.is_file():
+        return ""
+    alias = str(cfg.get("cpa_remote_credential_alias") or "tebi").strip().lower()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return ""
+    candidates: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "|" not in line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 5:
+            continue
+        a = parts[0].strip().lower()
+        pwd = parts[4].strip()
+        if not pwd:
+            continue
+        if a == alias or a.startswith(alias) or alias in a:
+            return pwd
+        candidates.append(pwd)
+    # fallback: first credential line if only one useful entry
+    return candidates[0] if len(candidates) == 1 else ""
+
+
+def inject_cpa_auth_remote(
+    local_path: str | Path,
+    *,
+    config: dict | None = None,
+    log_callback: Callable[[str], None] | None = None,
+) -> dict:
+    """SCP a minted xai-*.json into remote CPA auth-dir (default: tebi /personal/cpa/auths).
+
+    Uses ssh/scp (optionally via sshpass). Default host alias is `tebi-tunnel`
+    from ~/.ssh/config so Bohrium gateway rate-limit is avoided.
+    """
+    import shutil as _shutil
+    import subprocess
+
+    cfg = config or {}
+    log = log_callback or (lambda m: print(m, flush=True))
+    if not _config_bool(cfg.get("cpa_remote_inject"), default=False):
+        return {"ok": False, "skipped": True, "reason": "disabled"}
+
+    src = Path(local_path).expanduser()
+    if not src.is_file():
+        msg = f"local auth missing: {src}"
+        log(f"[cpa] remote inject failed: {msg}")
+        return {"ok": False, "error": msg}
+
+    host = (cfg.get("cpa_remote_ssh_host") or "tebi-tunnel").strip()
+    remote_dir = (cfg.get("cpa_remote_auth_dir") or "/personal/cpa/auths").strip().rstrip("/")
+    user = (cfg.get("cpa_remote_ssh_user") or "").strip()
+    target_host = f"{user}@{host}" if user and "@" not in host else host
+    remote_path = f"{target_host}:{remote_dir}/{src.name}"
+    timeout = float(cfg.get("cpa_remote_inject_timeout_sec", 60) or 60)
+
+    password = _resolve_remote_ssh_password(cfg)
+    sshpass = _shutil.which("sshpass")
+    if password and not sshpass:
+        msg = "sshpass not found (brew install sshpass / apt install sshpass)"
+        log(f"[cpa] remote inject failed: {msg}")
+        return {"ok": False, "error": msg}
+
+    env = os.environ.copy()
+    # Never inherit broken Bohrium proxy for local tunnel ssh
+    for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
+        env.pop(k, None)
+    if password:
+        env["SSHPASS"] = password
+
+    ssh_base = [
+        "ssh",
+        "-o",
+        "BatchMode=no",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=20",
+        "-o",
+        "PreferredAuthentications=password",
+        "-o",
+        "PubkeyAuthentication=no",
+        "-o",
+        "NumberOfPasswordPrompts=1",
+    ]
+    scp_base = [
+        "scp",
+        "-o",
+        "BatchMode=no",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=20",
+        "-o",
+        "PreferredAuthentications=password",
+        "-o",
+        "PubkeyAuthentication=no",
+        "-o",
+        "NumberOfPasswordPrompts=1",
+        "-p",
+    ]
+
+    def _wrap(cmd: list[str]) -> list[str]:
+        if password and sshpass:
+            return [sshpass, "-e", *cmd]
+        return cmd
+
+    def _run(cmd: list[str], what: str) -> subprocess.CompletedProcess:
+        log(f"[cpa] remote inject {what}: {' '.join(cmd[:6])}...")
+        return subprocess.run(
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    try:
+        mkdir_cmd = _wrap([*ssh_base, target_host, f"mkdir -p {remote_dir} && chmod 700 {remote_dir}"])
+        r1 = _run(mkdir_cmd, "mkdir")
+        if r1.returncode != 0:
+            err = (r1.stderr or r1.stdout or "").strip()[:300]
+            raise RuntimeError(f"mkdir failed rc={r1.returncode}: {err}")
+
+        scp_cmd = _wrap([*scp_base, str(src), remote_path])
+        r2 = _run(scp_cmd, "scp")
+        if r2.returncode != 0:
+            err = (r2.stderr or r2.stdout or "").strip()[:300]
+            raise RuntimeError(f"scp failed rc={r2.returncode}: {err}")
+
+        # harden remote perms (scp -p keeps local mode; still enforce 600)
+        chmod_cmd = _wrap(
+            [
+                *ssh_base,
+                target_host,
+                f"chmod 600 {remote_dir}/{src.name} && test -s {remote_dir}/{src.name} && ls -la {remote_dir}/{src.name}",
+            ]
+        )
+        r3 = _run(chmod_cmd, "chmod")
+        if r3.returncode != 0:
+            err = (r3.stderr or r3.stdout or "").strip()[:300]
+            raise RuntimeError(f"chmod/verify failed rc={r3.returncode}: {err}")
+
+        detail = (r3.stdout or "").strip().splitlines()[-1] if (r3.stdout or "").strip() else src.name
+        log(f"[cpa] remote inject ok -> {remote_path} ({detail})")
+        return {
+            "ok": True,
+            "remote_path": remote_path,
+            "remote_dir": remote_dir,
+            "host": host,
+            "name": src.name,
+        }
+    except subprocess.TimeoutExpired:
+        msg = f"timeout after {timeout}s"
+        log(f"[cpa] remote inject failed: {msg}")
+        return {"ok": False, "error": msg}
+    except Exception as e:  # noqa: BLE001
+        log(f"[cpa] remote inject failed: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 def export_cpa_xai_for_account(
     email: str,
     password: str,
