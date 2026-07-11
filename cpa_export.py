@@ -17,6 +17,7 @@ from typing import Any, Callable
 _REG_DIR = Path(__file__).resolve().parent
 _DEFAULT_OUT = _REG_DIR / "cpa_auths"
 _DEFAULT_CPA = Path("")  # empty = do not assume a machine-local CPA path
+_REMOTE_DIR_READY: set[str] = set()
 
 
 def _ensure_cpa_xai_on_path(tools_dir: str | Path | None = None) -> Path:
@@ -129,13 +130,17 @@ def inject_cpa_auth_remote(
     config: dict | None = None,
     log_callback: Callable[[str], None] | None = None,
 ) -> dict:
-    """SCP a minted xai-*.json into remote CPA auth-dir (default: tebi /personal/cpa/auths).
+    """Upload minted xai-*.json into remote CPA auth-dir (default tebi).
 
-    Uses ssh/scp (optionally via sshpass). Default host alias is `tebi-tunnel`
-    from ~/.ssh/config so Bohrium gateway rate-limit is avoided.
+    Real-run lesson: tebi-tunnel multi-hop mkdir+scp+chmod ≈ 24s.
+    Prefer ONE ssh hop: `cat > file` from stdin + chmod/stat in the same remote shell.
+    ControlMaster reuses the tunnel for subsequent accounts.
     """
+    import shlex
     import shutil as _shutil
     import subprocess
+
+    global _REMOTE_DIR_READY
 
     cfg = config or {}
     log = log_callback or (lambda m: print(m, flush=True))
@@ -152,7 +157,8 @@ def inject_cpa_auth_remote(
     remote_dir = (cfg.get("cpa_remote_auth_dir") or "/personal/cpa/auths").strip().rstrip("/")
     user = (cfg.get("cpa_remote_ssh_user") or "").strip()
     target_host = f"{user}@{host}" if user and "@" not in host else host
-    remote_path = f"{target_host}:{remote_dir}/{src.name}"
+    remote_file = f"{remote_dir}/{src.name}"
+    remote_path = f"{target_host}:{remote_file}"
     timeout = float(cfg.get("cpa_remote_inject_timeout_sec", 60) or 60)
 
     password = _resolve_remote_ssh_password(cfg)
@@ -163,42 +169,26 @@ def inject_cpa_auth_remote(
         return {"ok": False, "error": msg}
 
     env = os.environ.copy()
-    # Never inherit broken Bohrium proxy for local tunnel ssh
     for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
         env.pop(k, None)
     if password:
         env["SSHPASS"] = password
 
-    ssh_base = [
-        "ssh",
-        "-o",
-        "BatchMode=no",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ConnectTimeout=20",
-        "-o",
-        "PreferredAuthentications=password",
-        "-o",
-        "PubkeyAuthentication=no",
-        "-o",
-        "NumberOfPasswordPrompts=1",
-    ]
-    scp_base = [
-        "scp",
-        "-o",
-        "BatchMode=no",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ConnectTimeout=20",
-        "-o",
-        "PreferredAuthentications=password",
-        "-o",
-        "PubkeyAuthentication=no",
-        "-o",
-        "NumberOfPasswordPrompts=1",
-        "-p",
+    # Short ControlPath (macOS AF_UNIX path limit ~104 bytes)
+    control_path = "/tmp/grcm-%C"
+    ssh_common = [
+        "-o", "BatchMode=no",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=15",
+        "-o", "ConnectionAttempts=1",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=2",
+        "-o", "PreferredAuthentications=password",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "NumberOfPasswordPrompts=1",
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={control_path}",
+        "-o", "ControlPersist=180",
     ]
 
     def _wrap(cmd: list[str]) -> list[str]:
@@ -206,44 +196,60 @@ def inject_cpa_auth_remote(
             return [sshpass, "-e", *cmd]
         return cmd
 
-    def _run(cmd: list[str], what: str) -> subprocess.CompletedProcess:
-        log(f"[cpa] remote inject {what}: {' '.join(cmd[:6])}...")
+    def _decode(data: bytes | None) -> str:
+        return (data or b"").decode("utf-8", "replace")
+
+    def _run(
+        cmd: list[str],
+        what: str,
+        *,
+        input_bytes: bytes | None = None,
+    ) -> subprocess.CompletedProcess:
+        log(f"[cpa] remote inject {what}: {' '.join(cmd[:8])}...")
         return subprocess.run(
             cmd,
             env=env,
+            input=input_bytes,
             capture_output=True,
-            text=True,
             timeout=timeout,
             check=False,
         )
 
     try:
-        mkdir_cmd = _wrap([*ssh_base, target_host, f"mkdir -p {remote_dir} && chmod 700 {remote_dir}"])
-        r1 = _run(mkdir_cmd, "mkdir")
-        if r1.returncode != 0:
-            err = (r1.stderr or r1.stdout or "").strip()[:300]
-            raise RuntimeError(f"mkdir failed rc={r1.returncode}: {err}")
+        try:
+            os.chmod(src, 0o600)
+        except Exception:
+            pass
+        payload = src.read_bytes()
+        local_size = len(payload)
 
-        scp_cmd = _wrap([*scp_base, str(src), remote_path])
-        r2 = _run(scp_cmd, "scp")
-        if r2.returncode != 0:
-            err = (r2.stderr or r2.stdout or "").strip()[:300]
-            raise RuntimeError(f"scp failed rc={r2.returncode}: {err}")
-
-        # harden remote perms (scp -p keeps local mode; still enforce 600)
-        chmod_cmd = _wrap(
-            [
-                *ssh_base,
-                target_host,
-                f"chmod 600 {remote_dir}/{src.name} && test -s {remote_dir}/{src.name} && ls -la {remote_dir}/{src.name}",
-            ]
+        # Single remote shell: mkdir, atomic write via tmp, chmod, print size/mode.
+        # Quote paths for remote sh.
+        rd = shlex.quote(remote_dir)
+        rf = shlex.quote(remote_file)
+        rt = shlex.quote(remote_file + ".tmp")
+        remote_sh = (
+            f"mkdir -p {rd} && chmod 700 {rd} && "
+            f"cat > {rt} && chmod 600 {rt} && mv -f {rt} {rf} && "
+            f"stat -c '%s %a' {rf} 2>/dev/null || stat -f '%z %Lp' {rf}"
         )
-        r3 = _run(chmod_cmd, "chmod")
-        if r3.returncode != 0:
-            err = (r3.stderr or r3.stdout or "").strip()[:300]
-            raise RuntimeError(f"chmod/verify failed rc={r3.returncode}: {err}")
+        cmd = _wrap(["ssh", *ssh_common, target_host, remote_sh])
+        r = _run(cmd, "pipe", input_bytes=payload)
+        if r.returncode != 0:
+            err = (_decode(r.stderr) + _decode(r.stdout)).strip()[:300]
+            raise RuntimeError(f"pipe upload failed rc={r.returncode}: {err}")
 
-        detail = (r3.stdout or "").strip().splitlines()[-1] if (r3.stdout or "").strip() else src.name
+        out = _decode(r.stdout).strip()
+        detail = out.splitlines()[-1] if out else f"size={local_size}"
+        try:
+            remote_size = int(str(detail).split()[0])
+            if remote_size != local_size:
+                raise RuntimeError(f"size mismatch local={local_size} remote={remote_size}")
+        except (ValueError, IndexError):
+            # stat format unexpected — still accept if exit 0
+            pass
+
+        _REMOTE_DIR_READY.add(f"{target_host}:{remote_dir}")
         log(f"[cpa] remote inject ok -> {remote_path} ({detail})")
         return {
             "ok": True,
@@ -251,14 +257,65 @@ def inject_cpa_auth_remote(
             "remote_dir": remote_dir,
             "host": host,
             "name": src.name,
+            "size": local_size,
+            "detail": detail,
+            "method": "ssh-pipe",
         }
     except subprocess.TimeoutExpired:
         msg = f"timeout after {timeout}s"
         log(f"[cpa] remote inject failed: {msg}")
         return {"ok": False, "error": msg}
     except Exception as e:  # noqa: BLE001
-        log(f"[cpa] remote inject failed: {e}")
-        return {"ok": False, "error": str(e)}
+        log(f"[cpa] remote inject pipe failed, fallback scp: {e}")
+        try:
+            mkdir_cmd = _wrap(
+                ["ssh", *ssh_common, target_host, f"mkdir -p {shlex.quote(remote_dir)} && chmod 700 {shlex.quote(remote_dir)}"]
+            )
+            r1 = _run(mkdir_cmd, "mkdir")
+            if r1.returncode != 0:
+                err = (_decode(r1.stderr) + _decode(r1.stdout)).strip()[:300]
+                raise RuntimeError(f"mkdir failed rc={r1.returncode}: {err}")
+            scp_cmd = _wrap(["scp", *ssh_common, "-p", str(src), remote_path])
+            r2 = _run(scp_cmd, "scp")
+            if r2.returncode != 0:
+                err = (_decode(r2.stderr) + _decode(r2.stdout)).strip()[:300]
+                raise RuntimeError(f"scp failed rc={r2.returncode}: {err}")
+            detail = f"size={src.stat().st_size}"
+            vcmd = _wrap(
+                [
+                    "ssh",
+                    *ssh_common,
+                    target_host,
+                    (
+                        f"chmod 600 {shlex.quote(remote_file)} && "
+                        f"stat -c '%s %a' {shlex.quote(remote_file)} 2>/dev/null || "
+                        f"stat -f '%z %Lp' {shlex.quote(remote_file)}"
+                    ),
+                ]
+            )
+            r3 = _run(vcmd, "verify")
+            if r3.returncode == 0:
+                lines = _decode(r3.stdout).strip().splitlines()
+                if lines:
+                    detail = lines[-1]
+            log(f"[cpa] remote inject ok -> {remote_path} ({detail})")
+            return {
+                "ok": True,
+                "remote_path": remote_path,
+                "remote_dir": remote_dir,
+                "host": host,
+                "name": src.name,
+                "size": src.stat().st_size,
+                "detail": detail,
+                "method": "scp-fallback",
+            }
+        except subprocess.TimeoutExpired:
+            msg = f"timeout after {timeout}s"
+            log(f"[cpa] remote inject failed: {msg}")
+            return {"ok": False, "error": msg}
+        except Exception as e2:  # noqa: BLE001
+            log(f"[cpa] remote inject failed: {e2}")
+            return {"ok": False, "error": str(e2)}
 
 
 def export_cpa_xai_for_account(

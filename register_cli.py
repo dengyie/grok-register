@@ -108,6 +108,9 @@ _stats = {
     "mint_success": 0,
     "mint_fail": 0,
     "mint_skip": 0,
+    "remote_inject_ok": 0,
+    "remote_inject_fail": 0,
+    "remote_inject_skip": 0,
 }
 
 
@@ -449,12 +452,30 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
         if result.get("ok"):
             log(worker_id, f"+ CPA auth: {result.get('path')}")
             _inc("mint_success")
+            remote = result.get("remote_inject") or {}
+            if remote.get("ok"):
+                _inc("remote_inject_ok")
+                log(worker_id, f"+ tebi inject: {remote.get('remote_path') or result.get('remote_path')}")
+            elif remote.get("skipped"):
+                _inc("remote_inject_skip")
+            elif result.get("remote_inject_error") or remote:
+                _inc("remote_inject_fail")
+                log(
+                    worker_id,
+                    f"! tebi inject 失败: {result.get('remote_inject_error') or remote.get('error') or remote}",
+                )
+            elif config.get("cpa_remote_inject"):
+                # flag on but no remote_inject payload — wiring bug / old code path
+                _inc("remote_inject_fail")
+                log(worker_id, "! tebi inject 未执行（export 未返回 remote_inject）")
         elif result.get("skipped"):
             _inc("mint_skip")
             log(worker_id, f"[cpa] skipped: {result.get('reason')}")
         else:
             _inc("mint_fail")
             log(worker_id, f"! CPA auth 未成功: {result.get('error') or result}")
+            if result.get("remote_inject_error"):
+                _inc("remote_inject_fail")
         return result
     except Exception as exc:
         _inc("mint_fail")
@@ -735,7 +756,9 @@ def main() -> int:
     print(
         f"=== 完成: 注册成功 {s.get('reg_success', 0)}, 注册失败 {s.get('reg_fail', 0)}, "
         f"CPA成功 {s.get('mint_success', 0)}, CPA失败 {s.get('mint_fail', 0)}, "
-        f"CPA跳过 {s.get('mint_skip', 0)} ===",
+        f"CPA跳过 {s.get('mint_skip', 0)}, "
+        f"tebi注入成功 {s.get('remote_inject_ok', 0)}, tebi注入失败 {s.get('remote_inject_fail', 0)}, "
+        f"tebi注入跳过 {s.get('remote_inject_skip', 0)} ===",
         flush=True,
     )
     return 0 if s.get("reg_success", 0) > 0 else 1

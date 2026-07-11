@@ -59,7 +59,7 @@ DEFAULT_CONFIG = {
     "hotmail_alias_random_length": 8,
     "hotmail_alias_random_max_attempts": 200,
     "hotmail_max_aliases_per_account": 5,
-    "hotmail_poll_interval": 5,
+    "hotmail_poll_interval": 2,
     "hotmail_recent_seconds": 900,
     "hotmail_mail_fetch_modes": "rest,imap",
     "hotmail_imap_hosts": "outlook.office365.com,imap-mail.outlook.com",
@@ -2033,10 +2033,13 @@ def hotmail_get_oai_code(
     account = token_info["account"]
     mailbox_email = account["email"]
     try:
-        configured_interval = float(config.get("hotmail_poll_interval", 5) or 5)
+        configured_interval = float(config.get("hotmail_poll_interval", 2) or 2)
     except Exception:
-        configured_interval = 5.0
-    current_interval = max(1.0, configured_interval or float(poll_interval or 3))
+        configured_interval = 2.0
+    # 实跑：验证码常在 5–8s 到达；首轮立刻查，之后从 poll 起步并小幅退避
+    base_interval = max(0.8, configured_interval or float(poll_interval or 2) or 2.0)
+    current_interval = 0.0  # first loop: immediate REST pull
+    empty_rounds = 0
     deadline = time.time() + timeout
     access_token = None
     next_resend_at = time.time() + 60
@@ -2152,6 +2155,12 @@ def hotmail_get_oai_code(
             access_token = None
             if log_callback:
                 log_callback(f"[Debug] Hotmail/Outlook 拉取验证码失败: {exc}")
+        # 自适应轮询：首轮 0s 立刻查；空轮从 base 起步，上限 5s（邮件通常 <10s 到达）
+        empty_rounds += 1
+        if empty_rounds <= 1:
+            current_interval = base_interval
+        else:
+            current_interval = min(5.0, base_interval + 0.5 * (empty_rounds - 1))
         sleep_with_cancel(current_interval, cancel_callback)
     raise Exception(f"Hotmail/Outlook 在 {timeout}s 内未收到验证码邮件: {email}")
 
@@ -2747,7 +2756,8 @@ def open_signup_page(log_callback=None, cancel_callback=None):
     page.wait.doc_loaded()
     dump_state(page, "signup-loaded")
     take_screenshot(page, "signup")
-    human_sleep(2, cancel_callback)
+    # 实跑页已稳定；2s 可压到 1s（保留 min 避免 fast 模式过冲）
+    human_sleep(1.0, cancel_callback, min_seconds=0.5)
     if log_callback:
         log_callback(f"[*] 当前URL: {page.url}")
     click_email_signup_button(
@@ -3379,7 +3389,8 @@ def fill_profile_and_submit(timeout=None, log_callback=None, cancel_callback=Non
     # 预热 Turnstile：等 iframe 初始化；fast 模式下仍保留下限
     if log_callback:
         log_callback("[*] 预热 Turnstile...")
-    human_sleep(2, cancel_callback, min_seconds=1.0)
+    # 有头路径 iframe 约 1s 就绪；过长预热不提升成功率
+    human_sleep(1.2, cancel_callback, min_seconds=0.8)
     deadline = time.time() + timeout
     form_filled_once = False
     wait_cf_since = None
