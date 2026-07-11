@@ -349,15 +349,11 @@ def register_one(
         sso = reg.wait_for_sso_cookie(
             log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
         )
-        try:
-            from cpa_xai.accounts import normalize_sso_cookie
+        from cpa_xai.accounts import format_account_line, normalize_sso_cookie
 
-            sso = normalize_sso_cookie(sso)
-        except Exception:
-            raw = (sso or "").strip()
-            sso = raw[1:] if raw.startswith("-eyJ") else raw
+        sso = normalize_sso_cookie(sso)
         password = profile.get("password", "") or ""
-        line = f"{email}----{password}----{sso}\n"
+        line = format_account_line(email, password, sso)
         with open(accounts_file, "a", encoding="utf-8") as f:
             f.write(line)
         log(worker_id, f"+ 注册成功: {email}")

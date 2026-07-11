@@ -332,7 +332,7 @@ def export_cpa_xai_for_account(
     cfg = config or {}
     log = log_callback or (lambda m: print(m, flush=True))
 
-    if not cfg.get("cpa_export_enabled", True):
+    if not _config_bool(cfg.get("cpa_export_enabled"), default=True):
         log("[cpa] export disabled")
         return {"ok": False, "skipped": True, "reason": "disabled"}
 
@@ -364,19 +364,33 @@ def export_cpa_xai_for_account(
             or ""
         ).strip()
     # Default headed: headless is frequently Cloudflare-blocked on accounts.x.ai
-    headless = bool(cfg.get("cpa_headless", False))
-    probe = bool(cfg.get("cpa_probe_after_write", True))
-    probe_chat = bool(cfg.get("cpa_probe_chat", False))
+    headless = _config_bool(cfg.get("cpa_headless"), default=False)
+    probe = _config_bool(cfg.get("cpa_probe_after_write"), default=True)
+    probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=False)
     timeout = float(cfg.get("cpa_mint_timeout_sec", 240))
     base_url = cfg.get("cpa_base_url") or "https://cli-chat-proxy.grok.com/v1"
-    force_standalone = bool(cfg.get("cpa_force_standalone", True))
-    cookie_inject = bool(cfg.get("cpa_mint_cookie_inject", True))
-    reuse_browser = bool(cfg.get("cpa_mint_browser_reuse", True))
+    force_standalone = _config_bool(cfg.get("cpa_force_standalone"), default=True)
+    cookie_inject = _config_bool(cfg.get("cpa_mint_cookie_inject"), default=True)
+    reuse_browser = _config_bool(cfg.get("cpa_mint_browser_reuse"), default=True)
     recycle_every = int(cfg.get("cpa_mint_browser_recycle_every", 15) or 0)
     # Protocol (pure HTTP SSO device flow) first; browser only on failure.
-    prefer_protocol = bool(cfg.get("cpa_prefer_protocol", True))
-    protocol_only = bool(cfg.get("cpa_protocol_only", False))
+    prefer_protocol = _config_bool(cfg.get("cpa_prefer_protocol"), default=True)
+    protocol_only = _config_bool(cfg.get("cpa_protocol_only"), default=False)
     protocol_poll_timeout = float(cfg.get("cpa_protocol_poll_timeout_sec", 90) or 90)
+
+    from cpa_xai.accounts import normalize_sso_cookie
+
+    def _resolve_sso_val(raw_sso: str | None, cookie_list: Any) -> str:
+        val = normalize_sso_cookie(raw_sso)
+        if val:
+            return val
+        if isinstance(cookie_list, list):
+            for c in cookie_list:
+                if isinstance(c, dict) and c.get("name") in ("sso", "sso-rw") and c.get("value"):
+                    val = normalize_sso_cookie(str(c.get("value")))
+                    if val:
+                        return val
+        return ""
 
     # cookies: explicit arg > page export > none
     use_cookies = cookies
@@ -384,38 +398,22 @@ def export_cpa_xai_for_account(
         use_cookies = export_cookies_from_page(page)
     if not cookie_inject:
         use_cookies = None
-    else:
+
+    sso_val = _resolve_sso_val(sso, use_cookies)
+    if cookie_inject and sso_val:
         # Always attach SSO cookie clones — register cookies alone often miss accounts.x.ai host
-        from cpa_xai.accounts import normalize_sso_cookie
-
-        sso_val = normalize_sso_cookie(sso)
-        if not sso_val and isinstance(use_cookies, list):
-            for c in use_cookies:
-                if isinstance(c, dict) and c.get("name") in ("sso", "sso-rw") and c.get("value"):
-                    sso_val = normalize_sso_cookie(str(c.get("value")))
-                    break
-        if sso_val:
-            base = list(use_cookies) if isinstance(use_cookies, list) else []
-            for name in ("sso", "sso-rw"):
-                for dom in (".x.ai", "accounts.x.ai", ".accounts.x.ai", "auth.x.ai", "grok.com", ".grok.com"):
-                    base.append({
-                        "name": name,
-                        "value": sso_val,
-                        "domain": dom,
-                        "path": "/",
-                        "secure": True,
-                        "httpOnly": True,
-                    })
-            use_cookies = base
-
-    from cpa_xai.accounts import normalize_sso_cookie
-
-    sso_val = normalize_sso_cookie(sso)
-    if not sso_val and isinstance(use_cookies, list):
-        for c in use_cookies:
-            if isinstance(c, dict) and c.get("name") in ("sso", "sso-rw") and c.get("value"):
-                sso_val = normalize_sso_cookie(str(c.get("value")))
-                break
+        base = list(use_cookies) if isinstance(use_cookies, list) else []
+        for name in ("sso", "sso-rw"):
+            for dom in (".x.ai", "accounts.x.ai", ".accounts.x.ai", "auth.x.ai", "grok.com", ".grok.com"):
+                base.append({
+                    "name": name,
+                    "value": sso_val,
+                    "domain": dom,
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True,
+                })
+        use_cookies = base
 
     out_dir.mkdir(parents=True, exist_ok=True)
     log(
@@ -459,13 +457,13 @@ def export_cpa_xai_for_account(
         not result.get("ok")
         and result.get("path")
         and str(result.get("error") or "").startswith("token ok but grok-4.5 not listed")
-        and not cfg.get("cpa_probe_required", False)
+        and not _config_bool(cfg.get("cpa_probe_required"), default=False)
     ):
         result["ok"] = True
         result["probe_warning"] = result.pop("error", "probe failed")
         log(f"[cpa] probe warning ignored (file already written): {result.get('probe_warning')}")
 
-    if result.get("ok") and result.get("path") and cfg.get("cpa_copy_to_hotload", False) and cpa_dir:
+    if result.get("ok") and result.get("path") and _config_bool(cfg.get("cpa_copy_to_hotload"), default=False) and cpa_dir:
         try:
             cpa_dir.mkdir(parents=True, exist_ok=True)
             src = Path(result["path"])
@@ -515,7 +513,7 @@ def export_cpa_xai_for_account(
         fail_path = out_dir / "cpa_auth_failed.txt"
         with open(fail_path, "a", encoding="utf-8") as f:
             f.write(f"{email}----{result.get('error') or 'unknown'}----{int(time.time())}\n")
-        if cfg.get("cpa_mint_required", False):
+        if _config_bool(cfg.get("cpa_mint_required"), default=False):
             raise RuntimeError(f"CPA mint required but failed: {result.get('error')}")
 
     return result

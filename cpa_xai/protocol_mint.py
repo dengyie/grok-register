@@ -41,18 +41,21 @@ def _noop_log(_: str) -> None:
 
 
 def extract_sso_from_cookies(cookies: Any) -> str:
-    """Pull sso / sso-rw value from a cookie list/dict."""
+    """Pull sso / sso-rw value from a cookie list/dict (normalized)."""
+    from .accounts import normalize_sso_cookie
+
+    raw = ""
     if not cookies:
         return ""
     if isinstance(cookies, str):
-        return cookies.strip()
-    if isinstance(cookies, dict):
+        raw = cookies.strip()
+    elif isinstance(cookies, dict):
         for name in ("sso", "sso-rw"):
             v = cookies.get(name)
             if v:
-                return str(v).strip()
-        return ""
-    if isinstance(cookies, (list, tuple)):
+                raw = str(v).strip()
+                break
+    elif isinstance(cookies, (list, tuple)):
         # Prefer bare "sso" over "sso-rw"
         found_rw = ""
         for c in cookies:
@@ -63,11 +66,13 @@ def extract_sso_from_cookies(cookies: Any) -> str:
             if not value:
                 continue
             if name == "sso":
-                return str(value).strip()
+                raw = str(value).strip()
+                break
             if name == "sso-rw" and not found_rw:
                 found_rw = str(value).strip()
-        return found_rw
-    return ""
+        else:
+            raw = found_rw
+    return normalize_sso_cookie(raw)
 
 
 def _session(proxy: str | None, log: LogFn):
@@ -87,7 +92,9 @@ def _session(proxy: str | None, log: LogFn):
 
 
 def _set_sso_cookie(session: Any, sso_cookie: str) -> None:
-    sso_cookie = (sso_cookie or "").strip()
+    from .accounts import normalize_sso_cookie
+
+    sso_cookie = normalize_sso_cookie(sso_cookie)
     if not sso_cookie:
         raise ProtocolMintError("empty sso cookie")
     for domain in (".x.ai", "accounts.x.ai", "auth.x.ai", ".accounts.x.ai"):
@@ -125,8 +132,10 @@ def mint_with_sso_protocol(
 
     Raises ProtocolMintError on failure.
     """
+    from .accounts import normalize_sso_cookie
+
     log = log or _noop_log
-    sso_cookie = (sso_cookie or "").strip()
+    sso_cookie = normalize_sso_cookie(sso_cookie)
     if not sso_cookie:
         raise ProtocolMintError("missing sso cookie")
 

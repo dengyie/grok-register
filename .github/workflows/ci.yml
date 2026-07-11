@@ -31,6 +31,7 @@ jobs:
         run: |
           uv run python -m py_compile \
             register_cli.py \
+            grok_register_ttk.py \
             cpa_export.py \
             account_backup.py \
             tab_pool.py \

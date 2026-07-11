@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-07-12
+
+### Fixed
+
+- SSO leading-dash normalize now applies at mint core, protocol extract/set, GUI ledger write, and shared `format_account_line`
+- `existing_cpa_emails` / skip-existing match Hotmail plus-aliases against sanitized CPA filenames
+- Official backfill script routes through `cpa_export` (remote inject + hooks); `--local-only` / `--no-remote` opt out
+- Config booleans in `cpa_export` use `_config_bool` so string `"false"` is not truthy
+- CI syntax-checks `grok_register_ttk.py`
+
+### Added
+
+- `format_account_line`, `email_match_keys`, `email_in_existing` helpers
+- Offline tests for cookie extract normalize, plus-alias skip keys, `_config_bool`
+
 ## [1.1.0] - 2026-07-12
 
 ### Added

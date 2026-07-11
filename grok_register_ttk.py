@@ -4649,6 +4649,13 @@ class GrokRegisterGUI:
             logf(f"[*] 资料已填: {profile.get('given_name')} {profile.get('family_name')}")
             logf("[*] 5. 等待 sso cookie")
             sso = wait_for_sso_cookie(log_callback=logf, cancel_callback=self.should_stop)
+            try:
+                from cpa_xai.accounts import normalize_sso_cookie
+
+                sso = normalize_sso_cookie(sso)
+            except Exception:
+                raw = (sso or "").strip()
+                sso = raw[1:] if raw.startswith("-") and "eyJ" in raw[:8] else raw
         except Exception as flow_exc:
             if email:
                 try:
@@ -4661,7 +4668,12 @@ class GrokRegisterGUI:
         with self.stats_lock:
             self.results.append(result_record)
             self.success_count += 1
-            line = f"{email}----{password}----{sso}\n"
+            try:
+                from cpa_xai.accounts import format_account_line
+
+                line = format_account_line(email, password, sso)
+            except Exception:
+                line = f"{email}----{password}----{sso}\n"
             try:
                 with open(self.accounts_output_file, "a", encoding="utf-8") as f:
                     f.write(line)

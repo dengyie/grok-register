@@ -5,7 +5,10 @@ Produce CLIProxyAPI-compatible ``xai-<email>.json`` credentials.
 
 from .accounts import (
     AccountLine,
+    email_in_existing,
+    email_match_keys,
     existing_cpa_emails,
+    format_account_line,
     normalize_sso_cookie,
     parse_accounts_file,
 )
@@ -45,9 +48,12 @@ __all__ = [
     "ProtocolMintError",
     "build_cpa_xai_auth",
     "credential_file_name",
+    "email_in_existing",
+    "email_match_keys",
     "existing_cpa_emails",
     "expired_from_access_token",
     "extract_sso_from_cookies",
+    "format_account_line",
     "mint_and_export",
     "mint_with_sso_protocol",
     "normalize_sso_cookie",

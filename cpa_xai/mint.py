@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+from .accounts import normalize_sso_cookie
 from .browser_confirm import mint_with_browser
 from .probe import probe_mini_response, probe_models
 from .protocol_mint import ProtocolMintError, extract_sso_from_cookies, mint_with_sso_protocol
@@ -65,7 +66,8 @@ def mint_and_export(
     set_runtime_proxy(resolved or None)
     log(f"mint start: {email} proxy={proxy_log_label(resolved) or '(none)'}")
 
-    sso_val = (sso or "").strip() or extract_sso_from_cookies(cookies)
+    # Normalize at mint core so every caller (export, backfill, GUI) is safe.
+    sso_val = normalize_sso_cookie(sso) or extract_sso_from_cookies(cookies)
     tokens: dict[str, Any] | None = None
     protocol_err: str | None = None
 
