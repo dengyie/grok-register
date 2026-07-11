@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+dist/
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# secrets / local runtime
+config.json
+config.local.json
+config.json.bak*
+.env
+accounts_*.txt
+emails_used.txt
+emails_error.txt
+mail_credentials.txt
+cpa_auths/*
+!cpa_auths/.gitkeep
+cookies/
+screenshots/
+*.log
+*.bak

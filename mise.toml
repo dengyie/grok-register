@@ -1,0 +1,45 @@
+# mise 配置 — grok_reg-protocol_cpa
+# Hotmail 四段凭证 + 协议优先 OIDC/CPA（失败回退浏览器）
+# 工具链：mise 管 Python 版本 + venv，uv 管包
+
+[tools]
+python = "3.13"
+
+[env]
+# 自动创建并使用 .venv，mise activate 时生效
+_.python.venv = { path = ".venv", create = true }
+# 项目根（config.json / turnstilePatch / cpa_xai 都在此目录）
+PROJECT_ROOT = "{{config_root}}"
+
+# ─── 依赖安装 ───
+[tasks.deps]
+run = "uv sync"
+description = "用 uv 同步依赖（按 uv.lock 精确版本）"
+
+# ─── 语法检查 ───
+[tasks.check]
+run = "python -m py_compile grok_register_ttk.py register_cli.py cf_mail_debug.py"
+description = "全模块语法检查"
+
+# ─── 注册运行 ───
+# 用法:
+#   mise run register                  # 默认 1 个账号
+#   mise run register -- --count 10    # 透传 --count 给 register_cli.py
+[tasks.register]
+description = "跑账号注册（默认 1 个；多个用 mise run register -- --count 10）"
+run = "uv run python -u register_cli.py"
+
+[tasks.batch10]
+description = "批量跑 10 个账号"
+run = "uv run python -u register_cli.py --count 10"
+
+# ─── GUI（需要桌面会话，原版主入口）───
+[tasks.gui]
+run = "uv run python grok_register_ttk.py"
+description = "启动原版 GUI（需桌面 X/Wayland 会话）"
+
+
+# ─── 邮箱调试 ───
+[tasks.mail-debug]
+run = "uv run python cf_mail_debug.py"
+description = "邮箱链路调试脚本"
