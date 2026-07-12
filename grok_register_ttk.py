@@ -24,6 +24,8 @@ from DrissionPage import Chromium, ChromiumOptions
 from DrissionPage.errors import PageDisconnectedError
 from curl_cffi import requests
 
+from proxy_bridge import resolve_browser_proxy
+
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
@@ -66,6 +68,12 @@ DEFAULT_CONFIG = {
     "hotmail_imap_last_n": 30,
     "hotmail_require_recipient_match": True,
     "hotmail_manual_code": False,
+    # browser recycle: soft=clear_session; hard=always quit; hybrid=soft then periodic hard
+    "browser_recycle_mode": "soft",
+    "browser_recycle_every": 25,
+    # per-account soft retry when final page / SSO path is stuck (does not override fatal)
+    "account_slot_retry": 3,
+    "final_page_no_submit_timeout": 45,
 }
 
 config = DEFAULT_CONFIG.copy()
@@ -82,6 +90,10 @@ _hotmail_reserved_aliases = set()
 _hotmail_token_map = {}
 _hotmail_refresh_locks = {}
 _hotmail_refresh_locks_lock = threading.Lock()
+# Per-thread Chromium auth-proxy bridge (user:pass upstream)
+_browser_proxy_bridge_local = threading.local()
+_browser_proxy_bridge_all: list = []
+_browser_proxy_bridge_lock = threading.Lock()
 
 
 
@@ -140,6 +152,8 @@ PERF_FLAGS = {
     "async_side_effects": True,  # grok2api / cookie snapshot in background
     "browser_reuse": True,   # clear_session instead of quit between accounts
     "browser_recycle_every": 25,  # full quit+recreate after N successful reuses
+    # soft | hybrid | hard — hybrid = soft until recycle_every then hard
+    "browser_recycle_mode": "soft",
 }
 
 _side_effect_pool = None
@@ -278,6 +292,12 @@ class RegistrationCancelled(Exception):
     pass
 
 
+class AccountRetryNeeded(Exception):
+    """Soft stuck-state: retry the same account slot without consuming fatal stop."""
+
+    pass
+
+
 def load_config():
     load_env()
     global config
@@ -356,6 +376,77 @@ def get_proxies():
     if proxy:
         return {"http": proxy, "https": proxy}
     return {}
+
+
+def get_configured_proxy():
+    return str(config.get("proxy", "") or "").strip()
+
+
+def _thread_proxy_bridge():
+    return getattr(_browser_proxy_bridge_local, "bridge", None)
+
+
+def _set_thread_proxy_bridge(bridge) -> None:
+    old = getattr(_browser_proxy_bridge_local, "bridge", None)
+    if old is not None and old is not bridge:
+        try:
+            old.stop()
+        except Exception:
+            pass
+        with _browser_proxy_bridge_lock:
+            try:
+                _browser_proxy_bridge_all[:] = [b for b in _browser_proxy_bridge_all if b is not old]
+            except Exception:
+                pass
+    _browser_proxy_bridge_local.bridge = bridge
+    if bridge is not None:
+        with _browser_proxy_bridge_lock:
+            if bridge not in _browser_proxy_bridge_all:
+                _browser_proxy_bridge_all.append(bridge)
+
+
+def stop_browser_proxy_bridge() -> None:
+    """Stop the current-thread auth proxy bridge (if any)."""
+    _set_thread_proxy_bridge(None)
+
+
+def stop_all_browser_proxy_bridges() -> None:
+    """Stop every known bridge (process shutdown)."""
+    with _browser_proxy_bridge_lock:
+        bridges = list(_browser_proxy_bridge_all)
+        _browser_proxy_bridge_all.clear()
+    for b in bridges:
+        try:
+            b.stop()
+        except Exception:
+            pass
+    try:
+        _browser_proxy_bridge_local.bridge = None
+    except Exception:
+        pass
+
+
+def prepare_browser_proxy(use_proxy: bool = True, log_callback=None):
+    """Resolve config proxy for Chromium; start local auth bridge when needed.
+
+    Returns (browser_proxy_url, bridge_or_None).
+    """
+    if not use_proxy:
+        return "", None
+    proxy = get_configured_proxy()
+    if not proxy:
+        return "", None
+    try:
+        browser_proxy, bridge = resolve_browser_proxy(proxy)
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[!] 代理桥启动失败，浏览器将不走代理: {exc}")
+        return "", None
+    if bridge is not None and log_callback:
+        log_callback(f"[*] 已为 Chromium 启动本地认证代理桥: {browser_proxy}")
+    elif browser_proxy and log_callback:
+        log_callback(f"[*] Chromium 代理: {browser_proxy}")
+    return browser_proxy, bridge
 
 
 def get_duckmail_api_key():
@@ -621,7 +712,8 @@ CHROMIUM_SLIM_FLAGS = [
 ]
 
 
-def create_browser_options():
+def create_browser_options(browser_proxy: str | None = None):
+    """Build ChromiumOptions. browser_proxy is the --proxy-server value (already de-authed or local bridge)."""
     options = ChromiumOptions()
     options.auto_port()
     options.set_timeouts(base=1)
@@ -654,20 +746,28 @@ def create_browser_options():
             options.add_extension(EXTENSION_PATH)
         except Exception:
             pass
-    # Apply config.json "proxy" to Chromium. Without this, only HTTP helpers
-    # used get_proxies(); the browser itself fell through to system/env proxy.
-    proxy = (config.get("proxy") or "").strip()
-    if proxy:
-        try:
-            from urllib.parse import urlparse
+    # Prefer explicit browser_proxy (local auth bridge or stripped URL).
+    # start_browser pins the URL on thread-local for the TabPool factory.
+    if browser_proxy is not None:
+        proxy_arg = str(browser_proxy or "").strip()
+    else:
+        proxy_arg = str(getattr(_browser_proxy_bridge_local, "proxy_url", "") or "").strip()
+    if not proxy_arg:
+        # Last-resort no-auth only (auth proxies need prepare_browser_proxy / bridge).
+        raw = get_configured_proxy()
+        if raw:
+            try:
+                from urllib.parse import urlparse
 
-            u = urlparse(proxy if "://" in proxy else f"http://{proxy}")
-            host = u.hostname or ""
-            if host:
-                port = u.port or (443 if (u.scheme or "http") == "https" else 80)
-                scheme = u.scheme or "http"
-                # Chromium --proxy-server cannot embed user:pass
-                options.set_argument(f"--proxy-server={scheme}://{host}:{port}")
+                u = urlparse(raw if "://" in raw else f"http://{raw}")
+                if u.hostname and not u.username and not u.password:
+                    port = u.port or (443 if (u.scheme or "http") == "https" else 80)
+                    proxy_arg = f"{u.scheme or 'http'}://{u.hostname}:{port}"
+            except Exception:
+                proxy_arg = ""
+    if proxy_arg:
+        try:
+            options.set_argument(f"--proxy-server={proxy_arg}")
         except Exception as e:
             print(f"  [proxy] set browser proxy failed: {e}")
     return options
@@ -2595,17 +2695,33 @@ def _set_page(value):
     pass  # TabPool 管理 tab，外部 setter 为 no-op
 
 
-def start_browser(log_callback=None):
+def start_browser(log_callback=None, use_proxy: bool = True):
     last_exc = None
     for attempt in range(1, 5):
+        bridge = None
         try:
-            TabPool.init(create_browser_options, log_callback=log_callback)
+            browser_proxy, bridge = prepare_browser_proxy(use_proxy=use_proxy, log_callback=log_callback)
+            # pin proxy URL for TabPool options factory (callable reuses this URL)
+            _browser_proxy_bridge_local.proxy_url = browser_proxy or ""
+            _set_thread_proxy_bridge(bridge)
+            bridge = None  # ownership transferred to thread-local
+
+            def _factory():
+                return create_browser_options(browser_proxy=_browser_proxy_bridge_local.proxy_url or None)
+
+            TabPool.init(_factory, log_callback=log_callback)
             page = TabPool.get_tab()
             if log_callback and attempt > 1:
                 log_callback(f"[*] 浏览器第 {attempt} 次启动成功")
             return TabPool.get_browser(), page
         except Exception as exc:
             last_exc = exc
+            if bridge is not None:
+                try:
+                    bridge.stop()
+                except Exception:
+                    pass
+            stop_browser_proxy_bridge()
             if log_callback:
                 log_callback(f"[Debug] 浏览器启动失败(第{attempt}/4次): {exc}")
             # 每线程独立浏览器，shutdown 只影响当前线程
@@ -2620,34 +2736,78 @@ def start_browser(log_callback=None):
 def stop_browser():
     """Quit current-thread Chromium (full process exit + del_data)."""
     TabPool.release_tab()
+    stop_browser_proxy_bridge()
+    try:
+        _browser_proxy_bridge_local.proxy_url = ""
+    except Exception:
+        pass
+
+
+def _resolved_recycle_mode() -> str:
+    mode = str(
+        PERF_FLAGS.get("browser_recycle_mode")
+        or config.get("browser_recycle_mode")
+        or "soft"
+    ).strip().lower()
+    if mode not in ("soft", "hybrid", "hard"):
+        return "soft"
+    return mode
 
 
 def prepare_browser_for_next_account(log_callback=None, force_recycle: bool = False):
-    """Between accounts: clear session (reuse) or full recycle.
+    """Between accounts: soft clear_session, hybrid periodic hard, or always hard.
+
+    Modes (PERF_FLAGS.browser_recycle_mode / config):
+      soft   — clear_session while reuse allowed; hard only when reuse fails/force
+      hybrid — soft until browser_recycle_every, then full quit+recreate
+      hard   — full quit+recreate every account
 
     Returns (browser, page).
     """
-    reuse = bool(PERF_FLAGS.get("browser_reuse", True)) and not force_recycle
-    every = int(PERF_FLAGS.get("browser_recycle_every", 25) or 25)
+    mode = _resolved_recycle_mode()
+    reuse_flag = bool(PERF_FLAGS.get("browser_reuse", True)) and not force_recycle and mode != "hard"
+    every_raw = PERF_FLAGS.get("browser_recycle_every")
+    if every_raw is None:
+        every_raw = config.get("browser_recycle_every", 25)
+    try:
+        every = int(every_raw if every_raw is not None else 25)
+    except Exception:
+        every = 25
     served = TabPool.served_count()
-    if reuse and TabPool.get_browser() is not None and (every <= 0 or served < every):
+    # hybrid: force hard recycle when served reaches every (every<=0 → never by count)
+    if mode == "hybrid" and every > 0 and served >= every:
+        force_recycle = True
+        reuse_flag = False
+    can_soft = (
+        reuse_flag
+        and TabPool.get_browser() is not None
+        and not force_recycle
+        and (
+            mode == "soft"
+            or mode == "hybrid"  # hybrid only reaches here when served < every
+        )
+    )
+    if can_soft:
         if TabPool.clear_session(log_callback=log_callback):
             TabPool.mark_served()
             return TabPool.get_browser(), _get_page()
     # full recycle
     if log_callback:
-        log_callback(f"[*] 浏览器完整回收（reuse={reuse}, served={served}, every={every}）")
-    TabPool.release_tab()
+        log_callback(
+            f"[*] 浏览器完整回收（mode={mode}, reuse={reuse_flag}, served={served}, every={every}）"
+        )
+    stop_browser()
     return start_browser(log_callback=log_callback)
 
 
 def shutdown_browser():
     """Quit all tracked Chromium instances."""
     TabPool.shutdown()
+    stop_all_browser_proxy_bridges()
 
 
 def restart_browser(log_callback=None):
-    TabPool.release_tab()
+    stop_browser()
     return start_browser(log_callback=log_callback)
 
 
@@ -3804,6 +3964,15 @@ def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
     last_seen_names = set()
     last_submit_retry = 0.0
     last_cf_retry_at = 0.0
+    final_no_submit_state = ""
+    final_no_submit_since = None
+    try:
+        final_no_submit_timeout = float(
+            (config.get("final_page_no_submit_timeout") if isinstance(config, dict) else None) or 45
+        )
+    except Exception:
+        final_no_submit_timeout = 45.0
+    final_no_submit_timeout = max(15.0, final_no_submit_timeout)
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -3827,7 +3996,8 @@ function isVisible(node) {
 }
 const titleHit = !!Array.from(document.querySelectorAll('h1,h2,div,span')).find((el) => {
     const t = (el.textContent || '').replace(/\s+/g, '');
-    return t.includes('完成注册');
+    const lower = t.toLowerCase();
+    return t.includes('完成注册') || lower.includes('completeyoursignup') || lower.includes('completesignup');
 });
 if (!titleHit) return 'not-final-page';
 
@@ -3840,22 +4010,48 @@ if (cfPresent) {
     if (!solved) return 'final-page-wait-cf:' + token.length;
 }
 
-const buttons = Array.from(document.querySelectorAll('button[type="submit"], button')).filter((node) => {
+function buttonText(node) {
+    return [
+        node.innerText,
+        node.textContent,
+        node.getAttribute('value'),
+        node.getAttribute('aria-label'),
+        node.getAttribute('title'),
+    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]')).filter((node) => {
     return isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
 });
 const submitBtn = buttons.find((node) => {
-    const t = (node.innerText || node.textContent || '').replace(/\s+/g, '').toLowerCase();
-    return t.includes('完成注册') || t.includes('创建账户') || t.includes('sign up') || t.includes('createaccount');
+    const t = buttonText(node).replace(/\s+/g, '').toLowerCase();
+    return t.includes('完成注册') || t.includes('创建账户') || t.includes('signup') || t.includes('createaccount') || t.includes('sign up');
 });
-if (!submitBtn) return 'final-page-no-submit';
+if (!submitBtn) {
+    const visibleTexts = buttons.map(buttonText).filter(Boolean).slice(0, 8).join(' | ');
+    return 'final-page-no-submit:' + visibleTexts;
+}
 submitBtn.focus();
 submitBtn.click();
 return 'final-page-clicked-submit';
                     """
                 )
                 last_submit_retry = now
-                if log_callback and retried in ("final-page-no-submit", "final-page-clicked-submit"):
+                if log_callback and (
+                    retried == "final-page-clicked-submit"
+                    or (isinstance(retried, str) and retried.startswith("final-page-no-submit"))
+                ):
                     log_callback(f"[Debug] 最终页状态: {retried}")
+                if isinstance(retried, str) and retried.startswith("final-page-no-submit"):
+                    if retried != final_no_submit_state:
+                        final_no_submit_state = retried
+                        final_no_submit_since = now
+                    elif final_no_submit_since and now - final_no_submit_since >= final_no_submit_timeout:
+                        raise AccountRetryNeeded(
+                            f"最终注册页状态 {int(final_no_submit_timeout)}s 未变化且未找到提交按钮，重试当前账号: {retried}"
+                        )
+                else:
+                    final_no_submit_state = ""
+                    final_no_submit_since = None
                 if log_callback and isinstance(retried, str) and retried.startswith("final-page-wait-cf"):
                     token_len = retried.split(":", 1)[1] if ":" in retried else "0"
                     log_callback(f"[Debug] 最终页状态: final-page-wait-cf, token长度={token_len}")
@@ -3904,6 +4100,8 @@ return String(cfInput.value || '').trim().length;
                     return value
         except PageDisconnectedError:
             refresh_active_page()
+        except AccountRetryNeeded:
+            raise
         except Exception:
             pass
 

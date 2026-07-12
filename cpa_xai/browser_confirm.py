@@ -233,20 +233,54 @@ def create_standalone_page(
 
     # explicit / runtime config first; env only as fallback
     proxy = resolve_proxy(proxy)
-    chrome_proxy = proxy_for_chromium(proxy)
+    chrome_proxy = ""
+    bridge = None
+    # Prefer LocalAuthProxyBridge when upstream has user:pass (Chromium cannot embed auth).
+    try:
+        from proxy_bridge import proxy_has_auth, resolve_browser_proxy  # type: ignore
+
+        if proxy and proxy_has_auth(proxy):
+            chrome_proxy, bridge = resolve_browser_proxy(proxy)
+            if bridge is not None:
+                log(f"browser auth-proxy bridge={chrome_proxy} upstream={proxy_log_label(proxy)}")
+    except Exception as e:  # noqa: BLE001
+        log(f"proxy bridge unavailable: {e}")
+        bridge = None
+        chrome_proxy = ""
+    if not chrome_proxy:
+        chrome_proxy = proxy_for_chromium(proxy)
+        if chrome_proxy:
+            log(f"browser proxy={proxy_log_label(proxy)} (chromium {chrome_proxy})")
+        else:
+            log("browser proxy=(none)")
     if chrome_proxy:
         opts.set_argument(f"--proxy-server={chrome_proxy}")
-        log(f"browser proxy={proxy_log_label(proxy)} (chromium {chrome_proxy})")
-    else:
-        log("browser proxy=(none)")
 
     browser = Chromium(opts)
     page = browser.latest_tab
+    # stash bridge on browser for close_standalone cleanup
+    try:
+        setattr(browser, "_auth_proxy_bridge", bridge)
+    except Exception:
+        pass
     log("standalone chromium started")
     return browser, page
 
 
 def close_standalone(browser: Any) -> None:
+    try:
+        bridge = getattr(browser, "_auth_proxy_bridge", None)
+        if bridge is not None:
+            try:
+                bridge.stop()
+            except Exception:
+                pass
+            try:
+                setattr(browser, "_auth_proxy_bridge", None)
+            except Exception:
+                pass
+    except Exception:
+        pass
     try:
         browser.quit()
     except Exception:

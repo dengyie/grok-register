@@ -33,10 +33,25 @@ import grok_register_ttk as reg  # noqa: E402
 _orig_create_browser_options = reg.create_browser_options
 
 
-def _patched_create_browser_options():
-    # Prefer original factory (proxy + CHROMIUM_SLIM_FLAGS + extension)
+def _patched_create_browser_options(browser_proxy=None):
+    # Prefer original factory (proxy bridge + CHROMIUM_SLIM_FLAGS + extension)
     try:
-        opts = _orig_create_browser_options()
+        opts = _orig_create_browser_options(browser_proxy=browser_proxy)
+    except TypeError:
+        # older signature without browser_proxy kw
+        try:
+            opts = _orig_create_browser_options()
+        except Exception:
+            from DrissionPage import ChromiumOptions
+
+            opts = ChromiumOptions()
+            opts.auto_port()
+            opts.set_timeouts(base=1)
+            for flag in getattr(reg, "CHROMIUM_SLIM_FLAGS", ()) or ():
+                try:
+                    opts.set_argument(flag)
+                except Exception:
+                    pass
     except Exception:
         from DrissionPage import ChromiumOptions
 
@@ -46,6 +61,11 @@ def _patched_create_browser_options():
         for flag in getattr(reg, "CHROMIUM_SLIM_FLAGS", ()) or ():
             try:
                 opts.set_argument(flag)
+            except Exception:
+                pass
+        if browser_proxy:
+            try:
+                opts.set_argument(f"--proxy-server={browser_proxy}")
             except Exception:
                 pass
 
@@ -284,10 +304,14 @@ def classify_email_stage_failure(msg: str) -> str:
 
 def _soft_recycle_browser(worker_id: int) -> None:
     """Prefer clear_session; only full restart when reuse is impossible."""
+    mode = _resolved_recycle_mode()
+    if mode == "hard":
+        _hard_recycle_browser(worker_id)
+        return
     try:
         if reg.TabPool.get_browser() is not None:
             if reg.TabPool.clear_session(log_callback=lambda m: log(worker_id, m)):
-                log(worker_id, "[*] 软回收：会话已清理，复用浏览器进程")
+                log(worker_id, f"[*] 软回收：会话已清理，复用浏览器进程 (mode={mode})")
                 return
     except Exception as exc:
         log(worker_id, f"[Debug] clear_session 失败，改完整重启: {exc}")
@@ -305,6 +329,25 @@ def _hard_recycle_browser(worker_id: int) -> None:
         pass
 
 
+def _resolved_recycle_mode() -> str:
+    mode = str(
+        (getattr(reg, "PERF_FLAGS", {}) or {}).get("browser_recycle_mode")
+        or (getattr(reg, "config", {}) or {}).get("browser_recycle_mode")
+        or "soft"
+    ).strip().lower()
+    if mode not in ("soft", "hybrid", "hard"):
+        return "soft"
+    return mode
+
+
+def _account_slot_retry_limit() -> int:
+    try:
+        n = int((getattr(reg, "config", {}) or {}).get("account_slot_retry", 3) or 3)
+    except Exception:
+        n = 3
+    return max(0, min(10, n))
+
+
 def register_one(
     worker_id: int,
     idx: int,
@@ -317,7 +360,15 @@ def register_one(
     """Run one registration. Enqueue CPA mint (default) instead of blocking.
 
     Returns dict(email, sso, profile) or None.
+    Raises FatalRegisterError on unrecoverable resource/config errors.
+    Raises AccountRetryNeeded when final-page/SSO stuck and slot retries remain
+    (caller handles count); after exhaustion returns None.
     """
+    AccountRetryNeeded = getattr(reg, "AccountRetryNeeded", None)
+    if AccountRetryNeeded is None:
+        class AccountRetryNeeded(Exception):  # type: ignore[no-redef]
+            pass
+
     email = ""
     dev_token = ""
     try:
@@ -325,170 +376,203 @@ def register_one(
     except Exception:
         max_mail_retry = 3
     cancel = DummyStop()
+    max_slot_retry = _account_slot_retry_limit()
+    slot_retry = 0
 
-    try:
-        _ensure_browser(worker_id, force_recycle=False)
-    except Exception as exc:
-        log(worker_id, f"! 浏览器启动失败: {exc}")
-        return None
-
-    for mail_try in range(1, max_mail_retry + 1):
+    while True:
         email = ""
         dev_token = ""
         try:
-            log(worker_id, f"--- 第 {idx}/{total} 个账号, 邮箱尝试 {mail_try}/{max_mail_retry} ---")
-            log(worker_id, "1. 打开注册页")
-            reg.open_signup_page(log_callback=lambda m: log(worker_id, m), cancel_callback=cancel)
-            log(worker_id, "2. 创建邮箱并提交")
-            email, dev_token = reg.fill_email_and_submit(
-                log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
-            )
-            log(worker_id, f"邮箱: {email}")
-            log(worker_id, "3. 拉取验证码")
-            code = reg.fill_code_and_submit(
-                email,
-                dev_token,
-                log_callback=lambda m: log(worker_id, m),
-                cancel_callback=cancel,
-            )
-            log(worker_id, f"验证码: {code}")
-            break
+            _ensure_browser(worker_id, force_recycle=False)
         except Exception as exc:
-            msg = str(exc)
-            kind = classify_email_stage_failure(msg)
-            if kind == "fatal":
-                log(worker_id, f"! 致命错误，停止整批（不空转）: {msg}")
-                _inc("reg_fail")
-                request_fatal_stop(msg)
-                raise FatalRegisterError(msg) from exc
-            if kind == "mail_miss" and mail_try < max_mail_retry:
-                log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
-                _mark_email_stage_error(email, msg)
-                # 收码失败通常不是浏览器崩溃；优先软回收避免进程爆炸
-                _soft_recycle_browser(worker_id)
-                reg.sleep_with_cancel(1, cancel)
-                continue
-            if kind == "progress_fail":
+            log(worker_id, f"! 浏览器启动失败: {exc}")
+            return None
+
+        mail_ok = False
+        for mail_try in range(1, max_mail_retry + 1):
+            email = ""
+            dev_token = ""
+            try:
                 log(
                     worker_id,
-                    f"! 验证码阶段推进失败(不换邮箱当 mail-miss): {msg}",
+                    f"--- 第 {idx}/{total} 个账号, 邮箱尝试 {mail_try}/{max_mail_retry}"
+                    f"{f', slot重试 {slot_retry}/{max_slot_retry}' if slot_retry else ''} ---",
                 )
+                log(worker_id, "1. 打开注册页")
+                reg.open_signup_page(log_callback=lambda m: log(worker_id, m), cancel_callback=cancel)
+                log(worker_id, "2. 创建邮箱并提交")
+                email, dev_token = reg.fill_email_and_submit(
+                    log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
+                )
+                log(worker_id, f"邮箱: {email}")
+                log(worker_id, "3. 拉取验证码")
+                code = reg.fill_code_and_submit(
+                    email,
+                    dev_token,
+                    log_callback=lambda m: log(worker_id, m),
+                    cancel_callback=cancel,
+                )
+                log(worker_id, f"验证码: {code}")
+                mail_ok = True
+                break
+            except Exception as exc:
+                if AccountRetryNeeded is not None and isinstance(exc, AccountRetryNeeded):
+                    raise
+                msg = str(exc)
+                kind = classify_email_stage_failure(msg)
+                if kind == "fatal":
+                    log(worker_id, f"! 致命错误，停止整批（不空转）: {msg}")
+                    _inc("reg_fail")
+                    request_fatal_stop(msg)
+                    raise FatalRegisterError(msg) from exc
+                if kind == "mail_miss" and mail_try < max_mail_retry:
+                    log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
+                    _mark_email_stage_error(email, msg)
+                    # 收码失败通常不是浏览器崩溃；优先软回收避免进程爆炸
+                    _soft_recycle_browser(worker_id)
+                    reg.sleep_with_cancel(1, cancel)
+                    continue
+                if kind == "progress_fail":
+                    log(
+                        worker_id,
+                        f"! 验证码阶段推进失败(不换邮箱当 mail-miss): {msg}",
+                    )
+                    _mark_email_stage_error(email, msg)
+                    traceback.print_exc()
+                    _inc("reg_fail")
+                    # 页面可能卡在中间态，强制完整回收
+                    _hard_recycle_browser(worker_id)
+                    return None
+                log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
                 _mark_email_stage_error(email, msg)
                 traceback.print_exc()
                 _inc("reg_fail")
-                # 页面可能卡在中间态，强制完整回收
                 _hard_recycle_browser(worker_id)
                 return None
-            log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
-            _mark_email_stage_error(email, msg)
-            traceback.print_exc()
-            _inc("reg_fail")
-            _hard_recycle_browser(worker_id)
+
+        if not mail_ok:
             return None
 
-    try:
-        log(worker_id, "4. 填写资料")
         try:
-            profile_timeout = int(reg.config.get("profile_timeout", 120) or 120)
-        except Exception:
-            profile_timeout = 120
-        profile = reg.fill_profile_and_submit(
-            timeout=profile_timeout,
-            log_callback=lambda m: log(worker_id, m),
-            cancel_callback=cancel,
-        )
-        log(worker_id, f"资料已填: {profile.get('given_name')} {profile.get('family_name')}")
-        log(worker_id, "5. 等待 sso cookie")
-        sso = reg.wait_for_sso_cookie(
-            log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
-        )
-        from cpa_xai.accounts import format_account_line, normalize_sso_cookie
-
-        sso = normalize_sso_cookie(sso)
-        password = profile.get("password", "") or ""
-        line = format_account_line(email, password, sso)
-        with open(accounts_file, "a", encoding="utf-8") as f:
-            f.write(line)
-        log(worker_id, f"+ 注册成功: {email}")
-        reg.mark_used(email, password)
-        try:
-            import account_backup as _ab
-
-            _ab.backup_after_success(
-                email,
-                root=os.path.dirname(os.path.abspath(__file__)),
+            log(worker_id, "4. 填写资料")
+            try:
+                profile_timeout = int(reg.config.get("profile_timeout", 120) or 120)
+            except Exception:
+                profile_timeout = 120
+            profile = reg.fill_profile_and_submit(
+                timeout=profile_timeout,
                 log_callback=lambda m: log(worker_id, m),
+                cancel_callback=cancel,
             )
-        except Exception as _be:
-            log(worker_id, f"[backup] 注册后备份失败: {_be}")
+            log(worker_id, f"资料已填: {profile.get('given_name')} {profile.get('family_name')}")
+            log(worker_id, "5. 等待 sso cookie")
+            sso = reg.wait_for_sso_cookie(
+                log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
+            )
+            from cpa_xai.accounts import format_account_line, normalize_sso_cookie
 
-        # Capture cookies BEFORE releasing browser (for mint cookie inject)
-        page = reg._get_page()
-        cookies = []
-        try:
-            import cpa_export as _cpa_exp
+            sso = normalize_sso_cookie(sso)
+            password = profile.get("password", "") or ""
+            line = format_account_line(email, password, sso)
+            with open(accounts_file, "a", encoding="utf-8") as f:
+                f.write(line)
+            log(worker_id, f"+ 注册成功: {email}")
+            reg.mark_used(email, password)
+            try:
+                import account_backup as _ab
 
-            cookies = _cpa_exp.export_cookies_from_page(page) if page is not None else []
-        except Exception:
+                _ab.backup_after_success(
+                    email,
+                    root=os.path.dirname(os.path.abspath(__file__)),
+                    log_callback=lambda m: log(worker_id, m),
+                )
+            except Exception as _be:
+                log(worker_id, f"[backup] 注册后备份失败: {_be}")
+
+            # Capture cookies BEFORE releasing browser (for mint cookie inject)
+            page = reg._get_page()
             cookies = []
-        if cookies:
-            log(worker_id, f"[*] 导出 cookie {len(cookies)} 条供 mint 注入")
-
-        if page and reg.PERF_FLAGS.get("cookie_snapshot", True):
             try:
-                reg.save_cookies_snapshot(page, "success", email)
+                import cpa_export as _cpa_exp
+
+                cookies = _cpa_exp.export_cookies_from_page(page) if page is not None else []
             except Exception:
-                pass
-        try:
-            reg.add_token_to_grok2api_pools(
-                sso, email=email, log_callback=lambda m: log(worker_id, m)
-            )
+                cookies = []
+            if cookies:
+                log(worker_id, f"[*] 导出 cookie {len(cookies)} 条供 mint 注入")
+
+            if page and reg.PERF_FLAGS.get("cookie_snapshot", True):
+                try:
+                    reg.save_cookies_snapshot(page, "success", email)
+                except Exception:
+                    pass
+            try:
+                reg.add_token_to_grok2api_pools(
+                    sso, email=email, log_callback=lambda m: log(worker_id, m)
+                )
+            except Exception as exc:
+                log(worker_id, f"[Debug] grok2api: {exc}")
+
+            # Release / recycle register browser BEFORE mint so peak browsers ≈ R+M
+            try:
+                reg.prepare_browser_for_next_account(log_callback=lambda m: log(worker_id, m))
+            except Exception:
+                try:
+                    reg.stop_browser()
+                except Exception:
+                    pass
+
+            job = {
+                "email": email,
+                "password": password,
+                "sso": sso,
+                "profile": profile,
+                "idx": idx,
+                "cookies": cookies,
+            }
+
+            if do_mint_inline:
+                _run_mint_job(f"R{worker_id}", job, getattr(reg, "config", {}) or {})
+            elif mint_queue is not None:
+                # backpressure: wait while queue is saturated
+                qmax = int(getattr(mint_queue, "_reg_qmax", 0) or 0)
+                while qmax > 0 and mint_queue.qsize() >= qmax:
+                    log(worker_id, f"[cpa] mint 队列背压 qsize={mint_queue.qsize()}≥{qmax}，等待...")
+                    time.sleep(1.0)
+                mint_queue.put(job)
+                log(worker_id, f"[cpa] enqueued mint for {email} (queue≈{mint_queue.qsize()})")
+            else:
+                log(worker_id, "[cpa] mint skipped (no queue / inline)")
+
+            _inc("reg_success")
+            return job
         except Exception as exc:
-            log(worker_id, f"[Debug] grok2api: {exc}")
-
-        # Release / recycle register browser BEFORE mint so peak browsers ≈ R+M
-        try:
-            reg.prepare_browser_for_next_account(log_callback=lambda m: log(worker_id, m))
-        except Exception:
+            if AccountRetryNeeded is not None and isinstance(exc, AccountRetryNeeded):
+                slot_retry += 1
+                if slot_retry <= max_slot_retry:
+                    log(
+                        worker_id,
+                        f"[!] 当前账号流程卡住，slot 重试 {slot_retry}/{max_slot_retry}: {exc}",
+                    )
+                    # hard recycle so next attempt is clean; do NOT mark email error yet
+                    _hard_recycle_browser(worker_id)
+                    reg.sleep_with_cancel(1.5, cancel)
+                    continue
+                log(worker_id, f"! slot 重试耗尽 ({max_slot_retry}): {exc}")
+                reg.mark_error(email or "", reason=str(exc)[:120])
+                traceback.print_exc()
+                _inc("reg_fail")
+                _hard_recycle_browser(worker_id)
+                return None
+            log(worker_id, f"! 注册失败: {exc}")
+            reg.mark_error(email or "", reason=str(exc)[:120])
+            traceback.print_exc()
+            _inc("reg_fail")
             try:
-                reg.stop_browser()
+                reg.restart_browser(log_callback=lambda m: log(worker_id, m))
             except Exception:
                 pass
-
-        job = {
-            "email": email,
-            "password": password,
-            "sso": sso,
-            "profile": profile,
-            "idx": idx,
-            "cookies": cookies,
-        }
-
-        if do_mint_inline:
-            _run_mint_job(f"R{worker_id}", job, getattr(reg, "config", {}) or {})
-        elif mint_queue is not None:
-            # backpressure: wait while queue is saturated
-            qmax = int(getattr(mint_queue, "_reg_qmax", 0) or 0)
-            while qmax > 0 and mint_queue.qsize() >= qmax:
-                log(worker_id, f"[cpa] mint 队列背压 qsize={mint_queue.qsize()}≥{qmax}，等待...")
-                time.sleep(1.0)
-            mint_queue.put(job)
-            log(worker_id, f"[cpa] enqueued mint for {email} (queue≈{mint_queue.qsize()})")
-        else:
-            log(worker_id, "[cpa] mint skipped (no queue / inline)")
-
-        _inc("reg_success")
-        return job
-    except Exception as exc:
-        log(worker_id, f"! 注册失败: {exc}")
-        reg.mark_error(email or "", reason=str(exc)[:120])
-        traceback.print_exc()
-        _inc("reg_fail")
-        try:
-            reg.restart_browser(log_callback=lambda m: log(worker_id, m))
-        except Exception:
-            pass
-        return None
+            return None
 
 
 def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> dict:
@@ -680,7 +764,19 @@ def main() -> int:
     parser.add_argument("--fast", action="store_true", default=True, help="快速模式（默认开）：压缩 sleep、关截图")
     parser.add_argument("--no-fast", action="store_true", help="关闭快速模式")
     parser.add_argument("--no-browser-reuse", action="store_true", help="每号强制 quit 浏览器")
-    parser.add_argument("--browser-recycle-every", type=int, default=25, help="复用 N 次后完整回收")
+    parser.add_argument("--browser-recycle-every", type=int, default=-1, help="复用 N 次后完整回收；-1=用 config")
+    parser.add_argument(
+        "--browser-recycle-mode",
+        choices=("soft", "hybrid", "hard"),
+        default="",
+        help="浏览器回收策略 soft|hybrid|hard（默认 config / soft）",
+    )
+    parser.add_argument(
+        "--account-slot-retry",
+        type=int,
+        default=-1,
+        help="最终页/SSO 卡住时同号重试次数；-1=用 config（默认 3）",
+    )
     parser.add_argument("--cookie-snapshot", action="store_true", help="注册成功写 cookie 快照（默认关，fast）")
     parser.add_argument("--inline-mint", action="store_true", help="强制注册线程内联 mint（调试用）")
     parser.add_argument("--headless", action="store_true", help="无头 Chromium 注册（覆盖 config.browser_headless）")
@@ -696,6 +792,29 @@ def main() -> int:
     if getattr(args, "no_headless", False):
         reg.config["browser_headless"] = False
     print(f"[*] browser_headless = {bool(reg.config.get('browser_headless'))}", flush=True)
+
+    # recycle mode / every / slot retry from CLI or config
+    recycle_mode = (args.browser_recycle_mode or str(cfg0.get("browser_recycle_mode") or "soft")).strip().lower()
+    if recycle_mode not in ("soft", "hybrid", "hard"):
+        recycle_mode = "soft"
+    if args.no_browser_reuse:
+        recycle_mode = "hard"
+    if args.browser_recycle_every >= 0:
+        recycle_every = max(1, int(args.browser_recycle_every))
+    else:
+        try:
+            recycle_every = max(1, int(cfg0.get("browser_recycle_every", 25) or 25))
+        except Exception:
+            recycle_every = 25
+    if args.account_slot_retry >= 0:
+        reg.config["account_slot_retry"] = max(0, min(10, int(args.account_slot_retry)))
+    reg.config["browser_recycle_mode"] = recycle_mode
+    reg.config["browser_recycle_every"] = recycle_every
+    print(
+        f"[*] browser_recycle_mode={recycle_mode} every={recycle_every} "
+        f"account_slot_retry={reg.config.get('account_slot_retry', 3)}",
+        flush=True,
+    )
 
     mint_workers = resolve_mint_workers(
         cli_value=args.mint_workers,
@@ -717,8 +836,9 @@ def main() -> int:
         skip_debug_io=fast,
         cookie_snapshot=bool(args.cookie_snapshot) or not fast,
         async_side_effects=True,
-        browser_reuse=not args.no_browser_reuse,
-        browser_recycle_every=max(1, int(args.browser_recycle_every)),
+        browser_reuse=(recycle_mode != "hard"),
+        browser_recycle_every=recycle_every,
+        browser_recycle_mode=recycle_mode,
     )
 
     # 断点续跑
@@ -777,6 +897,7 @@ def main() -> int:
         print(f"[!] 孤儿浏览器清理跳过: {exc}", flush=True)
 
     try:
+        # Factory only; real start_browser pins proxy bridge per worker thread.
         reg.TabPool.init(reg.create_browser_options, log_callback=lambda m: log(0, m))
     except Exception as exc:
         print(f"[!] 浏览器初始化失败: {exc}", flush=True)
