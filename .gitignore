@@ -19,6 +19,10 @@ accounts_*.txt
 emails_used.txt
 emails_error.txt
 mail_credentials.txt
+# keep directory structure; never track hotmail credential batches
+mail_assets/*
+!mail_assets/.gitkeep
+!mail_assets/README.md
 cpa_auths/*
 !cpa_auths/.gitkeep
 cookies/

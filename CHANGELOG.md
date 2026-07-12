@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-07-13
+
+### Added
+
+- One-click CPA chain: `cpa_auth_priority` end-to-end, multi remote auth-dirs (live + inventory)
+- `cpa_remote_live_dir` / `cpa_remote_live_required` — **live inject is the product success gate**
+- Auth proxy bridge for Chromium `user:pass` proxies; browser recycle modes; account slot retry
+- `scripts/remint_expired_and_sync_authdir.py` for inventory remint without starting registration
+- Offline tests for one-click dirs/priority and live-gate partial inject semantics
+
+### Fixed
+
+- `account_slot_retry=0` no longer coerced to 3; no outer worker × slot multiplicative alias burn
+- Mint browser no longer double-applies `--proxy-server`
+- Proxy bridge failure hard-fails (no silent direct)
+- Inventory-only remote inject no longer counts as one-click success when live was targeted
+- CI `py_compile` covers `proxy_bridge.py` and remint script
+
+### Security
+
+- Runtime mail/auth assets remain gitignored (`mail_credentials.txt`, `mail_assets/`)
+
 ## [1.1.3] - 2026-07-12
 
 ### Fixed

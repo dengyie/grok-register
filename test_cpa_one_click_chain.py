@@ -67,6 +67,10 @@ def test_resolve_remote_auth_dirs() -> None:
     assert exp.resolve_remote_auth_dirs(
         {"cpa_remote_inject": True}
     ) == ["/root/.cli-proxy-api", "/personal/cpa/auths"]
+    # custom live dir in defaults
+    assert exp.resolve_remote_auth_dirs(
+        {"cpa_remote_inject": True, "cpa_remote_live_dir": "/custom/live"}
+    ) == ["/custom/live", "/personal/cpa/auths"]
     # inject off + no dirs → empty
     assert exp.resolve_remote_auth_dirs({}) == []
     print("PASS resolve_remote_auth_dirs")
@@ -98,9 +102,11 @@ def test_export_wires_multi_and_priority() -> None:
     src = (ROOT / "cpa_export.py").read_text(encoding="utf-8")
     assert "resolve_remote_auth_dirs" in src
     assert "ensure_auth_file_priority" in src
+    assert "apply_multi_remote_inject" in src
     assert "remote_injects" in src
     assert "priority=auth_priority" in src
     assert "cpa_auth_priority" in src
+    assert "cpa_remote_live_required" in src
     print("PASS export multi+priority wiring")
 
 
@@ -130,7 +136,71 @@ def test_cli_multi_inject_stats() -> None:
     src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
     assert "remote_injects" in src
     assert "tebi inject x" in src or "tebi inject ok x" in src
+    assert "remote_live_ok" in src
     print("PASS cli multi inject stats")
+
+
+def test_live_gate_inventory_only_fails() -> None:
+    """live fail + inventory ok must hard-fail export (one-click product gate)."""
+    exp = _load("cpa_export_live_gate", ROOT / "cpa_export.py")
+    calls: list[str] = []
+
+    def fake_inject(path, config=None, log_callback=None):
+        rdir = str((config or {}).get("cpa_remote_auth_dir") or "")
+        calls.append(rdir)
+        if rdir.rstrip("/") == "/root/.cli-proxy-api":
+            return {"ok": False, "error": "ssh fail live"}
+        return {"ok": True, "remote_path": f"{rdir}/xai-t.json"}
+
+    with tempfile.TemporaryDirectory() as td:
+        auth = Path(td) / "xai-t@e.com.json"
+        auth.write_text(
+            json.dumps({"type": "xai", "email": "t@e.com", "priority": 1000}) + "\n",
+            encoding="utf-8",
+        )
+        result = {"ok": True, "path": str(auth), "email": "t@e.com"}
+        cfg = {
+            "cpa_remote_inject": True,
+            "cpa_remote_auth_dirs": "/root/.cli-proxy-api,/personal/cpa/auths",
+            "cpa_remote_live_required": True,
+            "cpa_remote_inject_required": False,
+        }
+        out = exp.apply_multi_remote_inject(result, cfg, inject_fn=fake_inject)
+        assert out["ok"] is False
+        assert out.get("remote_live_ok") is False
+        assert out.get("remote_inventory_ok") is True
+        assert "live inject failed" in (out.get("remote_inject_error") or "")
+        assert "/root/.cli-proxy-api" in calls
+        assert "/personal/cpa/auths" in calls
+    print("PASS live gate inventory-only fails")
+
+
+def test_live_gate_live_ok_keeps_success() -> None:
+    exp = _load("cpa_export_live_gate_ok", ROOT / "cpa_export.py")
+
+    def fake_inject(path, config=None, log_callback=None):
+        rdir = str((config or {}).get("cpa_remote_auth_dir") or "")
+        return {"ok": True, "remote_path": f"{rdir}/xai-t.json"}
+
+    result = {"ok": True, "path": "/tmp/xai-t.json", "email": "t@e.com"}
+    cfg = {
+        "cpa_remote_inject": True,
+        "cpa_remote_auth_dirs": "/root/.cli-proxy-api,/personal/cpa/auths",
+        "cpa_remote_live_required": True,
+    }
+    out = exp.apply_multi_remote_inject(result, cfg, inject_fn=fake_inject)
+    assert out["ok"] is True
+    assert out.get("remote_live_ok") is True
+    assert out.get("remote_inventory_ok") is True
+    assert str(out.get("remote_path") or "").startswith("/root/.cli-proxy-api/")
+    print("PASS live gate live ok")
+
+
+def test_config_example_live_keys() -> None:
+    raw = (ROOT / "config.example.json").read_text(encoding="utf-8")
+    for key in ("cpa_remote_live_dir", "cpa_remote_live_required"):
+        assert key in raw, f"missing {key}"
+    print("PASS config.example live keys")
 
 
 def main() -> int:
@@ -140,8 +210,11 @@ def main() -> int:
     test_mint_accepts_priority_kw()
     test_export_wires_multi_and_priority()
     test_config_example_one_click_keys()
+    test_config_example_live_keys()
     test_remint_script_present()
     test_cli_multi_inject_stats()
+    test_live_gate_inventory_only_fails()
+    test_live_gate_live_ok_keeps_success()
     print("\nALL PASS (cpa one-click)")
     return 0
 

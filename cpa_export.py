@@ -91,6 +91,21 @@ def _config_priority(cfg: dict | None, default: int = 1000) -> int:
         return default
 
 
+DEFAULT_LIVE_REMOTE_AUTH_DIR = "/root/.cli-proxy-api"
+DEFAULT_INVENTORY_REMOTE_AUTH_DIR = "/personal/cpa/auths"
+
+
+def resolve_live_remote_auth_dir(cfg: dict | None = None) -> str:
+    """Canonical live CPA auth-dir (one-click success gate)."""
+    cfg = cfg or {}
+    raw = str(cfg.get("cpa_remote_live_dir") or DEFAULT_LIVE_REMOTE_AUTH_DIR).strip().rstrip("/")
+    return raw or DEFAULT_LIVE_REMOTE_AUTH_DIR
+
+
+def is_live_remote_auth_dir(path: str | None, cfg: dict | None = None) -> bool:
+    return str(path or "").strip().rstrip("/") == resolve_live_remote_auth_dir(cfg)
+
+
 def resolve_remote_auth_dirs(cfg: dict | None) -> list[str]:
     """Remote CPA auth-dirs to inject into (live first, then inventory).
 
@@ -105,6 +120,7 @@ def resolve_remote_auth_dirs(cfg: dict | None) -> list[str]:
     To inject a single custom dir, set cpa_remote_auth_dirs to that path only.
     """
     cfg = cfg or {}
+    live = resolve_live_remote_auth_dir(cfg)
     raw = cfg.get("cpa_remote_auth_dirs")
     dirs: list[str] = []
     if isinstance(raw, (list, tuple)):
@@ -114,7 +130,7 @@ def resolve_remote_auth_dirs(cfg: dict | None) -> list[str]:
     if not dirs:
         if _config_bool(cfg.get("cpa_remote_inject"), default=False):
             # One-click: always live + inventory unless multi dirs explicitly set.
-            dirs = ["/root/.cli-proxy-api", "/personal/cpa/auths"]
+            dirs = [live, DEFAULT_INVENTORY_REMOTE_AUTH_DIR]
         else:
             single = str(cfg.get("cpa_remote_auth_dir") or "").strip()
             if single:
@@ -129,6 +145,131 @@ def resolve_remote_auth_dirs(cfg: dict | None) -> list[str]:
         seen.add(d)
         out.append(d)
     return out
+
+
+def apply_multi_remote_inject(
+    result: dict,
+    cfg: dict | None = None,
+    *,
+    log_callback: Callable[[str], None] | None = None,
+    inject_fn: Callable[..., dict] | None = None,
+) -> dict:
+    """Inject minted auth into all resolved remote dirs; enforce live success gate.
+
+    Mutates and returns ``result``. Product rule:
+      - when live dir is among targets and ``cpa_remote_live_required`` (default true),
+        live failure hard-fails export even if inventory succeeded.
+      - ``cpa_remote_inject_required`` still means *all* dirs must succeed.
+    """
+    log = log_callback or (lambda _m: None)
+    cfg = cfg or {}
+    if not result.get("ok") or not result.get("path"):
+        return result
+    if not _config_bool(cfg.get("cpa_remote_inject"), default=False):
+        return result
+
+    inject = inject_fn or inject_cpa_auth_remote
+    remote_dirs = resolve_remote_auth_dirs(cfg)
+    remote_results: list[dict] = []
+    any_ok = False
+    errors: list[str] = []
+    for rdir in remote_dirs:
+        inj_cfg = dict(cfg)
+        inj_cfg["cpa_remote_inject"] = True
+        inj_cfg["cpa_remote_auth_dir"] = rdir
+        # prevent recursive multi-expand inside single-dir injector
+        inj_cfg["cpa_remote_auth_dirs"] = [rdir]
+        remote_res = inject(
+            result["path"],
+            config=inj_cfg,
+            log_callback=log,
+        )
+        remote_results.append({"dir": rdir, **remote_res})
+        if remote_res.get("ok"):
+            any_ok = True
+        else:
+            errors.append(
+                f"{rdir}:{remote_res.get('error') or remote_res.get('reason') or 'fail'}"
+            )
+
+    result["remote_injects"] = remote_results
+    live_dir = resolve_live_remote_auth_dir(cfg)
+    live_attempts = [r for r in remote_results if is_live_remote_auth_dir(r.get("dir"), cfg)]
+    inv_attempts = [r for r in remote_results if not is_live_remote_auth_dir(r.get("dir"), cfg)]
+    live_ok = any(bool(r.get("ok")) for r in live_attempts) if live_attempts else None
+    inv_ok = any(bool(r.get("ok")) for r in inv_attempts) if inv_attempts else None
+    all_ok = bool(remote_results) and all(
+        bool(r.get("ok") or r.get("skipped")) for r in remote_results
+    )
+    result["remote_live_dir"] = live_dir
+    result["remote_live_ok"] = live_ok
+    result["remote_inventory_ok"] = inv_ok
+    result["remote_inject_all_ok"] = all_ok
+
+    # Product summary prefers live success; inventory-only is not one-click success.
+    if live_attempts:
+        summary = next((r for r in live_attempts if r.get("ok")), live_attempts[-1])
+    else:
+        summary = next(
+            (r for r in remote_results if r.get("ok")),
+            remote_results[-1] if remote_results else {"ok": False, "error": "no remote dirs"},
+        )
+    result["remote_inject"] = summary
+
+    ok_paths = [r.get("remote_path") for r in remote_results if r.get("ok")]
+    if ok_paths:
+        live_paths = [
+            r.get("remote_path")
+            for r in live_attempts
+            if r.get("ok") and r.get("remote_path")
+        ]
+        result["remote_path"] = live_paths[0] if live_paths else ok_paths[0]
+        result["remote_paths"] = ok_paths
+    if errors:
+        result["remote_inject_partial_errors"] = errors
+        log(f"[cpa] remote inject partial: ok={len(ok_paths)} fail={len(errors)}")
+
+    live_required = _config_bool(cfg.get("cpa_remote_live_required"), default=True)
+    inject_required = _config_bool(cfg.get("cpa_remote_inject_required"), default=False)
+    fail_reasons: list[str] = []
+    if live_attempts and not live_ok:
+        fail_reasons.append(
+            f"live inject failed ({live_dir}): "
+            + "; ".join(
+                f"{r.get('dir')}:{r.get('error') or r.get('reason') or 'fail'}"
+                for r in live_attempts
+                if not r.get("ok")
+            )
+        )
+    if not any_ok:
+        fail_reasons.append("; ".join(errors) if errors else "remote inject failed")
+    if inject_required and not all_ok:
+        fail_reasons.append("cpa_remote_inject_required: not all remote dirs succeeded")
+
+    if fail_reasons:
+        seen_fr: set[str] = set()
+        uniq_fr: list[str] = []
+        for fr in fail_reasons:
+            if fr not in seen_fr:
+                seen_fr.add(fr)
+                uniq_fr.append(fr)
+        result["remote_inject_error"] = "; ".join(uniq_fr)
+        hard_fail = bool(
+            (live_attempts and not live_ok and live_required)
+            or (inject_required and not all_ok)
+            or (not any_ok and inject_required)
+        )
+        if hard_fail:
+            result["ok"] = False
+            result["error"] = (
+                f"remote inject required but failed: {result['remote_inject_error']}"
+            )
+            log(f"[cpa] remote inject hard-fail: {result['remote_inject_error']}")
+        else:
+            log(f"[cpa] remote inject soft-fail: {result['remote_inject_error']}")
+    elif live_attempts and live_ok:
+        log(f"[cpa] remote live inject ok: {result.get('remote_path')}")
+    return result
 
 
 def ensure_auth_file_priority(
@@ -577,45 +718,8 @@ def export_cpa_xai_for_account(
             result["cpa_copy_error"] = str(e)
 
     # Optional: auto inject minted auth into remote CPA live + inventory dirs.
-    if result.get("ok") and result.get("path") and _config_bool(cfg.get("cpa_remote_inject"), default=False):
-        remote_dirs = resolve_remote_auth_dirs(cfg)
-        remote_results: list[dict] = []
-        any_ok = False
-        errors: list[str] = []
-        for rdir in remote_dirs:
-            inj_cfg = dict(cfg)
-            inj_cfg["cpa_remote_inject"] = True
-            inj_cfg["cpa_remote_auth_dir"] = rdir
-            # prevent recursive multi-expand inside single-dir injector
-            inj_cfg["cpa_remote_auth_dirs"] = [rdir]
-            remote_res = inject_cpa_auth_remote(
-                result["path"],
-                config=inj_cfg,
-                log_callback=log,
-            )
-            remote_results.append({"dir": rdir, **remote_res})
-            if remote_res.get("ok"):
-                any_ok = True
-            else:
-                errors.append(
-                    f"{rdir}:{remote_res.get('error') or remote_res.get('reason') or 'fail'}"
-                )
-        result["remote_injects"] = remote_results
-        # backward-compatible single summary (first success, else last)
-        summary = next((r for r in remote_results if r.get("ok")), remote_results[-1] if remote_results else {"ok": False, "error": "no remote dirs"})
-        result["remote_inject"] = summary
-        if any_ok:
-            ok_paths = [r.get("remote_path") for r in remote_results if r.get("ok")]
-            result["remote_path"] = ok_paths[0] if ok_paths else summary.get("remote_path")
-            result["remote_paths"] = ok_paths
-            if errors:
-                result["remote_inject_partial_errors"] = errors
-                log(f"[cpa] remote inject partial: ok={len(ok_paths)} fail={len(errors)}")
-        else:
-            result["remote_inject_error"] = "; ".join(errors) if errors else "remote inject failed"
-            if _config_bool(cfg.get("cpa_remote_inject_required"), default=False):
-                result["ok"] = False
-                result["error"] = f"remote inject required but failed: {result['remote_inject_error']}"
+    # One-click product gate: live dir success is required by default.
+    apply_multi_remote_inject(result, cfg, log_callback=log)
 
     # Project-local backup of accounts + cpa auth (gitignored backups/)
     if result.get("ok") and result.get("path"):

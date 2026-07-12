@@ -139,6 +139,8 @@ _stats = {
     "remote_inject_ok": 0,
     "remote_inject_fail": 0,
     "remote_inject_skip": 0,
+    "remote_live_ok": 0,
+    "remote_live_fail": 0,
 }
 
 
@@ -636,21 +638,33 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
             _inc("mint_success")
             multi = result.get("remote_injects")
             remote = result.get("remote_inject") or {}
+            live_ok = result.get("remote_live_ok")
+            if live_ok is True:
+                _inc("remote_live_ok")
+            elif live_ok is False:
+                _inc("remote_live_fail")
             if isinstance(multi, list) and multi:
                 ok_n = sum(1 for r in multi if r.get("ok"))
                 fail_n = sum(1 for r in multi if not r.get("ok") and not r.get("skipped"))
                 skip_n = sum(1 for r in multi if r.get("skipped"))
-                if ok_n:
+                # Product success = live ok when live was targeted; else any ok.
+                product_ok = live_ok if live_ok is not None else bool(ok_n)
+                if product_ok:
                     _inc("remote_inject_ok")
                     paths = result.get("remote_paths") or [
                         r.get("remote_path") or r.get("dir") for r in multi if r.get("ok")
                     ]
-                    log(worker_id, f"+ tebi inject x{ok_n}: {paths}")
-                if fail_n:
+                    log(
+                        worker_id,
+                        f"+ tebi inject x{ok_n}"
+                        f"{' (live ok)' if live_ok is True else ''}: {paths}",
+                    )
+                if fail_n or live_ok is False:
                     _inc("remote_inject_fail")
                     log(
                         worker_id,
-                        f"! tebi inject 部分/全部失败: "
+                        f"! tebi inject 部分/全部失败"
+                        f"{' (live fail)' if live_ok is False else ''}: "
                         f"{result.get('remote_inject_error') or result.get('remote_inject_partial_errors')}",
                     )
                 if skip_n and not ok_n and not fail_n:
@@ -1053,7 +1067,8 @@ def main() -> int:
         f"CPA成功 {s.get('mint_success', 0)}, CPA失败 {s.get('mint_fail', 0)}, "
         f"CPA跳过 {s.get('mint_skip', 0)}, "
         f"tebi注入成功 {s.get('remote_inject_ok', 0)}, tebi注入失败 {s.get('remote_inject_fail', 0)}, "
-        f"tebi注入跳过 {s.get('remote_inject_skip', 0)} ===",
+        f"tebi注入跳过 {s.get('remote_inject_skip', 0)}, "
+        f"live成功 {s.get('remote_live_ok', 0)}, live失败 {s.get('remote_live_fail', 0)} ===",
         flush=True,
     )
     if _fatal_stop.is_set():

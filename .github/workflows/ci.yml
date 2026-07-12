@@ -35,6 +35,7 @@ jobs:
             cpa_export.py \
             account_backup.py \
             tab_pool.py \
+            proxy_bridge.py \
             optimization_checks.py \
             cf_mail_debug.py \
             cpa_xai/__init__.py \
@@ -47,10 +48,10 @@ jobs:
             cpa_xai/proxyutil.py \
             cpa_xai/schema.py \
             cpa_xai/writer.py \
-            tab_pool.py \
             scripts/backfill_cpa_xai_from_accounts.py \
             scripts/backup_registered_accounts.py \
-            scripts/export_cpa_xai_from_grok_auth.py
+            scripts/export_cpa_xai_from_grok_auth.py \
+            scripts/remint_expired_and_sync_authdir.py
 
       - name: Offline unit tests
         env:
@@ -61,7 +62,7 @@ jobs:
       - name: Secret path guard
         run: |
           set -euo pipefail
-          if git ls-files | grep -E '(^|/)(config\.json|\.env|mail_credentials\.txt|accounts_cli\.txt)$|cpa_auths/xai-|^backups/|^logs/'; then
+          if git ls-files | grep -E '(^|/)(config\.json|\.env|mail_credentials\.txt|accounts_cli\.txt)$|mail_assets/hotmail|cpa_auths/xai-|^backups/|^logs/'; then
             echo "Refusing tracked secret/runtime paths" >&2
             git ls-files | grep -E '(^|/)(config\.json|\.env|mail_credentials\.txt|accounts_cli\.txt)$|cpa_auths/xai-|^backups/|^logs/' >&2
             exit 1
