@@ -14,6 +14,7 @@ Never commit or publish:
 | `config.json` | proxies, remote hosts, feature flags, secrets |
 | `.env` | environment secrets |
 | `mail_credentials.txt` | mailbox password + Microsoft refresh_token |
+| `mail_assets/` | imported Hotmail credential batches |
 | `accounts_cli.txt` / `accounts_*.txt` | Grok password + SSO cookie |
 | `cpa_auths/*.json` | OIDC access_token / refresh_token |
 | `backups/` | full credential snapshots |

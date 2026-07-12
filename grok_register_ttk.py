@@ -288,6 +288,54 @@ def load_env():
         pass
 
 
+# Env → config key overlays (process env / .env win over config.json when set).
+# Never put mailbox passwords or MS refresh tokens in .env — use HOTMAIL_ACCOUNTS_FILE.
+_ENV_CONFIG_OVERLAYS = (
+    ("HOTMAIL_ACCOUNTS_FILE", "hotmail_accounts_file"),
+    ("EMAIL_PROVIDER", "email_provider"),
+    ("CPA_REMOTE_SSH_HOST", "cpa_remote_ssh_host"),
+    ("CPA_REMOTE_SSH_USER", "cpa_remote_ssh_user"),
+    ("CPA_REMOTE_AUTH_DIRS", "cpa_remote_auth_dirs"),
+    ("CPA_REMOTE_AUTH_DIR", "cpa_remote_auth_dir"),
+    ("CPA_REMOTE_LIVE_DIR", "cpa_remote_live_dir"),
+    ("CPA_REMOTE_CREDENTIALS_FILE", "cpa_remote_credentials_file"),
+    ("CPA_REMOTE_CREDENTIAL_ALIAS", "cpa_remote_credential_alias"),
+    ("CPA_AUTH_DIR", "cpa_auth_dir"),
+    ("CPA_PROXY", "cpa_proxy"),
+    ("PROXY", "proxy"),
+    ("GROK2API_REMOTE_BASE", "grok2api_remote_base"),
+)
+
+
+def apply_env_config_overrides(cfg: dict | None = None) -> dict:
+    """Overlay selected env vars onto config dict (non-empty values only)."""
+    out = dict(cfg or {})
+    for env_key, cfg_key in _ENV_CONFIG_OVERLAYS:
+        val = (os.environ.get(env_key) or "").strip()
+        if val:
+            out[cfg_key] = val
+    # booleans / ints when explicitly set
+    for env_key, cfg_key, kind in (
+        ("CPA_REMOTE_INJECT", "cpa_remote_inject", "bool"),
+        ("CPA_REMOTE_LIVE_REQUIRED", "cpa_remote_live_required", "bool"),
+        ("CPA_REMOTE_INJECT_REQUIRED", "cpa_remote_inject_required", "bool"),
+        ("CPA_PROTOCOL_ONLY", "cpa_protocol_only", "bool"),
+        ("CPA_EXPORT_ENABLED", "cpa_export_enabled", "bool"),
+        ("CPA_AUTH_PRIORITY", "cpa_auth_priority", "int"),
+    ):
+        raw = (os.environ.get(env_key) or "").strip()
+        if not raw:
+            continue
+        if kind == "bool":
+            out[cfg_key] = raw.lower() in {"1", "true", "yes", "y", "on"}
+        elif kind == "int":
+            try:
+                out[cfg_key] = int(raw)
+            except ValueError:
+                pass
+    return out
+
+
 class RegistrationCancelled(Exception):
     pass
 
@@ -315,6 +363,9 @@ def load_config():
             config = {**DEFAULT_CONFIG, **loaded}
         except Exception:
             config = DEFAULT_CONFIG.copy()
+    else:
+        config = DEFAULT_CONFIG.copy()
+    config = apply_env_config_overrides(config)
     return config
 
 
@@ -1519,6 +1570,10 @@ def _resolve_project_path(path_value, default_name="mail_credentials.txt"):
 
 
 def get_hotmail_accounts_file():
+    # Env / .env path wins (HOTMAIL_ACCOUNTS_FILE); never embed tokens in env.
+    env_path = (os.environ.get("HOTMAIL_ACCOUNTS_FILE") or "").strip()
+    if env_path:
+        return _resolve_project_path(env_path)
     return _resolve_project_path(config.get("hotmail_accounts_file", "mail_credentials.txt"))
 
 
