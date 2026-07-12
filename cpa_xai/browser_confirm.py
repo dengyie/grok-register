@@ -172,8 +172,10 @@ def create_standalone_page(
             try:
                 from grok_register_ttk import create_browser_options  # type: ignore
 
-                opts = create_browser_options()
-                log("using register create_browser_options (turnstilePatch)")
+                # apply_config_proxy=False: mint sets --proxy-server exactly once below
+                # (cpa_proxy may differ from register config.proxy).
+                opts = create_browser_options(browser_proxy="", apply_config_proxy=False)
+                log("using register create_browser_options (turnstilePatch, no config proxy)")
             except Exception as e:  # noqa: BLE001
                 log(f"register browser options unavailable: {e}")
                 opts = None

@@ -33,25 +33,32 @@ import grok_register_ttk as reg  # noqa: E402
 _orig_create_browser_options = reg.create_browser_options
 
 
-def _patched_create_browser_options(browser_proxy=None):
-    # Prefer original factory (proxy bridge + CHROMIUM_SLIM_FLAGS + extension)
+def _patched_create_browser_options(browser_proxy=None, *, apply_config_proxy=True):
+    # Prefer original factory (proxy bridge + CHROMIUM_SLIM_FLAGS + extension).
+    # Must forward apply_config_proxy so mint path can set proxy exactly once.
     try:
-        opts = _orig_create_browser_options(browser_proxy=browser_proxy)
+        opts = _orig_create_browser_options(
+            browser_proxy=browser_proxy,
+            apply_config_proxy=apply_config_proxy,
+        )
     except TypeError:
-        # older signature without browser_proxy kw
+        # older signature without browser_proxy / apply_config_proxy
         try:
-            opts = _orig_create_browser_options()
-        except Exception:
-            from DrissionPage import ChromiumOptions
+            opts = _orig_create_browser_options(browser_proxy=browser_proxy)
+        except TypeError:
+            try:
+                opts = _orig_create_browser_options()
+            except Exception:
+                from DrissionPage import ChromiumOptions
 
-            opts = ChromiumOptions()
-            opts.auto_port()
-            opts.set_timeouts(base=1)
-            for flag in getattr(reg, "CHROMIUM_SLIM_FLAGS", ()) or ():
-                try:
-                    opts.set_argument(flag)
-                except Exception:
-                    pass
+                opts = ChromiumOptions()
+                opts.auto_port()
+                opts.set_timeouts(base=1)
+                for flag in getattr(reg, "CHROMIUM_SLIM_FLAGS", ()) or ():
+                    try:
+                        opts.set_argument(flag)
+                    except Exception:
+                        pass
     except Exception:
         from DrissionPage import ChromiumOptions
 
@@ -330,6 +337,13 @@ def _hard_recycle_browser(worker_id: int) -> None:
 
 
 def _resolved_recycle_mode() -> str:
+    """Delegate to grok_register_ttk so CLI and library share one source of truth."""
+    fn = getattr(reg, "_resolved_recycle_mode", None)
+    if callable(fn):
+        try:
+            return str(fn())
+        except Exception:
+            pass
     mode = str(
         (getattr(reg, "PERF_FLAGS", {}) or {}).get("browser_recycle_mode")
         or (getattr(reg, "config", {}) or {}).get("browser_recycle_mode")
@@ -340,11 +354,16 @@ def _resolved_recycle_mode() -> str:
     return mode
 
 
-def _account_slot_retry_limit() -> int:
+def _account_slot_retry_limit(config: dict | None = None) -> int:
+    """Parse account_slot_retry; 0 is valid (disable). Never treat 0 as missing."""
+    cfg = config if isinstance(config, dict) else (getattr(reg, "config", {}) or {})
+    raw = cfg.get("account_slot_retry", 3)
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return 3
     try:
-        n = int((getattr(reg, "config", {}) or {}).get("account_slot_retry", 3) or 3)
+        n = int(raw)
     except Exception:
-        n = 3
+        return 3
     return max(0, min(10, n))
 
 
@@ -359,15 +378,15 @@ def register_one(
 ) -> dict | None:
     """Run one registration. Enqueue CPA mint (default) instead of blocking.
 
-    Returns dict(email, sso, profile) or None.
+    Returns:
+      success dict, or failure dict with ok=False and optional flags:
+        - slot_exhausted: True when AccountRetryNeeded budget used up
+      None only for browser-start hard fail (legacy).
+
     Raises FatalRegisterError on unrecoverable resource/config errors.
-    Raises AccountRetryNeeded when final-page/SSO stuck and slot retries remain
-    (caller handles count); after exhaustion returns None.
+    AccountRetryNeeded is handled internally (slot retry); not re-raised to worker.
     """
-    AccountRetryNeeded = getattr(reg, "AccountRetryNeeded", None)
-    if AccountRetryNeeded is None:
-        class AccountRetryNeeded(Exception):  # type: ignore[no-redef]
-            pass
+    AccountRetryNeeded = reg.AccountRetryNeeded
 
     email = ""
     dev_token = ""
@@ -378,6 +397,7 @@ def register_one(
     cancel = DummyStop()
     max_slot_retry = _account_slot_retry_limit()
     slot_retry = 0
+    last_slot_email = ""
 
     while True:
         email = ""
@@ -386,7 +406,7 @@ def register_one(
             _ensure_browser(worker_id, force_recycle=False)
         except Exception as exc:
             log(worker_id, f"! 浏览器启动失败: {exc}")
-            return None
+            return {"ok": False, "error": f"browser start: {exc}", "idx": idx}
 
         mail_ok = False
         for mail_try in range(1, max_mail_retry + 1):
@@ -415,9 +435,9 @@ def register_one(
                 log(worker_id, f"验证码: {code}")
                 mail_ok = True
                 break
+            except AccountRetryNeeded:
+                raise
             except Exception as exc:
-                if AccountRetryNeeded is not None and isinstance(exc, AccountRetryNeeded):
-                    raise
                 msg = str(exc)
                 kind = classify_email_stage_failure(msg)
                 if kind == "fatal":
@@ -442,16 +462,16 @@ def register_one(
                     _inc("reg_fail")
                     # 页面可能卡在中间态，强制完整回收
                     _hard_recycle_browser(worker_id)
-                    return None
+                    return {"ok": False, "error": msg, "idx": idx, "kind": "progress_fail"}
                 log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
                 _mark_email_stage_error(email, msg)
                 traceback.print_exc()
                 _inc("reg_fail")
                 _hard_recycle_browser(worker_id)
-                return None
+                return {"ok": False, "error": msg, "idx": idx, "kind": kind}
 
         if not mail_ok:
-            return None
+            return {"ok": False, "error": "mail stage failed", "idx": idx}
 
         try:
             log(worker_id, "4. 填写资料")
@@ -523,6 +543,7 @@ def register_one(
                     pass
 
             job = {
+                "ok": True,
                 "email": email,
                 "password": password,
                 "sso": sso,
@@ -546,24 +567,35 @@ def register_one(
 
             _inc("reg_success")
             return job
-        except Exception as exc:
-            if AccountRetryNeeded is not None and isinstance(exc, AccountRetryNeeded):
-                slot_retry += 1
-                if slot_retry <= max_slot_retry:
-                    log(
-                        worker_id,
-                        f"[!] 当前账号流程卡住，slot 重试 {slot_retry}/{max_slot_retry}: {exc}",
-                    )
-                    # hard recycle so next attempt is clean; do NOT mark email error yet
-                    _hard_recycle_browser(worker_id)
-                    reg.sleep_with_cancel(1.5, cancel)
-                    continue
-                log(worker_id, f"! slot 重试耗尽 ({max_slot_retry}): {exc}")
-                reg.mark_error(email or "", reason=str(exc)[:120])
-                traceback.print_exc()
-                _inc("reg_fail")
+        except AccountRetryNeeded as exc:
+            # Mark the stuck attempt's email so slot retry does not burn alias budget silently.
+            if email:
+                try:
+                    reg.mark_error(email, reason=f"slot-retry:{str(exc)[:100]}")
+                except Exception:
+                    _mark_email_stage_error(email, str(exc))
+                last_slot_email = email
+            slot_retry += 1
+            if slot_retry <= max_slot_retry:
+                log(
+                    worker_id,
+                    f"[!] 当前账号流程卡住，slot 重试 {slot_retry}/{max_slot_retry}: {exc}",
+                )
                 _hard_recycle_browser(worker_id)
-                return None
+                reg.sleep_with_cancel(1.5, cancel)
+                continue
+            log(worker_id, f"! slot 重试耗尽 ({max_slot_retry}): {exc}")
+            traceback.print_exc()
+            _inc("reg_fail")
+            _hard_recycle_browser(worker_id)
+            return {
+                "ok": False,
+                "error": str(exc),
+                "idx": idx,
+                "slot_exhausted": True,
+                "email": last_slot_email or email,
+            }
+        except Exception as exc:
             log(worker_id, f"! 注册失败: {exc}")
             reg.mark_error(email or "", reason=str(exc)[:120])
             traceback.print_exc()
@@ -572,7 +604,7 @@ def register_one(
                 reg.restart_browser(log_callback=lambda m: log(worker_id, m))
             except Exception:
                 pass
-            return None
+            return {"ok": False, "error": str(exc), "idx": idx, "email": email}
 
 
 def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> dict:
@@ -670,43 +702,37 @@ def _register_worker(
                 task_queue.put(i)
             continue
 
-        retry = 0
-        while retry < 2 and not _fatal_stop.is_set():
+        # Worker outer retry is intentionally limited and does NOT re-run after
+        # AccountRetryNeeded slot exhaustion (register_one already spent that budget).
+        # Avoid slot×worker multiplicative alias burn.
+        try:
+            result = register_one(
+                worker_id,
+                idx,
+                total,
+                accounts_file,
+                do_mint_inline=do_mint_inline,
+                mint_queue=mint_queue,
+            )
+            if isinstance(result, dict) and result.get("ok") is False:
+                # Failure already counted/recycled inside register_one.
+                if result.get("slot_exhausted"):
+                    log(
+                        worker_id,
+                        f"[skip-outer-retry] slot 已耗尽 idx={idx} email={result.get('email') or ''}",
+                    )
+            # success dict / None both end this task; no outer full re-run
+        except FatalRegisterError as exc:
+            # 不可恢复：不重试、不换号空转，直接停本 worker（全局 stop 已 set）
+            log(worker_id, f"[stop] FatalRegisterError: {exc}")
+        except Exception:
+            # Unexpected throw: one hard recycle, no second full registration attempt.
+            log(worker_id, f"[error] 账号 {idx} 未捕获异常（不外层重跑整号）")
+            traceback.print_exc()
             try:
-                result = register_one(
-                    worker_id,
-                    idx,
-                    total,
-                    accounts_file,
-                    do_mint_inline=do_mint_inline,
-                    mint_queue=mint_queue,
-                )
-                if result:
-                    break
-                # register_one 内部已在失败路径上 restart 过浏览器；
-                # worker 层不再重复 restart，避免 quit+create 链叠加导致僵尸进程堆积。
-                retry += 1
-                if retry < 2 and not _fatal_stop.is_set():
-                    log(worker_id, f"[retry] 账号 {idx} 失败，重试 {retry}/1")
-            except FatalRegisterError as exc:
-                # 不可恢复：不重试、不换号空转，直接停本 worker（全局 stop 已 set）
-                log(worker_id, f"[stop] FatalRegisterError: {exc}")
-                retry = 2
-                break
+                reg.restart_browser(log_callback=lambda m: log(worker_id, m))
             except Exception:
-                # 只有 register_one 抛出未捕获异常时，worker 才需要 recycle 浏览器。
-                retry += 1
-                if retry < 2 and not _fatal_stop.is_set():
-                    log(worker_id, f"[retry] 账号 {idx} 异常，重试 {retry}/1")
-                    traceback.print_exc()
-                    try:
-                        reg.restart_browser(log_callback=lambda m: log(worker_id, m))
-                    except Exception:
-                        pass
-
-        if retry >= 2:
-            # register_one 已在自己的失败路径上计 reg_fail；worker 不再重复计。
-            pass
+                pass
         if _fatal_stop.is_set():
             break
 

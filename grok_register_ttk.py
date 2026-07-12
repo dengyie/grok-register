@@ -382,10 +382,6 @@ def get_configured_proxy():
     return str(config.get("proxy", "") or "").strip()
 
 
-def _thread_proxy_bridge():
-    return getattr(_browser_proxy_bridge_local, "bridge", None)
-
-
 def _set_thread_proxy_bridge(bridge) -> None:
     old = getattr(_browser_proxy_bridge_local, "bridge", None)
     if old is not None and old is not bridge:
@@ -430,6 +426,7 @@ def prepare_browser_proxy(use_proxy: bool = True, log_callback=None):
     """Resolve config proxy for Chromium; start local auth bridge when needed.
 
     Returns (browser_proxy_url, bridge_or_None).
+    When config.proxy is set and the bridge fails, raises RuntimeError (no silent direct).
     """
     if not use_proxy:
         return "", None
@@ -440,8 +437,8 @@ def prepare_browser_proxy(use_proxy: bool = True, log_callback=None):
         browser_proxy, bridge = resolve_browser_proxy(proxy)
     except Exception as exc:
         if log_callback:
-            log_callback(f"[!] 代理桥启动失败，浏览器将不走代理: {exc}")
-        return "", None
+            log_callback(f"[!] 代理桥启动失败: {exc}")
+        raise RuntimeError(f"proxy bridge failed (proxy configured, refuse direct): {exc}") from exc
     if bridge is not None and log_callback:
         log_callback(f"[*] 已为 Chromium 启动本地认证代理桥: {browser_proxy}")
     elif browser_proxy and log_callback:
@@ -712,8 +709,18 @@ CHROMIUM_SLIM_FLAGS = [
 ]
 
 
-def create_browser_options(browser_proxy: str | None = None):
-    """Build ChromiumOptions. browser_proxy is the --proxy-server value (already de-authed or local bridge)."""
+def create_browser_options(
+    browser_proxy: str | None = None,
+    *,
+    apply_config_proxy: bool = True,
+):
+    """Build ChromiumOptions.
+
+    browser_proxy: explicit --proxy-server value (local auth bridge or host:port).
+      - None + apply_config_proxy=True: use thread-local pin, else no-auth config.proxy fallback
+      - "" : force no proxy (mint path must set its own proxy once)
+    apply_config_proxy: when False, never read config.proxy / thread-local; only browser_proxy.
+    """
     options = ChromiumOptions()
     options.auto_port()
     options.set_timeouts(base=1)
@@ -746,25 +753,29 @@ def create_browser_options(browser_proxy: str | None = None):
             options.add_extension(EXTENSION_PATH)
         except Exception:
             pass
-    # Prefer explicit browser_proxy (local auth bridge or stripped URL).
-    # start_browser pins the URL on thread-local for the TabPool factory.
-    if browser_proxy is not None:
+    proxy_arg = ""
+    if not apply_config_proxy:
+        # Caller owns proxy entirely (e.g. mint browser_confirm).
+        if browser_proxy is not None:
+            proxy_arg = str(browser_proxy or "").strip()
+    elif browser_proxy is not None:
+        # Explicit value wins ("" disables proxy).
         proxy_arg = str(browser_proxy or "").strip()
     else:
         proxy_arg = str(getattr(_browser_proxy_bridge_local, "proxy_url", "") or "").strip()
-    if not proxy_arg:
-        # Last-resort no-auth only (auth proxies need prepare_browser_proxy / bridge).
-        raw = get_configured_proxy()
-        if raw:
-            try:
-                from urllib.parse import urlparse
+        if not proxy_arg:
+            # Last-resort no-auth only (auth proxies need prepare_browser_proxy / bridge).
+            raw = get_configured_proxy()
+            if raw:
+                try:
+                    from urllib.parse import urlparse
 
-                u = urlparse(raw if "://" in raw else f"http://{raw}")
-                if u.hostname and not u.username and not u.password:
-                    port = u.port or (443 if (u.scheme or "http") == "https" else 80)
-                    proxy_arg = f"{u.scheme or 'http'}://{u.hostname}:{port}"
-            except Exception:
-                proxy_arg = ""
+                    u = urlparse(raw if "://" in raw else f"http://{raw}")
+                    if u.hostname and not u.username and not u.password:
+                        port = u.port or (443 if (u.scheme or "http") == "https" else 80)
+                        proxy_arg = f"{u.scheme or 'http'}://{u.hostname}:{port}"
+                except Exception:
+                    proxy_arg = ""
     if proxy_arg:
         try:
             options.set_argument(f"--proxy-server={proxy_arg}")
@@ -2707,7 +2718,10 @@ def start_browser(log_callback=None, use_proxy: bool = True):
             bridge = None  # ownership transferred to thread-local
 
             def _factory():
-                return create_browser_options(browser_proxy=_browser_proxy_bridge_local.proxy_url or None)
+                # Always pass explicit str: "" disables proxy; never fall back to
+                # raw config.proxy (auth URLs must go through prepare_browser_proxy).
+                pinned = str(getattr(_browser_proxy_bridge_local, "proxy_url", "") or "")
+                return create_browser_options(browser_proxy=pinned)
 
             TabPool.init(_factory, log_callback=log_callback)
             page = TabPool.get_tab()
