@@ -29,7 +29,13 @@ from .schema import (
     credential_file_name,
     expired_from_access_token,
 )
-from .writer import write_cpa_xai_auth
+from .writer import (
+    is_chat_retryable_auth,
+    load_entitlement_denied_emails,
+    patch_cpa_xai_auth,
+    record_entitlement_denied,
+    write_cpa_xai_auth,
+)
 
 # CLIENT_ID lives in oauth_device; re-export from schema if present
 try:
@@ -55,11 +61,15 @@ __all__ = [
     "expired_from_access_token",
     "extract_sso_from_cookies",
     "format_account_line",
+    "is_chat_retryable_auth",
+    "load_entitlement_denied_emails",
     "mint_and_export",
     "mint_with_sso_protocol",
     "normalize_sso_cookie",
     "parse_accounts_file",
+    "patch_cpa_xai_auth",
     "probe_mini_response",
     "probe_models",
+    "record_entitlement_denied",
     "write_cpa_xai_auth",
 ]

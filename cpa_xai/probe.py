@@ -93,18 +93,19 @@ def classify_chat_probe(result: dict[str, Any] | None) -> dict[str, Any]:
     code = str(r.get("error_code") or _extract_error_code(err_text) or "").strip()
     blob = f"{code} {err_text}".lower()
 
-    # L1 entitlement: 403 + permission-denied family (models may still 200).
-    entitlement = status == 403 and (
-        not code
-        or bool(_ENTITLEMENT_CODE_RE.search(blob))
-        or "permission" in blob
-        or "denied" in blob
-    )
-    # Bare 403 without body still treated as entitlement (observed free-path default).
-    if status == 403 and not err_text and not code:
-        entitlement = True
+    # Free Build /v1/responses: any HTTP 403 is L1 entitlement (models may still 200).
+    # Observed default is permission-denied; other 403 bodies are still non-retryable.
+    if status == 403:
+        return {
+            "ok": False,
+            "entitlement_denied": True,
+            "retryable": False,
+            "error_code": code or "permission_denied",
+            "reason": "entitlement_denied",
+        }
 
-    if entitlement:
+    # Explicit permission wording on other statuses (rare) still counts as entitlement.
+    if _ENTITLEMENT_CODE_RE.search(blob) and status in (400, 401, 404):
         return {
             "ok": False,
             "entitlement_denied": True,

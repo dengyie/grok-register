@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,7 +12,7 @@ from .probe import classify_chat_probe, probe_mini_response, probe_models
 from .protocol_mint import ProtocolMintError, extract_sso_from_cookies, mint_with_sso_protocol
 from .proxyutil import proxy_log_label, resolve_proxy, set_runtime_proxy
 from .schema import DEFAULT_BASE_URL, build_cpa_xai_auth
-from .writer import write_cpa_xai_auth
+from .writer import patch_cpa_xai_auth, write_cpa_xai_auth
 
 LogFn = Callable[[str], None]
 
@@ -194,6 +195,7 @@ def mint_and_export(
 
     # Chat gate implies models probe (need has_grok_45 before /responses).
     run_models = bool(probe or probe_chat)
+    chat_attempts = 0
     if run_models:
         pr = probe_models(tokens["access_token"], base_url=base_url, proxy=resolved or None)
         result["probe_models"] = pr
@@ -206,30 +208,42 @@ def mint_and_export(
             result["ok"] = False
             result["error"] = "token ok but grok-4.5 not listed"
             result["chat_ok"] = False
+            result["usable"] = False
             if probe_chat:
-                # Models-only is not product success when chat is required.
                 result["entitlement_denied"] = False
-                result["chat_retryable"] = bool(pr.get("status") in (0, 408, 429, 500, 502, 503, 504))
+                result["chat_retryable"] = bool(
+                    pr.get("status") in (0, 408, 429, 500, 502, 503, 504)
+                )
+                result["fail_reason"] = "models_missing_grok_45"
 
         if probe_chat and pr.get("has_grok_45"):
-            ch = probe_mini_response(
-                tokens["access_token"], base_url=base_url, proxy=resolved or None
-            )
-            # Ensure classification fields even if older probe path
-            cls = classify_chat_probe(ch)
-            for k, v in cls.items():
-                ch.setdefault(k, v)
+            # Transient (429/5xx/network): retry a few times before hard outcome.
+            max_attempts = 3
+            ch: dict[str, Any] = {}
+            for attempt in range(1, max_attempts + 1):
+                chat_attempts = attempt
+                ch = probe_mini_response(
+                    tokens["access_token"], base_url=base_url, proxy=resolved or None
+                )
+                cls = classify_chat_probe(ch)
+                for k, v in cls.items():
+                    ch.setdefault(k, v)
+                log(
+                    f"probe chat attempt={attempt}/{max_attempts}: ok={ch.get('ok')} "
+                    f"status={ch.get('status')} entitlement_denied={ch.get('entitlement_denied')} "
+                    f"retryable={ch.get('retryable')} code={ch.get('error_code')!r} "
+                    f"model={ch.get('model')} text={ch.get('text')!r}"
+                )
+                if ch.get("ok") or ch.get("entitlement_denied") or not ch.get("retryable"):
+                    break
+                if attempt < max_attempts:
+                    time.sleep(1.5 * attempt)
             result["probe_chat"] = ch
+            result["chat_attempts"] = chat_attempts
             result["chat_ok"] = bool(ch.get("ok"))
             result["entitlement_denied"] = bool(ch.get("entitlement_denied"))
-            result["chat_retryable"] = bool(ch.get("retryable"))
+            result["chat_retryable"] = bool(ch.get("retryable")) and not bool(ch.get("ok"))
             result["chat_error_code"] = ch.get("error_code") or ""
-            log(
-                f"probe chat: ok={ch.get('ok')} status={ch.get('status')} "
-                f"entitlement_denied={ch.get('entitlement_denied')} "
-                f"retryable={ch.get('retryable')} code={ch.get('error_code')!r} "
-                f"model={ch.get('model')} text={ch.get('text')!r}"
-            )
             if not ch.get("ok"):
                 result["ok"] = False
                 if ch.get("entitlement_denied"):
@@ -238,6 +252,8 @@ def mint_and_export(
                         "account has no free Build chat grant; do not remint"
                     )
                     result["non_retryable"] = True
+                    result["chat_retryable"] = False
+                    result["usable"] = False
                     result["fail_reason"] = "entitlement_denied"
                     log(
                         "FAIL-FAST: chat entitlement_denied — skip remint/retry for this account"
@@ -250,13 +266,32 @@ def mint_and_export(
                     )
                     result["non_retryable"] = not bool(ch.get("retryable"))
                     result["fail_reason"] = str(ch.get("reason") or "chat_failed")
-        elif probe_chat and not pr.get("has_grok_45"):
-            result["chat_ok"] = False
-            result["fail_reason"] = "models_missing_grok_45"
-    elif probe_chat:
-        # Defensive: probe_chat without models path should not silent-pass.
-        result["ok"] = False
-        result["chat_ok"] = False
-        result["error"] = "probe_chat requested but models probe skipped"
-        result["non_retryable"] = False
+                    result["usable"] = False
+                    # Keep chat_retryable so remint can re-probe without waiting for expiry.
+                    if ch.get("retryable"):
+                        result["chat_retryable"] = True
+            else:
+                result["usable"] = True
+                result["chat_retryable"] = False
+                result["entitlement_denied"] = False
+
+    # Stamp local auth so remint/ops can skip denied and re-probe transient.
+    if result.get("path"):
+        stamp = {
+            "chat_ok": result.get("chat_ok"),
+            "usable": result.get("usable", result.get("ok")),
+            "entitlement_denied": bool(result.get("entitlement_denied")),
+            "chat_retryable": bool(result.get("chat_retryable")),
+            "fail_reason": result.get("fail_reason") or "",
+            "chat_error_code": result.get("chat_error_code") or "",
+        }
+        # Drop empty optional noise
+        if not stamp["fail_reason"]:
+            stamp.pop("fail_reason", None)
+        if not stamp["chat_error_code"]:
+            stamp.pop("chat_error_code", None)
+        try:
+            patch_cpa_xai_auth(result["path"], stamp)
+        except Exception as e:  # noqa: BLE001
+            log(f"stamp auth chat flags failed: {e}")
     return result

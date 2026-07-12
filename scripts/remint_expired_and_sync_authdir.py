@@ -61,14 +61,20 @@ def _collect_todo(
     *,
     include_missing: bool,
     include_expired: bool,
+    include_chat_retryable: bool,
     only_email: str,
     limit: int,
-) -> list:
+    denied_emails: set[str] | None = None,
+) -> tuple:
+    from cpa_xai.writer import is_chat_retryable_auth
+
     accounts = parse_accounts_file(str(accounts_path))
     by_email = {a.email.lower(): a for a in accounts if a.email and normalize_sso_cookie(a.sso)}
     now = datetime.now(timezone.utc)
+    denied = {e.lower() for e in (denied_emails or set())}
 
     existing: dict[str, Path] = {}
+    existing_payload: dict[str, dict] = {}
     for p in auth_dir.glob("xai-*.json"):
         if "_selftest" in str(p):
             continue
@@ -79,33 +85,64 @@ def _collect_todo(
         em = (d.get("email") or "").strip().lower()
         if em:
             existing[em] = p
+            existing_payload[em] = d if isinstance(d, dict) else {}
 
     todo = []
-    reasons: dict[str, int] = {"expired": 0, "missing": 0}
+    reasons: dict[str, int] = {
+        "expired": 0,
+        "missing": 0,
+        "chat_retryable": 0,
+        "skipped_denied": 0,
+    }
+
+    def _skip_denied(em: str) -> bool:
+        if em in denied:
+            reasons["skipped_denied"] += 1
+            return True
+        payload = existing_payload.get(em) or {}
+        if payload.get("entitlement_denied") is True:
+            reasons["skipped_denied"] += 1
+            return True
+        return False
 
     # missing first (never minted)
     if include_missing:
         for em, acc in by_email.items():
             if only_email and em != only_email.lower():
                 continue
+            if _skip_denied(em):
+                continue
             if em not in existing:
                 todo.append((acc, "missing"))
                 reasons["missing"] += 1
 
-    # expired rewrite
+    # expired rewrite — never remint entitlement_denied accounts
     if include_expired:
         for em, p in existing.items():
             if only_email and em != only_email.lower():
                 continue
             if em not in by_email:
                 continue
-            try:
-                d = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:
-                d = {}
+            if _skip_denied(em):
+                continue
+            d = existing_payload.get(em) or {}
             if _is_expired(d, now):
                 todo.append((by_email[em], "expired"))
                 reasons["expired"] += 1
+
+    # unexpired but chat probe was transient — re-probe without waiting for token expiry
+    if include_chat_retryable:
+        for em, p in existing.items():
+            if only_email and em != only_email.lower():
+                continue
+            if em not in by_email:
+                continue
+            if _skip_denied(em):
+                continue
+            d = existing_payload.get(em) or {}
+            if is_chat_retryable_auth(d) and not _is_expired(d, now):
+                todo.append((by_email[em], "chat_retryable"))
+                reasons["chat_retryable"] += 1
 
     # de-dup keep first reason
     seen = set()
@@ -132,6 +169,23 @@ def main() -> int:
     ap.add_argument("--no-missing", action="store_true")
     ap.add_argument("--no-expired", action="store_true")
     ap.add_argument(
+        "--include-chat-retryable",
+        action="store_true",
+        default=True,
+        help="Also remint unexpired auths stamped chat_retryable (transient chat fail)",
+    )
+    ap.add_argument(
+        "--no-chat-retryable",
+        action="store_false",
+        dest="include_chat_retryable",
+    )
+    ap.add_argument(
+        "--include-denied",
+        action="store_true",
+        default=False,
+        help="Do NOT skip entitlement_denied ledger (debug only; remint cannot grant chat)",
+    )
+    ap.add_argument(
         "--no-remote",
         action="store_true",
         help="Only local remint, skip tebi inject",
@@ -157,13 +211,21 @@ def main() -> int:
         out_dir = (_ROOT / out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    from cpa_xai.writer import load_entitlement_denied_emails
+
+    denied = set() if args.include_denied else load_entitlement_denied_emails(out_dir)
+    if denied:
+        print(f"entitlement_denied ledger size={len(denied)} (skipped unless --include-denied)", flush=True)
+
     todo, reasons = _collect_todo(
         Path(args.accounts),
         out_dir,
         include_missing=not args.no_missing,
         include_expired=not args.no_expired,
+        include_chat_retryable=bool(args.include_chat_retryable),
         only_email=args.email,
         limit=args.limit,
+        denied_emails=denied,
     )
     remote_dirs = [d.strip() for d in (args.auth_dirs or "").split(",") if d.strip()]
     if args.no_remote:
