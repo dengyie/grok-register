@@ -147,6 +147,126 @@ def resolve_remote_auth_dirs(cfg: dict | None) -> list[str]:
     return out
 
 
+def evaluate_remote_inject_gate(
+    result: dict | None = None,
+    cfg: dict | None = None,
+    *,
+    auth_path: str | Path | None = None,
+) -> dict:
+    """Product hard-gate for remote CPA inject: only chat-usable free Build.
+
+    Returns:
+      allow, reason, import_gate, chat_ok, entitlement_denied, usable
+
+    Rules (defaults = production one-click):
+      - always refuse entitlement_denied
+      - when ``cpa_remote_inject_require_chat_ok`` (default True): require chat_ok is True
+      - refuse usable is False when chat gate is on
+      - may load stamps from local auth JSON when result lacks chat fields
+    """
+    cfg = cfg or {}
+    r: dict = dict(result or {})
+    path = auth_path or r.get("path")
+    if path and (
+        r.get("chat_ok") is None
+        or "entitlement_denied" not in r
+        or "usable" not in r
+        or not r.get("import_gate")
+    ):
+        try:
+            p = Path(path).expanduser()
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    for k in (
+                        "chat_ok",
+                        "entitlement_denied",
+                        "usable",
+                        "chat_retryable",
+                        "fail_reason",
+                        "import_gate",
+                        "chat_error_code",
+                    ):
+                        if k not in r or r.get(k) is None:
+                            if k in data:
+                                r[k] = data.get(k)
+        except Exception:
+            pass
+
+    require_chat = _config_bool(cfg.get("cpa_remote_inject_require_chat_ok"), default=True)
+    probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=True)
+    # Soft-pass local write must never become a live inject bypass.
+    if not require_chat:
+        # Operator explicitly disabled chat inject gate — still refuse hard entitlement.
+        if r.get("entitlement_denied") is True:
+            return {
+                "allow": False,
+                "reason": "entitlement_denied",
+                "import_gate": "entitlement_denied",
+                "chat_ok": False,
+                "entitlement_denied": True,
+                "usable": False,
+            }
+        return {
+            "allow": True,
+            "reason": "chat_gate_disabled",
+            "import_gate": str(r.get("import_gate") or "chat_gate_disabled"),
+            "chat_ok": r.get("chat_ok"),
+            "entitlement_denied": bool(r.get("entitlement_denied")),
+            "usable": r.get("usable"),
+        }
+
+    if r.get("entitlement_denied") is True:
+        return {
+            "allow": False,
+            "reason": "entitlement_denied",
+            "import_gate": "entitlement_denied",
+            "chat_ok": False,
+            "entitlement_denied": True,
+            "usable": False,
+        }
+    if r.get("skip_remote_inject") is True and r.get("chat_ok") is not True:
+        reason = str(r.get("remote_inject_skip_reason") or r.get("fail_reason") or "skip_remote_inject")
+        return {
+            "allow": False,
+            "reason": reason,
+            "import_gate": reason,
+            "chat_ok": bool(r.get("chat_ok")),
+            "entitlement_denied": False,
+            "usable": False,
+        }
+    if probe_chat and r.get("chat_ok") is not True:
+        reason = str(r.get("fail_reason") or r.get("import_gate") or "chat_not_ok")
+        if reason in ("", "None"):
+            reason = "chat_not_ok"
+        return {
+            "allow": False,
+            "reason": reason,
+            "import_gate": reason if reason != "chat_ok" else "chat_not_ok",
+            "chat_ok": False,
+            "entitlement_denied": False,
+            "usable": False,
+        }
+    if r.get("usable") is False:
+        reason = str(r.get("fail_reason") or "unusable")
+        return {
+            "allow": False,
+            "reason": reason,
+            "import_gate": reason,
+            "chat_ok": bool(r.get("chat_ok")),
+            "entitlement_denied": bool(r.get("entitlement_denied")),
+            "usable": False,
+        }
+    return {
+        "allow": True,
+        "reason": "chat_ok",
+        "import_gate": "chat_ok",
+        "chat_ok": True,
+        "entitlement_denied": False,
+        "usable": True if r.get("usable") is not False else False,
+    }
+
+
 def apply_multi_remote_inject(
     result: dict,
     cfg: dict | None = None,
@@ -157,6 +277,7 @@ def apply_multi_remote_inject(
     """Inject minted auth into all resolved remote dirs; enforce live success gate.
 
     Mutates and returns ``result``. Product rule:
+      - **chat_ok hard-gate** (default): refuse inject unless free Build chat probe passed.
       - when live dir is among targets and ``cpa_remote_live_required`` (default true),
         live failure hard-fails export even if inventory succeeded.
       - ``cpa_remote_inject_required`` still means *all* dirs must succeed.
@@ -166,6 +287,21 @@ def apply_multi_remote_inject(
     if not result.get("ok") or not result.get("path"):
         return result
     if not _config_bool(cfg.get("cpa_remote_inject"), default=False):
+        return result
+
+    gate = evaluate_remote_inject_gate(result, cfg)
+    result["import_gate"] = gate.get("import_gate") or result.get("import_gate")
+    if not gate.get("allow"):
+        reason = str(gate.get("reason") or "chat_not_ok")
+        result["remote_inject_skipped"] = True
+        result["remote_inject_skip_reason"] = reason
+        result["remote_live_ok"] = False
+        result["remote_inject"] = {
+            "ok": False,
+            "skipped": True,
+            "reason": reason,
+        }
+        log(f"[cpa] skip remote inject (gate={reason}): {result.get('email') or result.get('path')}")
         return result
 
     inject = inject_fn or inject_cpa_auth_remote
@@ -378,6 +514,18 @@ def inject_cpa_auth_remote(
         msg = f"local auth missing: {src}"
         log(f"[cpa] remote inject failed: {msg}")
         return {"ok": False, "error": msg}
+
+    # Defense-in-depth: direct callers cannot upload non-chat_ok auths.
+    gate = evaluate_remote_inject_gate({"path": str(src)}, cfg, auth_path=src)
+    if not gate.get("allow"):
+        reason = str(gate.get("reason") or "chat_not_ok")
+        log(f"[cpa] remote inject refused (gate={reason}): {src.name}")
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": reason,
+            "import_gate": gate.get("import_gate") or reason,
+        }
 
     host = (cfg.get("cpa_remote_ssh_host") or "tebi-tunnel").strip()
     remote_dir = (cfg.get("cpa_remote_auth_dir") or "/personal/cpa/auths").strip().rstrip("/")
@@ -801,41 +949,44 @@ def export_cpa_xai_for_account(
         )
         result["priority"] = auth_priority
 
-    # Skip remote inject: no free Build chat entitlement, or chat not confirmed
-    # when required. Transient-failed tokens stay local for remint re-probe.
-    skip_inject = bool(
-        result.get("entitlement_denied")
-        or result.get("skip_remote_inject")
-        or (
-            probe_chat
-            and probe_chat_required
-            and result.get("chat_ok") is False
-            and not result.get("ok")
-        )
-    )
-    if result.get("entitlement_denied"):
+    # Product hard-gate: only free Build chat_ok may enter remote live/inventory.
+    # evaluate_remote_inject_gate is also enforced inside apply_multi_remote_inject
+    # so ops scripts cannot bypass by calling inject helpers directly.
+    gate = evaluate_remote_inject_gate(result, cfg)
+    result["import_gate"] = gate.get("import_gate") or result.get("import_gate")
+    skip_inject = not bool(gate.get("allow"))
+    if skip_inject:
+        result["skip_remote_inject"] = True
         result["remote_inject_skipped"] = True
-        result["remote_inject_skip_reason"] = "entitlement_denied"
-        log(f"[cpa] skip remote inject (entitlement_denied): {email}")
-        try:
-            from cpa_xai.writer import record_entitlement_denied
+        result["remote_inject_skip_reason"] = str(gate.get("reason") or "chat_not_ok")
+        if result.get("entitlement_denied"):
+            log(f"[cpa] skip remote inject (entitlement_denied): {email}")
+            try:
+                from cpa_xai.writer import record_entitlement_denied
 
-            record_entitlement_denied(
-                out_dir,
-                email,
-                extra={
-                    "path": result.get("path"),
-                    "chat_error_code": result.get("chat_error_code"),
-                },
+                record_entitlement_denied(
+                    out_dir,
+                    email,
+                    extra={
+                        "path": result.get("path"),
+                        "chat_error_code": result.get("chat_error_code"),
+                    },
+                )
+            except Exception as e:  # noqa: BLE001
+                log(f"[cpa] entitlement ledger write failed: {e}")
+        else:
+            log(
+                f"[cpa] skip remote inject ({result.get('remote_inject_skip_reason')}): {email}"
             )
+
+    # Stamp import_gate on local auth for ops filtering.
+    if result.get("path") and result.get("import_gate"):
+        try:
+            from cpa_xai.writer import patch_cpa_xai_auth
+
+            patch_cpa_xai_auth(result["path"], {"import_gate": result["import_gate"]})
         except Exception as e:  # noqa: BLE001
-            log(f"[cpa] entitlement ledger write failed: {e}")
-    elif skip_inject and not result.get("ok"):
-        result["remote_inject_skipped"] = True
-        result["remote_inject_skip_reason"] = result.get("fail_reason") or "chat_not_ok"
-        log(
-            f"[cpa] skip remote inject ({result.get('remote_inject_skip_reason')}): {email}"
-        )
+            log(f"[cpa] stamp import_gate failed: {e}")
 
     if (
         result.get("ok")

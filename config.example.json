@@ -149,6 +149,8 @@
   "cpa_auth_priority": 1000,
   "// cpa_remote_inject": "mint 成功后是否自动注入远端 CPA auth-dir（一键进 live 池）。生产推荐 true。",
   "cpa_remote_inject": false,
+  "// cpa_remote_inject_require_chat_ok": "true=仅 chat_ok 的 free Build 号可注入 live/inventory；缺 chat_ok / usage_exhausted / entitlement_denied 一律拒绝（默认 true，防旁路导入）。",
+  "cpa_remote_inject_require_chat_ok": true,
   "// cpa_remote_live_dir": "一键成功门闩目录（live 池）。默认 /root/.cli-proxy-api。",
   "cpa_remote_live_dir": "/root/.cli-proxy-api",
   "// cpa_remote_live_required": "true=live 目录注入失败则整次 export 失败（默认 true，一键产品语义）。",

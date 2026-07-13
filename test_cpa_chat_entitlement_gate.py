@@ -62,6 +62,18 @@ def test_classify_chat_probe() -> None:
     assert transient["retryable"] is True
     assert transient["entitlement_denied"] is False
 
+    exhausted = cls(
+        {
+            "ok": False,
+            "status": 429,
+            "error": '{"error":{"code":"subscription:free-usage-exhausted","message":"quota"}}',
+            "error_code": "subscription:free-usage-exhausted",
+        }
+    )
+    assert exhausted["retryable"] is False
+    assert exhausted["entitlement_denied"] is False
+    assert exhausted["reason"] == "usage_exhausted"
+
     net = cls({"ok": False, "status": 0, "error": "timeout"})
     assert net["retryable"] is True
     print("PASS classify_chat_probe")
@@ -222,6 +234,115 @@ def test_finalize_probe_and_gate_behavior() -> None:
     print("PASS finalize_probe_and_gate behavior")
 
 
+def test_remote_inject_chat_ok_hard_gate() -> None:
+    """Direct apply_multi_remote_inject / inject_cpa_auth_remote must refuse non-chat_ok."""
+    exp = _load("cpa_export_inject_gate", ROOT / "cpa_export.py")
+
+    calls: list[str] = []
+
+    def fake_inject(path, config=None, log_callback=None):  # noqa: ANN001
+        calls.append(str(path))
+        return {"ok": True, "remote_path": f"/remote/{Path(path).name}"}
+
+    cfg = {
+        "cpa_remote_inject": True,
+        "cpa_remote_auth_dirs": "/root/.cli-proxy-api,/personal/cpa/auths",
+        "cpa_remote_inject_require_chat_ok": True,
+        "cpa_probe_chat": True,
+    }
+
+    # result.ok but chat_ok missing/false → refuse, never call inject
+    r_bad = {
+        "ok": True,
+        "path": "/tmp/xai-bad@example.com.json",
+        "email": "bad@example.com",
+        "chat_ok": False,
+        "usable": False,
+        "fail_reason": "usage_exhausted",
+    }
+    out_bad = exp.apply_multi_remote_inject(r_bad, cfg, inject_fn=fake_inject)
+    assert out_bad.get("remote_inject_skipped") is True
+    assert out_bad.get("remote_inject", {}).get("skipped") is True
+    assert out_bad.get("import_gate") in ("usage_exhausted", "chat_not_ok")
+    assert calls == []
+
+    r_denied = {
+        "ok": True,
+        "path": "/tmp/xai-denied@example.com.json",
+        "email": "denied@example.com",
+        "chat_ok": False,
+        "entitlement_denied": True,
+        "usable": False,
+    }
+    out_denied = exp.apply_multi_remote_inject(r_denied, cfg, inject_fn=fake_inject)
+    assert out_denied.get("remote_inject_skipped") is True
+    assert out_denied.get("remote_inject_skip_reason") == "entitlement_denied"
+    assert calls == []
+
+    # chat_ok true → inject proceeds
+    r_ok = {
+        "ok": True,
+        "path": "/tmp/xai-ok@example.com.json",
+        "email": "ok@example.com",
+        "chat_ok": True,
+        "usable": True,
+        "entitlement_denied": False,
+        "import_gate": "chat_ok",
+    }
+    out_ok = exp.apply_multi_remote_inject(r_ok, cfg, inject_fn=fake_inject)
+    assert out_ok.get("remote_inject_skipped") is not True
+    assert len(calls) == 2  # live + inventory
+    assert out_ok.get("import_gate") == "chat_ok"
+
+    # File-stamp gate for direct inject_cpa_auth_remote
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "xai-stamp@example.com.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "type": "xai",
+                    "email": "stamp@example.com",
+                    "chat_ok": False,
+                    "usable": False,
+                    "import_gate": "usage_exhausted",
+                    "fail_reason": "usage_exhausted",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        refused = exp.inject_cpa_auth_remote(
+            p,
+            config={"cpa_remote_inject": True, "cpa_remote_inject_require_chat_ok": True},
+            log_callback=lambda _m: None,
+        )
+        assert refused.get("ok") is False
+        assert refused.get("skipped") is True
+        assert refused.get("reason") in ("usage_exhausted", "chat_not_ok")
+
+        p2 = Path(td) / "xai-good@example.com.json"
+        p2.write_text(
+            json.dumps(
+                {
+                    "type": "xai",
+                    "email": "good@example.com",
+                    "chat_ok": True,
+                    "usable": True,
+                    "import_gate": "chat_ok",
+                    "entitlement_denied": False,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        # Gate allows; actual SSH may fail — only assert not skipped for chat reason.
+        allowed_gate = exp.evaluate_remote_inject_gate({"path": str(p2)}, cfg, auth_path=p2)
+        assert allowed_gate.get("allow") is True
+        assert allowed_gate.get("import_gate") == "chat_ok"
+
+    print("PASS remote inject chat_ok hard gate")
+
+
 def main() -> int:
     test_classify_chat_probe()
     test_probe_mini_response_attaches_classification()
@@ -232,6 +353,7 @@ def main() -> int:
     test_remint_skips_denied_and_retryable()
     test_writer_ledger_roundtrip()
     test_finalize_probe_and_gate_behavior()
+    test_remote_inject_chat_ok_hard_gate()
     print("\nALL PASS (cpa chat entitlement gate)")
     return 0
 

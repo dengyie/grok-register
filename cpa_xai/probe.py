@@ -124,6 +124,22 @@ def classify_chat_probe(result: dict[str, Any] | None) -> dict[str, Any]:
             "reason": "auth_or_protocol",
         }
 
+    # Free Build quota exhausted (rolling ~24h). Not currently usable — do not inject.
+    # Not entitlement (will recover after window); not remint-fixed either.
+    if status == 429 and (
+        "free-usage-exhausted" in blob
+        or "free_usage_exhausted" in blob
+        or "usage-exhausted" in blob
+        or "usage_exhausted" in blob
+    ):
+        return {
+            "ok": False,
+            "entitlement_denied": False,
+            "retryable": False,
+            "error_code": code or "free-usage-exhausted",
+            "reason": "usage_exhausted",
+        }
+
     if status in _TRANSIENT_STATUS or status >= 500:
         return {
             "ok": False,

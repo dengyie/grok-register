@@ -277,6 +277,17 @@ def mint_and_export(
 
     # Stamp local auth so remint/ops can skip denied and re-probe transient.
     if result.get("path"):
+        if result.get("entitlement_denied"):
+            import_gate = "entitlement_denied"
+        elif result.get("chat_ok") is True and result.get("usable") is not False:
+            import_gate = "chat_ok"
+        elif result.get("chat_retryable"):
+            import_gate = str(result.get("fail_reason") or "transient")
+        elif result.get("chat_ok") is False:
+            import_gate = str(result.get("fail_reason") or "chat_not_ok")
+        else:
+            import_gate = str(result.get("fail_reason") or ("ok" if result.get("ok") else "not_ready"))
+        result["import_gate"] = import_gate
         stamp = {
             "chat_ok": result.get("chat_ok"),
             "usable": result.get("usable", result.get("ok")),
@@ -284,6 +295,7 @@ def mint_and_export(
             "chat_retryable": bool(result.get("chat_retryable")),
             "fail_reason": result.get("fail_reason") or "",
             "chat_error_code": result.get("chat_error_code") or "",
+            "import_gate": import_gate,
         }
         # Drop empty optional noise
         if not stamp["fail_reason"]:
