@@ -200,6 +200,13 @@ def is_fatal_register_error(msg: str) -> bool:
         "DuckMail 无已验证域名可用",
         "获取 DuckMail token 失败",
         "获取 YYDS token 失败",
+        "Gmail 模式需要",
+        "Gmail catch-all 需要在 defaultDomains",
+        "Gmail 无法生成可用域名邮箱",
+        "Gmail IMAP 凭证未配置",
+        "Gmail IMAP 认证失败",
+        "AUTHENTICATIONFAILED",
+        "Invalid credentials",
     )
     return any(m in text for m in markers)
 
@@ -260,9 +267,27 @@ def _is_hotmail_provider() -> bool:
     return str(provider or "").strip().lower() in {"hotmail", "outlook", "outlookmail", "microsoft"}
 
 
+def _should_persist_email_stage_error() -> bool:
+    """Persist failed registration addresses for non-disposable pools (Hotmail/Gmail/CloudMail)."""
+    try:
+        provider = reg.get_email_provider()
+    except Exception:
+        provider = (getattr(reg, "config", {}) or {}).get("email_provider", "")
+    return str(provider or "").strip().lower() in {
+        "hotmail",
+        "outlook",
+        "outlookmail",
+        "microsoft",
+        "gmail",
+        "google",
+        "googlemail",
+        "cloudmail",
+    }
+
+
 def _mark_email_stage_error(email: str, reason: str) -> None:
-    """Persist failed Hotmail/Outlook aliases so the next run does not reuse them."""
-    if not email or not _is_hotmail_provider():
+    """Persist failed addresses so the next run does not reuse them."""
+    if not email or not _should_persist_email_stage_error():
         return
     try:
         reg.mark_error(email, reason=str(reason)[:120])

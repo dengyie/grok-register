@@ -124,7 +124,7 @@ def mark_used(email: str, password: str = ""):
     except Exception:
         pass
     try:
-        _gmail_release_email(email)
+        _gmail_cleanup_email(email)
     except Exception:
         pass
 
@@ -139,7 +139,7 @@ def mark_error(email: str, password: str = "", reason: str = ""):
     except Exception:
         pass
     try:
-        _gmail_release_email(email)
+        _gmail_cleanup_email(email)
     except Exception:
         pass
 
@@ -400,8 +400,11 @@ def load_config():
 
 def save_config():
     try:
+        to_save = dict(config)
+        # App passwords live in .env only; never mirror into config.json.
+        to_save["gmail_imap_password"] = ""
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4, ensure_ascii=False)
+            json.dump(to_save, f, indent=4, ensure_ascii=False)
     except Exception as e:
         print(f"保存配置失败: {e}")
 
@@ -2368,6 +2371,8 @@ _gmail_token_map = {}
 _gmail_token_lock = threading.Lock()
 _gmail_reserved_emails = set()
 _gmail_selection_lock = threading.Lock()
+# Cap concurrent Gmail IMAP sessions (Gmail rejects too many simultaneous logins).
+_gmail_imap_sem = threading.BoundedSemaphore(2)
 
 
 def get_gmail_imap_user():
@@ -2379,7 +2384,7 @@ def get_gmail_imap_user():
 
 
 def get_gmail_imap_password():
-    # Prefer env / .env; never commit app password.
+    # Prefer env / .env; never commit app password; never persist via save_config.
     return str(
         os.environ.get("GMAIL_IMAP_PASSWORD")
         or os.environ.get("GMAIL_APP_PASSWORD")
@@ -2413,6 +2418,34 @@ def _gmail_release_email(email):
         return
     with _gmail_selection_lock:
         _gmail_reserved_emails.discard(email.strip().lower())
+
+
+def _gmail_cleanup_email(email):
+    """Release reservation + drop in-memory token map entries for this address."""
+    if not email:
+        return
+    key = email.strip().lower()
+    _gmail_release_email(email)
+    with _gmail_token_lock:
+        dead = [
+            tok
+            for tok, info in list(_gmail_token_map.items())
+            if str((info or {}).get("target") or "").strip().lower() == key
+        ]
+        for tok in dead:
+            _gmail_token_map.pop(tok, None)
+
+
+def _gmail_is_auth_error(exc) -> bool:
+    text = str(exc or "")
+    low = text.lower()
+    return (
+        "authenticationfailed" in low
+        or "invalid credentials" in low
+        or "application-specific password" in low
+        or "username and password not accepted" in low
+        or ("auth" in low and "fail" in low and "gmail" in low)
+    )
 
 
 def gmail_get_email_and_token():
@@ -2449,9 +2482,121 @@ def gmail_get_email_and_token():
     raise Exception("Gmail 无法生成可用域名邮箱（碰撞过多或 defaultDomains 不可用）")
 
 
-def _gmail_imap_get_code(mailbox_email, target_email, app_password, log_callback=None):
-    import email as email_lib
+def _gmail_imap_connect(mailbox_email, app_password, log_callback=None):
     import imaplib
+
+    host = get_gmail_imap_host()
+    port = get_gmail_imap_port()
+    folder = get_gmail_imap_folder()
+    if log_callback:
+        log_callback(
+            f"[Debug] Gmail IMAP 连接: host={host}:{port} user={mailbox_email} folder={folder}"
+        )
+    _gmail_imap_sem.acquire()
+    held = True
+    imap = None
+    try:
+        imap = imaplib.IMAP4_SSL(host, port, timeout=45)
+        try:
+            imap.login(mailbox_email, app_password)
+        except Exception as exc:
+            if _gmail_is_auth_error(exc):
+                raise Exception(f"Gmail IMAP 认证失败: {exc}") from exc
+            raise
+        status, _ = imap.select(folder)
+        if status != "OK":
+            raise Exception(f"Gmail IMAP select {folder} 失败: {status}")
+        # Stash so close always releases the semaphore once.
+        imap._gmail_sem_held = True  # type: ignore[attr-defined]
+        held = False
+        return imap
+    except Exception:
+        if held:
+            try:
+                _gmail_imap_sem.release()
+            except Exception:
+                pass
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+        raise
+
+
+def _gmail_imap_close(imap):
+    if imap is None:
+        return
+    try:
+        imap.close()
+    except Exception:
+        pass
+    try:
+        imap.logout()
+    except Exception:
+        pass
+    if getattr(imap, "_gmail_sem_held", False):
+        try:
+            _gmail_imap_sem.release()
+        except Exception:
+            pass
+        try:
+            imap._gmail_sem_held = False  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def _gmail_message_mentions_target(msg, target_lower: str, subject: str, sender: str, body: str) -> bool:
+    """True if target catch-all address is present in headers, Received, or body.
+
+    CF Email Routing often rewrites Delivered-To to the Gmail mailbox; the original
+    random@domain may only appear in Received / X-Original-To / full raw source.
+    """
+    if not target_lower:
+        return True
+    header_blob = " ".join(
+        _hotmail_decode_header(msg.get(h, ""))
+        for h in (
+            "To",
+            "Cc",
+            "Bcc",
+            "Delivered-To",
+            "X-Original-To",
+            "Original-Recipient",
+            "Envelope-To",
+            "X-Forwarded-To",
+            "X-Gm-Original-To",
+            "X-Google-Original-To",
+            "Resent-To",
+            "Resent-Cc",
+        )
+    ).lower()
+    if target_lower in header_blob:
+        return True
+    # All Received: lines (CF path often embeds original RCPT here).
+    try:
+        received = msg.get_all("Received") or []
+        received_blob = " ".join(str(x) for x in received).lower()
+        if target_lower in received_blob:
+            return True
+    except Exception:
+        pass
+    if target_lower in (body or "").lower():
+        return True
+    if target_lower in (subject or "").lower() or target_lower in (sender or "").lower():
+        return True
+    # Last resort: full raw message (covers obscure CF/Gmail headers).
+    try:
+        raw = msg.as_string().lower()
+        if target_lower in raw:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _gmail_imap_get_code_on_conn(imap, target_email, log_callback=None):
+    import email as email_lib
     from datetime import timezone
     from email.utils import parsedate_to_datetime
 
@@ -2469,84 +2614,59 @@ def _gmail_imap_get_code(mailbox_email, target_email, app_password, log_callback
     filter_after_ts = int((time.time() - max(60, recent_seconds)) * 1000)
     target_lower = (target_email or "").strip().lower()
     keywords = ["x.ai", "xai", "grok", "verification", "code", "confirm", "验证码", "确认"]
-    host = get_gmail_imap_host()
-    port = get_gmail_imap_port()
-    folder = get_gmail_imap_folder()
 
-    if log_callback:
-        log_callback(
-            f"[Debug] Gmail IMAP 连接: host={host}:{port} user={mailbox_email} folder={folder}"
-        )
-    imap = imaplib.IMAP4_SSL(host, port, timeout=45)
+    # Refresh mailbox view without reconnecting.
     try:
-        imap.login(mailbox_email, app_password)
-        status, _ = imap.select(folder)
-        if status != "OK":
-            raise Exception(f"Gmail IMAP select {folder} 失败: {status}")
-        # Prefer recent UNSEEN/ALL; fall back to ALL and slice last N.
-        status, data = imap.search(None, "ALL")
-        if status != "OK" or not data or not data[0]:
-            return None
-        msg_ids = data[0].split()[-max(1, last_n) :]
-        for mid in reversed(msg_ids):
-            _, msg_data = imap.fetch(mid, "(RFC822)")
-            if not msg_data or not msg_data[0] or not isinstance(msg_data[0][1], bytes):
-                continue
-            msg = email_lib.message_from_bytes(msg_data[0][1])
+        imap.noop()
+    except Exception:
+        pass
+    folder = get_gmail_imap_folder()
+    status, _ = imap.select(folder)
+    if status != "OK":
+        raise Exception(f"Gmail IMAP select {folder} 失败: {status}")
 
-            date_str = msg.get("Date")
-            if date_str:
-                try:
-                    dt = parsedate_to_datetime(date_str)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    if int(dt.timestamp() * 1000) < filter_after_ts:
-                        continue
-                except Exception:
-                    pass
-
-            subject = _hotmail_decode_header(msg.get("Subject", ""))
-            sender = _hotmail_decode_header(msg.get("From", ""))
-            recipient_blob = " ".join(
-                _hotmail_decode_header(msg.get(h, ""))
-                for h in (
-                    "To",
-                    "Cc",
-                    "Delivered-To",
-                    "X-Original-To",
-                    "Original-Recipient",
-                    "Envelope-To",
-                    "X-Forwarded-To",
-                    "X-Gm-Original-To",
-                )
-            ).lower()
-            recipient_matched = not target_lower or target_lower in recipient_blob
-            if require_recipient and not recipient_matched:
-                continue
-
-            body = _hotmail_message_body(msg)
-            combined = f"{subject}\n{sender}\n{recipient_blob}\n{body}"
-            combined_lower = combined.lower()
-            if not any(kw in combined_lower for kw in keywords):
-                if "xai" not in subject.lower() and "confirmation" not in subject.lower():
-                    continue
-            code = extract_verification_code(combined, subject)
-            if code:
-                if log_callback:
-                    log_callback(
-                        f"[*] Gmail IMAP 提取到验证码: {code} (to={target_email or mailbox_email})"
-                    )
-                return code
+    status, data = imap.search(None, "ALL")
+    if status != "OK" or not data or not data[0]:
         return None
-    finally:
-        try:
-            imap.close()
-        except Exception:
-            pass
-        try:
-            imap.logout()
-        except Exception:
-            pass
+    msg_ids = data[0].split()[-max(1, last_n) :]
+    for mid in reversed(msg_ids):
+        _, msg_data = imap.fetch(mid, "(RFC822)")
+        if not msg_data or not msg_data[0] or not isinstance(msg_data[0][1], bytes):
+            continue
+        msg = email_lib.message_from_bytes(msg_data[0][1])
+
+        date_str = msg.get("Date")
+        if date_str:
+            try:
+                dt = parsedate_to_datetime(date_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if int(dt.timestamp() * 1000) < filter_after_ts:
+                    continue
+            except Exception:
+                pass
+
+        subject = _hotmail_decode_header(msg.get("Subject", ""))
+        sender = _hotmail_decode_header(msg.get("From", ""))
+        body = _hotmail_message_body(msg)
+        if require_recipient and not _gmail_message_mentions_target(
+            msg, target_lower, subject, sender, body
+        ):
+            continue
+
+        combined = f"{subject}\n{sender}\n{body}"
+        combined_lower = combined.lower()
+        if not any(kw in combined_lower for kw in keywords):
+            if "xai" not in subject.lower() and "confirmation" not in subject.lower():
+                continue
+        code = extract_verification_code(combined, subject)
+        if code:
+            if log_callback:
+                log_callback(
+                    f"[*] Gmail IMAP 提取到验证码: {code} (to={target_email})"
+                )
+            return code
+    return None
 
 
 def gmail_get_oai_code(
@@ -2579,43 +2699,53 @@ def gmail_get_oai_code(
     deadline = time.time() + timeout
     next_resend_at = time.time() + 60
     consecutive_fails = 0
+    imap = None
 
-    while time.time() < deadline:
-        raise_if_cancelled(cancel_callback)
-        if resend_callback and time.time() >= next_resend_at:
+    try:
+        while time.time() < deadline:
+            raise_if_cancelled(cancel_callback)
+            if resend_callback and time.time() >= next_resend_at:
+                try:
+                    resend_callback()
+                    if log_callback:
+                        log_callback("[*] 已触发重新发送验证码")
+                except Exception as exc:
+                    if log_callback:
+                        log_callback(f"[Debug] 触发重发验证码失败: {exc}")
+                next_resend_at = time.time() + 60
             try:
-                resend_callback()
+                if imap is None:
+                    imap = _gmail_imap_connect(
+                        mailbox, app_password, log_callback=log_callback
+                    )
+                code = _gmail_imap_get_code_on_conn(
+                    imap, target_email, log_callback=log_callback
+                )
+                if code:
+                    return code
+                consecutive_fails = 0
                 if log_callback:
-                    log_callback("[*] 已触发重新发送验证码")
+                    log_callback(f"[Debug] Gmail 本轮未找到验证码: {target_email}")
             except Exception as exc:
+                # Drop broken connection; auth failures are fatal (no empty retry).
+                _gmail_imap_close(imap)
+                imap = None
+                if _gmail_is_auth_error(exc) or "Gmail IMAP 认证失败" in str(exc):
+                    raise Exception(f"Gmail IMAP 认证失败: {exc}") from exc
+                consecutive_fails += 1
                 if log_callback:
-                    log_callback(f"[Debug] 触发重发验证码失败: {exc}")
-            next_resend_at = time.time() + 60
-        try:
-            code = _gmail_imap_get_code(
-                mailbox,
-                target_email,
-                app_password,
-                log_callback=log_callback,
-            )
-            if code:
-                return code
-            consecutive_fails = 0
-            if log_callback:
-                log_callback(f"[Debug] Gmail 本轮未找到验证码: {target_email}")
-        except Exception as exc:
-            consecutive_fails += 1
-            if log_callback:
-                log_callback(f"[Debug] Gmail 拉取验证码失败: {exc}")
-            if consecutive_fails >= 5:
-                raise Exception(f"Gmail IMAP 连续失败: {exc}") from exc
-        empty_rounds += 1
-        if empty_rounds <= 1:
-            current_interval = base_interval
-        else:
-            current_interval = min(5.0, base_interval + 0.5 * (empty_rounds - 1))
-        sleep_with_cancel(current_interval, cancel_callback)
-    raise Exception(f"Gmail 在 {timeout}s 内未收到验证码邮件: {target_email}")
+                    log_callback(f"[Debug] Gmail 拉取验证码失败: {exc}")
+                if consecutive_fails >= 5:
+                    raise Exception(f"Gmail IMAP 连续失败: {exc}") from exc
+            empty_rounds += 1
+            if empty_rounds <= 1:
+                current_interval = base_interval
+            else:
+                current_interval = min(5.0, base_interval + 0.5 * (empty_rounds - 1))
+            sleep_with_cancel(current_interval, cancel_callback)
+        raise Exception(f"Gmail 在 {timeout}s 内未收到验证码邮件: {target_email}")
+    finally:
+        _gmail_imap_close(imap)
 
 
 # ──────────────────────── 公共邮箱工具 ────────────────────────

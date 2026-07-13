@@ -55,6 +55,9 @@ def test_classify() -> None:
         ("Hotmail/Outlook 账号文件无有效记录: /tmp/x", "fatal"),
         ("Cloudflare API Base 未配置", "fatal"),
         ("DuckMail 没有返回任何可用域名", "fatal"),
+        ("Gmail 模式需要 gmail_imap_user / GMAIL_IMAP_USER", "fatal"),
+        ("Gmail catch-all 需要在 defaultDomains 中配置已路由到该 Gmail 的域名", "fatal"),
+        ("Gmail IMAP 认证失败: [AUTHENTICATIONFAILED] Invalid credentials", "fatal"),
     ]
     failed = 0
     for msg, expect in cases:
