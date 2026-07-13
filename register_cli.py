@@ -26,6 +26,11 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import grok_register_ttk as reg  # noqa: E402
+from proxy_rotate import (  # noqa: E402
+    configure_proxy_rotation,
+    maybe_rotate_proxy,
+    restore_proxy_rotation,
+)
 
 
 # Linux 适配: DrissionPage 默认找 'chrome', 我们装的是 chromium
@@ -296,12 +301,23 @@ def _mark_email_stage_error(email: str, reason: str) -> None:
 
 
 def _ensure_browser(worker_id: int, force_recycle: bool = False):
-    """Start browser if missing; optional full recycle."""
+    """Start browser if missing; optional full recycle.
+
+    Also runs proxy rotation (when enabled) before starting the browser so the
+    new account attempt uses the rotated egress. List mode rewrites
+    reg.config["proxy"]; clash mode only switches the dedicated GROK-REG
+    selector (main profile group untouched).
+    """
     if force_recycle:
         try:
             reg.stop_browser()
         except Exception:
             pass
+    # Rotate egress before (re)creating the browser so --proxy-server picks it up.
+    try:
+        maybe_rotate_proxy(log=lambda m: log(worker_id, m), config=reg.config)
+    except Exception as exc:
+        log(worker_id, f"[!] 代理轮换失败(继续用当前出口): {exc}")
     if reg.TabPool.get_browser() is None:
         reg.start_browser(log_callback=lambda m: log(worker_id, m))
 
@@ -892,10 +908,59 @@ def main() -> int:
     parser.add_argument("--inline-mint", action="store_true", help="强制注册线程内联 mint（调试用）")
     parser.add_argument("--headless", action="store_true", help="无头 Chromium 注册（覆盖 config.browser_headless）")
     parser.add_argument("--no-headless", action="store_true", help="强制有头浏览器")
+    parser.add_argument(
+        "--proxy-rotate",
+        choices=("off", "list", "clash"),
+        default="",
+        help="代理/出口 IP 轮换：off=不轮换；list=轮换 proxy_list(仅注册浏览器)；"
+        "clash=在 Clash 专用策略组 GROK-REG 上轮换(域名规则命中才走该组，主策略组不动)",
+    )
+    parser.add_argument(
+        "--proxy-rotate-every",
+        type=int,
+        default=-1,
+        help="每 N 次注册轮换一次出口（-1=用 config/env）",
+    )
+    parser.add_argument(
+        "--proxy-list",
+        default="",
+        help="list 模式代理池（逗号/分号/换行分隔，或 .txt/.list 文件路径）",
+    )
+    parser.add_argument(
+        "--clash-group",
+        default="",
+        help="clash 模式专用策略组名（默认 GROK-REG，绝不写主组名）",
+    )
+    parser.add_argument(
+        "--clash-domains",
+        default="",
+        help="clash 模式命中域名（逗号分隔，默认 x.ai,grok.com,grok.x.ai,assets.grok.com）",
+    )
     args = parser.parse_args()
 
     reg.load_config()
     cfg0 = getattr(reg, "config", {}) or {}
+
+    # Proxy rotation: CLI > config > env (env already overlaid into cfg0).
+    if args.proxy_rotate:
+        cfg0["proxy_rotate_mode"] = args.proxy_rotate
+    if args.proxy_rotate_every >= 1:
+        cfg0["proxy_rotate_every"] = int(args.proxy_rotate_every)
+    if args.proxy_list:
+        cfg0["proxy_list"] = args.proxy_list
+    if args.clash_group:
+        # hard guard: refuse main-group names
+        if args.clash_group in {"GLOBAL", "宝可梦", cfg0.get("clash_donor_group")}:
+            print(f"[!] --clash-group 不能用主策略组 {args.clash_group!r}，已忽略改回 GROK-REG", flush=True)
+        else:
+            cfg0["clash_proxy_group"] = args.clash_group
+    if args.clash_domains:
+        cfg0["clash_rule_domains"] = args.clash_domains
+    try:
+        configure_proxy_rotation(cfg0, log=lambda m: print(m, flush=True))
+    except Exception as exc:
+        print(f"[!] 代理轮换配置失败: {exc}", flush=True)
+
     threads = max(1, min(args.threads, 10))
     fast = bool(args.fast) and not bool(args.no_fast)
     if getattr(args, "headless", False):
@@ -1082,6 +1147,12 @@ def main() -> int:
         reg.shutdown_browser()
     except Exception:
         pass
+
+    # Restore dedicated Clash group node (never touches main selector).
+    try:
+        restore_proxy_rotation(log=lambda m: print(m, flush=True))
+    except Exception as exc:
+        print(f"[!] 恢复 Clash 专用组节点失败: {exc}", flush=True)
 
     # stop side-effect pool
     try:

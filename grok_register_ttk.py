@@ -25,6 +25,12 @@ from DrissionPage.errors import PageDisconnectedError
 from curl_cffi import requests
 
 from proxy_bridge import resolve_browser_proxy
+from proxy_rotate import (
+    configure_proxy_rotation,
+    maybe_rotate_proxy,
+    restore_proxy_rotation,
+    current_proxy_override,
+)
 
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -84,6 +90,27 @@ DEFAULT_CONFIG = {
     # per-account soft retry when final page / SSO path is stuck (does not override fatal)
     "account_slot_retry": 3,
     "final_page_no_submit_timeout": 45,
+    # ---- proxy / egress rotation (register-scoped) ----
+    # off | list (rotate proxy_list, browser-only) | clash (domain-rule group, never touches main selector)
+    "proxy_rotate_mode": "off",
+    "proxy_rotate_every": 1,
+    "proxy_rotate_on_start": True,
+    "proxy_rotate_required": False,
+    "proxy_rotate_update_cpa": True,
+    "proxy_list": "",
+    "clash_api": "unix:///tmp/verge/verge-mihomo.sock",
+    "clash_secret": "",
+    "clash_proxy_group": "GROK-REG",
+    "clash_donor_group": "宝可梦",
+    "clash_rule_domains": "x.ai,grok.com,grok.x.ai,assets.grok.com",
+    "clash_config_path": "~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml",
+    "clash_profiles_dir": "~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/profiles",
+    "clash_verge_groups_file": "",
+    "clash_verge_rules_file": "",
+    "clash_node_exclude": "",
+    "clash_node_include": "",
+    "clash_flush_connections": True,
+    "clash_restore_on_exit": True,
 }
 
 config = DEFAULT_CONFIG.copy()
@@ -330,6 +357,20 @@ _ENV_CONFIG_OVERLAYS = (
     ("CPA_PROXY", "cpa_proxy"),
     ("PROXY", "proxy"),
     ("GROK2API_REMOTE_BASE", "grok2api_remote_base"),
+    ("PROXY_ROTATE_MODE", "proxy_rotate_mode"),
+    ("PROXY_ROTATE_EVERY", "proxy_rotate_every"),
+    ("PROXY_LIST", "proxy_list"),
+    ("CLASH_API", "clash_api"),
+    ("CLASH_SECRET", "clash_secret"),
+    ("CLASH_PROXY_GROUP", "clash_proxy_group"),
+    ("CLASH_DONOR_GROUP", "clash_donor_group"),
+    ("CLASH_RULE_DOMAINS", "clash_rule_domains"),
+    ("CLASH_CONFIG_PATH", "clash_config_path"),
+    ("CLASH_PROFILES_DIR", "clash_profiles_dir"),
+    ("CLASH_VERGE_GROUPS_FILE", "clash_verge_groups_file"),
+    ("CLASH_VERGE_RULES_FILE", "clash_verge_rules_file"),
+    ("CLASH_NODE_EXCLUDE", "clash_node_exclude"),
+    ("CLASH_NODE_INCLUDE", "clash_node_include"),
 )
 
 
@@ -351,6 +392,12 @@ def apply_env_config_overrides(cfg: dict | None = None) -> dict:
         ("CPA_PROBE_CHAT_REQUIRED", "cpa_probe_chat_required", "bool"),
         ("CPA_AUTH_PRIORITY", "cpa_auth_priority", "int"),
         ("GMAIL_IMAP_PORT", "gmail_imap_port", "int"),
+        ("PROXY_ROTATE_EVERY", "proxy_rotate_every", "int"),
+        ("PROXY_ROTATE_ON_START", "proxy_rotate_on_start", "bool"),
+        ("PROXY_ROTATE_REQUIRED", "proxy_rotate_required", "bool"),
+        ("PROXY_ROTATE_UPDATE_CPA", "proxy_rotate_update_cpa", "bool"),
+        ("CLASH_FLUSH_CONNECTIONS", "clash_flush_connections", "bool"),
+        ("CLASH_RESTORE_ON_EXIT", "clash_restore_on_exit", "bool"),
     ):
         raw = (os.environ.get(env_key) or "").strip()
         if not raw:
@@ -455,14 +502,14 @@ DUCKMAIL_API_BASE = "https://api.duckmail.sbs"
 
 
 def get_proxies():
-    proxy = config.get("proxy", "")
+    proxy = current_proxy_override() or config.get("proxy", "")
     if proxy:
         return {"http": proxy, "https": proxy}
     return {}
 
 
 def get_configured_proxy():
-    return str(config.get("proxy", "") or "").strip()
+    return str(current_proxy_override() or config.get("proxy", "") or "").strip()
 
 
 def _set_thread_proxy_bridge(bridge) -> None:

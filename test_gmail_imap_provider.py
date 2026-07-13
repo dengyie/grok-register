@@ -81,7 +81,17 @@ def _load_reg():
     if "proxy_bridge" not in sys.modules:
         pb = types.ModuleType("proxy_bridge")
         pb.resolve_browser_proxy = lambda *a, **k: None
+        pb.proxy_log_label = lambda p: str(p or "")
+        pb.proxy_has_auth = lambda p: False
+        pb.strip_proxy_auth = lambda p: str(p or "")
         sys.modules["proxy_bridge"] = pb
+    if "proxy_rotate" not in sys.modules:
+        pr = types.ModuleType("proxy_rotate")
+        pr.configure_proxy_rotation = lambda *a, **k: None
+        pr.maybe_rotate_proxy = lambda *a, **k: {"rotated": False, "mode": "off"}
+        pr.restore_proxy_rotation = lambda *a, **k: False
+        pr.current_proxy_override = lambda *a, **k: ""
+        sys.modules["proxy_rotate"] = pr
     sys.path.insert(0, str(ROOT))
     import grok_register_ttk as reg  # noqa: E402
 

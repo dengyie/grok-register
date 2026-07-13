@@ -330,6 +330,35 @@ cpa_proxy  >  proxy  >  环境变量 https_proxy / http_proxy
 
 配置优先于 shell 环境变量，避免「config 写了代理却被环境变量盖掉」。
 
+### 代理/出口 IP 轮换（注册级，不动整机出口）
+
+三种模式（`proxy_rotate_mode` / `PROXY_ROTATE_MODE` / `--proxy-rotate`）：
+
+| 模式 | 行为 | 整机影响 |
+|------|------|----------|
+| `off` | 不轮换 | 无 |
+| `list` | 轮换 `proxy_list` 里的代理 URL，仅注册 Chromium / 注册 HTTP 使用 | 无（其他 app 不走该代理） |
+| `clash` | 在 Clash 专用策略组 `GROK-REG` 上轮换节点；`DOMAIN-SUFFIX,x.ai,GROK-REG` 等规则只让 xAI/Grok 流量走该组 | 仅命中域名的流量；主策略组（如「宝可梦」）永不修改 |
+
+- **list 模式**：`proxy_list` 支持 `http://a:1,http://b:2` / 换行 / `["a","b"]` / `.txt` 文件；带 `user:pass` 自动走 `LocalAuthProxyBridge`。
+- **clash 模式**（推荐本机）：首次运行自动在 `clash-verge.yaml` 注入 `GROK-REG` 组 + xAI 域名规则并 `force reload`；进程退出自动恢复专用组原节点。**绝不修改主策略组**。
+- 每多少次注册换一次：`proxy_rotate_every` / `PROXY_ROTATE_EVERY` / `--proxy-rotate-every`（默认 1 = 每号换）。
+
+```bash
+# Clash 域名规则轮换（每号换 IP，仅 grok.com/x.ai 走新节点，主组不动）
+PROXY_ROTATE_MODE=clash python3 register_cli.py --extra 5
+
+# 或纯 CLI
+python3 register_cli.py --proxy-rotate clash --proxy-rotate-every 2 --extra 10
+
+# 自定义命中域名
+python3 register_cli.py --proxy-rotate clash --clash-domains x.ai,grok.com,accounts.x.ai
+
+# 显式代理池轮换（list 模式，仅注册浏览器）
+PROXY_ROTATE_MODE=list PROXY_LIST="http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080" \
+  python3 register_cli.py --extra 5
+```
+
 ### CPA 关键项
 
 | 字段 | 默认 / 建议 | 含义 |
