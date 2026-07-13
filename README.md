@@ -11,7 +11,7 @@
 | [DISCLAIMER.md](DISCLAIMER.md) | 免责声明 |
 | [SECURITY.md](SECURITY.md) | 密钥与泄露处理 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR |
-| [CHANGELOG.md](CHANGELOG.md) | 版本（当前 **v1.2.1**） |
+| [CHANGELOG.md](CHANGELOG.md) | 版本（当前 **v1.2.2**） |
 | [LICENSE](LICENSE) | MIT |
 | `config.simple.example.json` | **对外简易配置**（推荐新人） |
 | `config.example.json` | 全量字段 + 注释 |
@@ -111,45 +111,57 @@ OIDC 相关代码自包含在 `cpa_xai/`：
 
 ---
 
-## 5 分钟快速开始（对外简易模式）
+## 最短路径上手（对外简易模式）
 
-目标：**本地**跑通「注册 1 个号 → 写出 CPA → chat 探针」，**不**连远端 tebi。
+目标：**本地**跑通「注册 1 个号 → 写出 CPA → chat 探针」，**不**连远端 tebi。  
+（装齐 uv / Python 3.13 / Chrome / 代理 / 邮箱后，大约 **15 分钟**量级，不是魔法 5 分钟。）
+
+### 1. Clone + bootstrap（含 doctor）
 
 ```bash
 git clone https://github.com/dengyie/grok-register.git
 cd grok-register
-
-# 一键生成 config.json + mail_credentials.txt 并 uv sync
 bash scripts/setup_simple.sh
+```
 
-# 1) 改代理
-#    config.json → "proxy": "http://127.0.0.1:你的端口"
+会：生成 `config.json`（来自 `config.simple.example.json`）、可选 `mail_credentials.txt`、`uv sync`，并检查 Python / Chrome / 代理端口 / 邮箱占位。
 
-# 2) 填邮箱（email_provider=hotmail 时）
-#    mail_credentials.txt 每行：
-#    邮箱----密码----ClientID----Microsoft_refresh_token
+### 2. 填最小配置
 
-# 3) 注册 1 个号（有头浏览器更稳）
+默认 **`email_provider=duckmail`**（比 Hotmail 四段凭证省事）：
+
+```json
+{
+  "proxy": "http://127.0.0.1:7890",
+  "email_provider": "duckmail",
+  "duckmail_api_key": "你的_DuckMail_Key"
+}
+```
+
+若用 Hotmail，再改：
+
+```json
+{
+  "email_provider": "hotmail",
+  "hotmail_accounts_file": "mail_credentials.txt"
+}
+```
+
+```text
+# mail_credentials.txt 每行（勿提交）
+邮箱----密码----ClientID----Microsoft_refresh_token
+```
+
+改完可再跑一次 `bash scripts/setup_simple.sh` 看 doctor 是否还报 `[warn]`。
+
+### 3. 注册 1 个号
+
+```bash
 uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
-
-# 4) 看产物
 ls accounts_cli.txt cpa_auths/
 ```
 
-等价手动配置：
-
-```bash
-uv sync
-cp config.simple.example.json config.json
-cp mail_credentials.example.txt mail_credentials.txt
-# 编辑后同上 register_cli 命令
-```
-
-GUI：
-
-```bash
-uv run python grok_register_ttk.py
-```
+GUI：`uv run python grok_register_ttk.py`
 
 ### 什么叫「成功」
 
@@ -159,22 +171,42 @@ uv run python grok_register_ttk.py
 | `chat无权限` / `entitlement_denied` | models 可能 200，但 chat **403** | **不要 remint**；换获权渠道或付费 API |
 | 只有 `accounts_cli.txt` 有 SSO | 注册成功，OIDC/chat 未过 | SSO 可给 grok2api；**≠** free Build |
 
-默认配置（简易模板）：
+默认（简易模板）：
 
 - `cpa_probe_chat=true` — mint 后打最小 chat  
 - `cpa_remote_inject=false` — **不**自动推远端  
-- 无权限号写入 `cpa_auths/entitlement_denied.jsonl`，remint 会跳过  
+- 无权限号进 `cpa_auths/entitlement_denied.jsonl`，remint 会跳过  
 
-> **重要：** 本工具不能「生成」xAI free Build 权限。权限由 xAI 服务端在注册/邀请窗口授予；脚本只负责检测并 fail-fast。
+> **重要：** 本工具不能「生成」xAI free Build 权限。权限由 xAI 服务端授予；脚本只负责检测并 fail-fast。
 
-### 生产模式（可选）
+### 常见卡点
 
-需要一键注入 tebi live 池时：
+| 现象 | 处理 |
+|------|------|
+| doctor：proxy port closed | 启动本地代理，改 `config.json` → `proxy` |
+| doctor：duckmail_api_key empty | 填 DuckMail key，或改用 hotmail + 真凭证 |
+| doctor：mail placeholder | 换掉 `your@hotmail.com----...----refresh-token` 占位行 |
+| Turnstile / 注册页卡住 | `--no-headless` 有头浏览器；换 IP/代理 |
+| `entitlement_denied` / chat 403 | **号无 free Build 权**，勿 remint；见上文权限说明 |
+| Python 版本错误 | 需要 **3.13** + [uv](https://docs.astral.sh/uv/) |
+
+### 生产模式（可选 · 远端 live 注入）
+
+一键写入 CPA live 池时，用全量模板并打开这些键（详见 `config.example.json` 注释）：
+
+| 键 | 建议 |
+|----|------|
+| `cpa_remote_inject` | `true` |
+| `cpa_remote_live_required` | `true`（live 失败则整次失败） |
+| `cpa_remote_ssh_host` | 如 `tebi-tunnel` |
+| `cpa_remote_auth_dirs` | 默认 live+inventory：`/root/.cli-proxy-api,/personal/cpa/auths` |
+| `cpa_remote_credentials_file` | Bohrium/SSH 密码文件，或环境变量 `CPA_REMOTE_SSHPASS` |
+| `cpa_probe_chat` / `cpa_probe_chat_required` | 保持 `true`（无权限号不进 live） |
 
 ```bash
 cp config.example.json config.json
-# 打开：cpa_remote_inject=true、SSH/host、cpa_remote_auth_dirs
-# 详见下文「远端注入」与 config.example.json 注释
+# 编辑上表字段后：
+uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
 ```
 
 开发自检：

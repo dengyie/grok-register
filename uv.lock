@@ -179,7 +179,7 @@ wheels = [
 
 [[package]]
 name = "grok-register"
-version = "1.2.1"
+version = "1.2.2"
 source = { virtual = "." }
 dependencies = [
     { name = "curl-cffi" },

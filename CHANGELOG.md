@@ -5,12 +5,21 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] - 2026-07-13
+
+### Fixed
+
+- Simple default email channel is **duckmail** (not hotmail four-segment) for lower onboarding friction
+- `setup_simple.sh` doctor: Python/Chrome/proxy port, duckmail key / hotmail placeholder warnings; `uv sync` failure no longer aborts bootstrap
+- README honest **最短路径** timing, 常见卡点 table, production inject key checklist
+- Packaging tests: `bash -n`, setup smoke in temp dir (no overwrite)
+
 ## [1.2.1] - 2026-07-13
 
 ### Added
 
 - Outsider-friendly packaging: `config.simple.example.json` + `scripts/setup_simple.sh`
-- README **5 分钟快速开始** (simple local path; tebi inject off by default)
+- README quickstart (simple local path; tebi inject off by default)
 - Product success table: chat probe required; `entitlement_denied` ≠ remint
 
 ## [1.2.0] - 2026-07-13
