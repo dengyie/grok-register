@@ -16,6 +16,39 @@
 | `config.simple.example.json` | **对外简易配置**（推荐新人） |
 | `config.example.json` | 全量字段 + 注释 |
 
+## 如何使用（TL;DR）
+
+```bash
+# 1) 安装依赖并生成简易配置 + 环境检查
+git clone https://github.com/dengyie/grok-register.git
+cd grok-register
+bash scripts/setup_simple.sh
+
+# 2) 编辑 config.json
+#    - proxy: 本地代理，如 http://127.0.0.1:7890
+#    - 默认 email_provider=duckmail → 填 duckmail_api_key
+#    - 或改 hotmail → 填 mail_credentials.txt（邮箱----密码----ClientID----refresh_token）
+
+# 3) 注册 1 个号（推荐有头浏览器）
+uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
+
+# 4) 看结果
+ls accounts_cli.txt cpa_auths/
+# 统计里「chat可用」= free Build 真可用；entitlement_denied / chat 403 = 无权限，勿 remint
+```
+
+| 你想… | 看哪里 |
+|--------|--------|
+| 从零跑通本地链路 | [最短路径上手](#最短路径上手对外简易模式) |
+| 成功/失败怎么判断 | [什么叫「成功」](#什么叫成功) |
+| Hotmail 四段凭证 | [邮箱：Hotmail / Outlook](#邮箱hotmail--outlook) |
+| 全量配置项 | [配置说明](#配置说明) · `config.example.json` |
+| CLI 参数 | [CLI 参数速查](#cli-参数速查register_clipy) |
+| 推远端 CPA live | [生产模式](#生产模式可选--远端-live-注入) |
+| 卡住了 | [常见卡点](#常见卡点) · [故障排查](#故障排查) |
+
+GUI：`uv run python grok_register_ttk.py`
+
 ---
 
 ## 功能特性
