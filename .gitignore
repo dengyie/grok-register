@@ -35,3 +35,6 @@ backups/
 accounts_cli.txt
 cpa_auths/*.json
 logs/
+
+# 第三方参照注册机（只读借鉴，勿提交）
+/grok-register/
