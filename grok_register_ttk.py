@@ -2548,7 +2548,15 @@ def _gmail_imap_connect(mailbox_email, app_password, log_callback=None):
     held = True
     imap = None
     try:
-        imap = imaplib.IMAP4_SSL(host, port, timeout=45)
+        # .venv 的 ssl.create_default_context() 不自动加载 certifi，Gmail 证书链校验会
+        # CERTIFICATE_VERIFY_FAILED（unable to get local issuer）。显式指定 CA bundle。
+        import ssl as _ssl
+        try:
+            import certifi as _certifi
+            _imap_ctx = _ssl.create_default_context(cafile=_certifi.where())
+        except Exception:
+            _imap_ctx = _ssl.create_default_context()
+        imap = imaplib.IMAP4_SSL(host, port, timeout=45, ssl_context=_imap_ctx)
         try:
             imap.login(mailbox_email, app_password)
         except Exception as exc:
