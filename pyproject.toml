@@ -1,12 +1,12 @@
 [project]
-name = "grok-register"
-version = "1.2.3"
-description = "Grok register: signup + CPA OIDC mint + free Build chat entitlement gate (not a quota farm)"
+name = "register-machine"
+version = "1.3.0"
+description = "Universal multi-provider register machine (Grok/xAI, Xiaomi MiMo, layered register_core)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.13,<3.14"
 authors = [{ name = "dengyie" }]
-keywords = ["grok", "xai", "register", "oidc", "cpa", "automation"]
+keywords = ["register", "automation", "grok", "xai", "mimo", "oidc", "cpa"]
 dependencies = [
     "DrissionPage>=4.1",
     "curl_cffi>=0.7",
@@ -18,10 +18,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/dengyie/grok-register"
-Repository = "https://github.com/dengyie/grok-register"
-Issues = "https://github.com/dengyie/grok-register/issues"
-Changelog = "https://github.com/dengyie/grok-register/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/dengyie/register-machine"
+Repository = "https://github.com/dengyie/register-machine"
+Issues = "https://github.com/dengyie/register-machine/issues"
+Changelog = "https://github.com/dengyie/register-machine/blob/main/CHANGELOG.md"
 
 # application mode: uv manages deps only, no wheel build
 [tool.uv]

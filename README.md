@@ -1,22 +1,30 @@
-# Grok 注册机
+# 通用注册机（register-machine）
 
-基于 **Chromium + DrissionPage + turnstilePatch** 的 Grok 账号自动注册机：  
-**注册 → SSO 账本 → CPA OIDC mint → chat 可用性探针**（可选推远端 live 池）。
+多产品账号 / API Key **分层注册框架**：统一入口 `./register.sh`，共享邮箱策略、fail-fast、代理运维；各产品保留自己的浏览器栈与生产 runner。
 
-> **Education / personal automation only.** Not a free-quota farm, not for mass account creation, spam, resale, or bypassing paid limits. This tool **detects** free Build chat entitlement — it does **not** grant it. See [DISCLAIMER.md](DISCLAIMER.md).
+| Provider | 入口 | 栈 | 产物方向 |
+|----------|------|----|----------|
+| **Grok / xAI** | `./register.sh grok` | Python + DrissionPage + turnstilePatch | SSO 账本 → CPA OIDC mint → chat 探针（可选远端 live） |
+| **Xiaomi MiMo** | `./register.sh mimo` | Node + Playwright | `sk-` API Key（TTS 等）；CPA 侧按 **OpenAI-compat** 导入，非 xai auth |
+| **分层编排** | `./register.sh core` | `register_core/` | 邮箱 / 注册 / 验证 / 落盘 编排（不替代产品内核） |
 
-> **安全提示：** 不要提交 `config.json`、`mail_credentials.txt`、`accounts_*.txt`、`cpa_auths/*.json`、`backups/`、`.env`、`logs/`、`screenshots/`。仓库已 gitignore；只用 `*.example*` 模板。  
-> **合规提示：** 可能违反第三方服务条款。见 [DISCLAIMER.md](DISCLAIMER.md) / [SECURITY.md](SECURITY.md)。**MIT，无担保。**
+> **Education / personal automation only.** Not a free-quota farm, not for mass account creation, spam, resale, or bypassing paid limits. Grok path **detects** free Build chat entitlement — it does **not** grant it. See [DISCLAIMER.md](DISCLAIMER.md).
+
+> **安全提示：** 不要提交 `config.json`、`mail_credentials.txt`、`accounts_*.txt`、`cpa_auths/*.json`、`backups/`、`.env`、`logs/`、`screenshots/`、`providers/*/output/`。仓库已 gitignore；只用 `*.example*` 模板。  
+> **合规提示：** 可能违反第三方服务条款。见 [DISCLAIMER.md](DISCLAIMER.md) / [SECURITY.md](SECURITY.md)。**MIT，无担保。**  
+> **命名：** GitHub 仓库现为 [`dengyie/register-machine`](https://github.com/dengyie/register-machine)（原 `grok-register` 会重定向）。本地/pxed 目录名可仍叫 `grok-register`，以本仓代码为准。
 
 | 文档 | 说明 |
 |------|------|
 | [DISCLAIMER.md](DISCLAIMER.md) | 免责声明 |
 | [SECURITY.md](SECURITY.md) | 密钥与泄露处理 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR |
-| [CHANGELOG.md](CHANGELOG.md) | 版本（当前 **v1.2.3**） |
+| [CHANGELOG.md](CHANGELOG.md) | 版本（当前 **v1.3.0**） |
 | [LICENSE](LICENSE) | MIT |
-| `config.simple.example.json` | **对外简易配置**（推荐新人） |
-| `config.example.json` | 全量字段 + 注释 |
+| [register_core/README.md](register_core/README.md) | 分层通用框架 |
+| [providers/mimo/README.md](providers/mimo/README.md) | MiMo TTS Key 注册 |
+| `config.simple.example.json` | **Grok 简易配置**（推荐新人） |
+| `config.example.json` | Grok 全量字段 + 注释 |
 | `scripts/setup_simple.sh` | 一键配置 + 环境 doctor |
 | `scripts/doctor_secrets.sh` | 本地密钥/跟踪卫生检查（不打印内容） |
 
@@ -24,25 +32,53 @@
 
 ```bash
 # 1) 安装依赖并生成简易配置 + 环境检查
-git clone https://github.com/dengyie/grok-register.git
-cd grok-register
+git clone https://github.com/dengyie/register-machine.git
+cd register-machine
 bash scripts/setup_simple.sh
 
-# 2) 编辑 config.json
+# 2) 编辑 config.json（Grok 路径）
 #    - proxy: 本地代理，如 http://127.0.0.1:7890
 #    - 默认 email_provider=duckmail → 填 duckmail_api_key
 #    - 或改 hotmail → 填 mail_credentials.txt（邮箱----密码----ClientID----refresh_token）
+#    - 禁止 Hotmail plus-alias 农场；一号一箱
 
-# 3) 注册 1 个号（推荐有头浏览器）
-uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
+# 3) 统一入口
+./register.sh help
+./register.sh grok 1 1                 # xAI / Grok（推荐有头浏览器）
+# 等价：uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
+./register.sh mimo                     # Xiaomi MiMo API Key（需 Node runtime）
+./register.sh core list
+./register.sh core run -p mimo -n 1
 
 # 4) 看结果
-ls accounts_cli.txt cpa_auths/
-# 统计里「chat可用」= free Build 真可用；entitlement_denied / chat 403 = 无权限，勿 remint
+ls accounts_cli.txt cpa_auths/                 # Grok
+ls providers/mimo/output/ 2>/dev/null || true  # MiMo（或 pxed /personal/mimo-register/output）
 
 # 5) 可选：本地密钥卫生（不打印文件内容）
 bash scripts/doctor_secrets.sh
 ```
+
+### 分层架构（register_core）
+
+```text
+./register.sh
+     │
+     ├─ grok  → register_cli / grok_register_ttk / cpa_xai   （生产权威）
+     ├─ mimo  → providers/mimo/run-register.sh               （生产权威）
+     └─ core  → python -m register_core                      （编排 + 本轮归因）
+```
+
+| 层 | 包路径 | 说明 |
+|----|--------|------|
+| 邮箱来源 | `register_core/email` | in-process allocate+OTP；grok/mimo 黑盒时仅 `provider` |
+| 产品注册 | `register_core/providers` | 适配器：本轮 ledger/RESULT_JSON/文件增量归因 |
+| 验证 | `register_core/verify` | key shape / 账本存在；live chat 仍走 cpa_xai |
+| 落盘 | `register_core/sink` | JSONL 0600；public 脱敏 |
+| 编排 | `register_core/pipeline` | count + fail-fast；verify 失败必失败 |
+
+详见 [register_core/README.md](register_core/README.md) · [providers/mimo/README.md](providers/mimo/README.md)。
+
+部署布局示例（pxed）：代码仓 `/personal/grok-register`（或 `register-machine`）+ Node runtime `/personal/mimo-register` + clash `:7897`。
 
 **Python：** 需要 **3.13**（`pyproject.toml` → `requires-python`）。请用 [uv](https://docs.astral.sh/uv/)：`uv python install 3.13 && uv sync`。系统自带 3.11/3.12 不够。
 
@@ -55,6 +91,8 @@ bash scripts/doctor_secrets.sh
 | CLI 参数 | [CLI 参数速查](#cli-参数速查register_clipy) |
 | 推远端 CPA live | [生产模式](#生产模式可选--远端-live-注入) |
 | 卡住了 | [常见卡点](#常见卡点) · [故障排查](#故障排查) |
+| MiMo TTS Key | [providers/mimo/README.md](providers/mimo/README.md) · `./register.sh mimo` |
+| 分层通用框架 | [register_core/README.md](register_core/README.md) · `./register.sh core` |
 
 GUI：`uv run python grok_register_ttk.py`
 
@@ -161,8 +199,8 @@ OIDC 相关代码自包含在 `cpa_xai/`：
 ### 1. Clone + bootstrap（含 doctor）
 
 ```bash
-git clone https://github.com/dengyie/grok-register.git
-cd grok-register
+git clone https://github.com/dengyie/register-machine.git
+cd register-machine
 bash scripts/setup_simple.sh
 ```
 
@@ -673,5 +711,5 @@ GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 
 - **CLIProxyAPI / CPA：** 自备；将 `cpa_auths/xai-*.json` 放到 CPA auth-dir 即可热加载
 - **免费 Grok 4.5：** 只走 Build OIDC + `cli-chat-proxy`，不是网页 SSO
-- **仓库：** https://github.com/dengyie/grok-register
-- **最新发布：** https://github.com/dengyie/grok-register/releases/tag/v1.1.3
+- **仓库：** https://github.com/dengyie/register-machine
+- **最新发布：** https://github.com/dengyie/register-machine/releases/tag/v1.3.0

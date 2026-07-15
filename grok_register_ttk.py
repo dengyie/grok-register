@@ -2535,15 +2535,39 @@ def gmail_get_email_and_token():
     raise Exception("Gmail 无法生成可用域名邮箱（碰撞过多或 defaultDomains 不可用）")
 
 
+def _parse_http_proxy_url(proxy: str) -> tuple[str, int] | None:
+    """Return (host, port) for http(s) proxy URL; None if empty/unsupported."""
+    raw = (proxy or "").strip()
+    if not raw:
+        return None
+    from urllib.parse import urlparse
+
+    if "://" not in raw:
+        raw = "http://" + raw
+    u = urlparse(raw)
+    if u.scheme not in {"http", "https"}:
+        return None
+    host = u.hostname
+    if not host:
+        return None
+    port = u.port or (443 if u.scheme == "https" else 80)
+    return host, int(port)
+
+
 def _gmail_imap_connect(mailbox_email, app_password, log_callback=None):
     import imaplib
+    import socket as _socket
 
     host = get_gmail_imap_host()
     port = get_gmail_imap_port()
     folder = get_gmail_imap_folder()
+    proxy = get_configured_proxy()
+    proxy_hp = _parse_http_proxy_url(proxy)
     if log_callback:
+        via = f" via {proxy_hp[0]}:{proxy_hp[1]}" if proxy_hp else " direct"
         log_callback(
-            f"[Debug] Gmail IMAP 连接: host={host}:{port} user={mailbox_email} folder={folder}"
+            f"[Debug] Gmail IMAP 连接: host={host}:{port} user={mailbox_email} "
+            f"folder={folder}{via}"
         )
     _gmail_imap_sem.acquire()
     held = True
@@ -2557,7 +2581,49 @@ def _gmail_imap_connect(mailbox_email, app_password, log_callback=None):
             _imap_ctx = _ssl.create_default_context(cafile=_certifi.where())
         except Exception:
             _imap_ctx = _ssl.create_default_context()
-        imap = imaplib.IMAP4_SSL(host, port, timeout=45, ssl_context=_imap_ctx)
+
+        if proxy_hp:
+            # pxed 等无公网容器：直连 imap.gmail.com 必超时，HTTP CONNECT 走 cpa/register 代理。
+            class _HTTPProxyIMAP4_SSL(imaplib.IMAP4_SSL):
+                def open(self, host, port=993, timeout=None):
+                    self.host = host
+                    self.port = port
+                    ph, pp = proxy_hp
+                    sock = _socket.create_connection((ph, pp), timeout=timeout or 45)
+                    try:
+                        sock.sendall(
+                            f"CONNECT {host}:{port} HTTP/1.1\r\n"
+                            f"Host: {host}:{port}\r\n\r\n".encode()
+                        )
+                        buf = b""
+                        while b"\r\n\r\n" not in buf:
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                break
+                            buf += chunk
+                            if len(buf) > 8192:
+                                break
+                        status_line = buf.split(b"\r\n", 1)[0]
+                        if b"200" not in status_line:
+                            raise OSError(
+                                f"IMAP proxy CONNECT failed: {status_line!r}"
+                            )
+                        self.sock = _imap_ctx.wrap_socket(
+                            sock, server_hostname=host
+                        )
+                        self.file = self.sock.makefile("rb")
+                    except Exception:
+                        try:
+                            sock.close()
+                        except Exception:
+                            pass
+                        raise
+
+            imap = _HTTPProxyIMAP4_SSL(host, port, timeout=45)
+        else:
+            imap = imaplib.IMAP4_SSL(
+                host, port, timeout=45, ssl_context=_imap_ctx
+            )
         try:
             imap.login(mailbox_email, app_password)
         except Exception as exc:

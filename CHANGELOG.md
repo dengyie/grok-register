@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-07-15
+
+### Added
+
+- **Universal multi-provider hub**: `./register.sh` (`grok` / `mimo` / `core` / `smoke`)
+- **`register_core/`** layered framework: contracts, email sources, provider adapters, verify, sink, pipeline, CLI
+- **`providers/mimo/`**: Xiaomi MiMo API Key registration (Node/Playwright `register-one.js`, Geetest slide, tinyhost OTP)
+- MiMo → CPA OpenAI-compat helper (optional, local): `providers/mimo/inject_cpa_openai.py` (does **not** touch production by default)
+- Unit tests: `test_register_core_layers.py`, `test_mimo_cpa_openai_inject.py`
+- Grok Gmail IMAP: HTTP CONNECT via configured proxy (container/no-public egress)
+
+### Changed
+
+- Project rename: **`grok-register` → `register-machine`** (GitHub + package metadata); Grok remains first-class provider
+- README / CONTRIBUTING oriented as multi-provider monorepo; Grok path docs retained under the same tree
+- Fail-fast + this-run result attribution (no historical tail as success); public redact password/secret
+
+### Security
+
+- Jsonl sink `O_CREAT|0600`; black-box providers reject fake external `--email-source`
+- Ignore MiMo runtime output / node_modules; never commit keys or mail ledgers
+
 ## [1.2.3] - 2026-07-13
 
 ### Added

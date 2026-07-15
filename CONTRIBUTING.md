@@ -11,9 +11,9 @@ Thanks for considering a contribution.
 ## Development setup
 
 ```bash
-git clone https://github.com/dengyie/grok-register.git
-cd grok-register
-# outsider path
+git clone https://github.com/dengyie/register-machine.git
+cd register-machine
+# outsider path (Grok simple config)
 bash scripts/setup_simple.sh
 # or full template
 uv sync --extra dev
@@ -24,13 +24,20 @@ bash scripts/doctor_secrets.sh   # hygiene; never prints secret contents
 
 Python **3.13** is required (`requires-python` in `pyproject.toml`). Install via [uv](https://docs.astral.sh/uv/): `uv python install 3.13`.
 
+Repo layout (multi-provider):
+
+- `register_cli.py` / `grok_register_ttk.py` / `cpa_xai/` — Grok production path
+- `providers/mimo/` — MiMo production path (Node)
+- `register_core/` — layered orchestration (not a browser rewrite)
+- `./register.sh` — unified hub
+
 ## Tests
 
 Offline (default, used by CI):
 
 ```bash
 uv run python -m pytest -q
-bash -n scripts/setup_simple.sh scripts/doctor_secrets.sh
+bash -n scripts/setup_simple.sh scripts/doctor_secrets.sh register.sh
 bash scripts/doctor_secrets.sh || test $? -eq 2
 ```
 

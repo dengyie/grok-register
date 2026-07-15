@@ -1,0 +1,68 @@
+# register_core — 分层通用注册框架
+
+以 **register-machine monorepo** 为主仓，把 Grok / MiMo（及后续产品）挂到同一套层边界上。
+
+```text
+CLI / register.sh
+       │
+       ▼
+  pipeline（编排：count、fail-fast、verify、sink）
+       │
+       ├─ providers/*   产品注册（grok / mimo）— 黑盒适配已验证 runner
+       ├─ email/*       邮箱来源（allocate + poll_otp）— 供 in-process 使用
+       ├─ verify/*      注册后能力探测（诚实 deferred / shape）
+       ├─ sink/*        结果落盘（JSONL 0600）
+       └─ contracts + errors
+```
+
+## 生产权威 vs 编排入口
+
+| 路径 | 用途 |
+|------|------|
+| `./register.sh grok` / `register_cli.py` | **Grok 生产权威** |
+| `./register.sh mimo` / `providers/mimo/run-register.sh` | **MiMo 生产权威** |
+| `./register.sh core` / `python -m register_core` | 分层编排 + 结果归因；**非**替代上述 runner 的内核 |
+
+`grok` / `mimo` 适配器是 **black-box**：`email_source` 只能是 `provider`（适配器内部邮箱）。传入 `tinyhost` 等会 **直接报错**，避免假分层。
+
+## 层职责
+
+| 层 | 职责 | 不做 |
+|----|------|------|
+| **contracts** | 统一结果；`to_public_dict` 脱敏 password/secret | 业务逻辑 |
+| **email** | 一号一箱 + OTP；可插拔 | 打开注册页（black-box 时） |
+| **providers** | signup；成功必须 **本轮归因**（ledger/RESULT_JSON/文件增量） | 读历史 tail 当成功 |
+| **verify** | key 形态 / 账本存在；live chat 仍走 cpa_xai | 假装 chat 已通 |
+| **sink** | JSONL `O_CREAT|0600` | 改 provider |
+| **pipeline** | count + fail-fast；verify 失败一律 `ok=False` | 产品 DOM |
+
+## 成功归因（硬规则）
+
+- **MiMo：** `RESULT_JSON:` 行，或 `accounts.jsonl` / `success_keys.txt` 的 **调用前 offset 之后增量**；禁止单独用历史文件末行。
+- **Grok：** `accounts_cli` **增量** 或 `+ 注册成功: email`；exit=0 无本轮邮箱 → **失败**。
+- 子进程 **timeout 杀进程组**（`start_new_session` + `killpg`），降低 Chrome 孤儿。
+
+## CLI
+
+```bash
+python -m register_core list
+python -m register_core run -p mimo -n 1 --sink output/core-mimo.jsonl
+python -m register_core run -p grok -n 1 --no-verify
+# 错误示例（会 exit 2）：
+python -m register_core run -p mimo --email-source tinyhost
+```
+
+## 新增产品
+
+1. 实现 `RegisterProvider.register_one` → 本轮可验证的 `RegisterResult`
+2. 注册到 `providers/registry`
+3. 若 in-process：可接 `EmailSource`；若 black-box：加入 pipeline 黑名单并文档说明
+4. 单测覆盖：历史污染、exit0 无增量、public 脱敏、fail-fast
+
+## 测试
+
+```bash
+python test_register_core_layers.py
+# or
+python -m pytest test_register_core_layers.py -q
+```

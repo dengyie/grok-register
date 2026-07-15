@@ -27,10 +27,13 @@ jobs:
       - name: Sync dependencies
         run: uv sync --extra dev
 
-      - name: Shell syntax (setup/doctor)
+      - name: Shell syntax (setup/doctor/hub)
         run: |
           bash -n scripts/setup_simple.sh
           bash -n scripts/doctor_secrets.sh
+          bash -n register.sh
+          bash -n providers/mimo/run-register.sh
+          bash -n providers/mimo/smoke.sh
 
       - name: Syntax check
         run: |
@@ -53,6 +56,20 @@ jobs:
             cpa_xai/proxyutil.py \
             cpa_xai/schema.py \
             cpa_xai/writer.py \
+            register_core/__init__.py \
+            register_core/__main__.py \
+            register_core/cli.py \
+            register_core/contracts.py \
+            register_core/errors.py \
+            register_core/pipeline.py \
+            register_core/email/__init__.py \
+            register_core/providers/__init__.py \
+            register_core/providers/grok_adapter.py \
+            register_core/providers/mimo_adapter.py \
+            register_core/verify/__init__.py \
+            register_core/sink/jsonl_sink.py \
+            register_core/util/process.py \
+            providers/mimo/inject_cpa_openai.py \
             scripts/backfill_cpa_xai_from_accounts.py \
             scripts/backup_registered_accounts.py \
             scripts/export_cpa_xai_from_grok_auth.py \

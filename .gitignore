@@ -38,3 +38,15 @@ logs/
 
 # 第三方参照注册机（只读借鉴，勿提交）
 /grok-register/
+
+# MiMo provider runtime (node_modules lives on pxed /personal/mimo-register)
+providers/mimo/node_modules/
+providers/mimo/output/
+providers/mimo/logs/
+providers/mimo/.env
+providers/mimo/dist/
+
+# local live harness ledgers (never commit)
+_live_activation_accounts.txt
+created_mailboxes.txt
+_live_activation.log
