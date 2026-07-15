@@ -46,8 +46,10 @@ class ChatGPTProvider:
             or os.environ.get("MIMO_PROXY")
             or os.environ.get("https_proxy")
             or os.environ.get("HTTPS_PROXY")
-            or "http://127.0.0.1:7897"
+            or ""
         )
+        # Project-owned nodes.json is the default egress when no fixed proxy set.
+        # Do NOT hardcode Clash/mihomo 7897 — external VPN software is optional only.
         self.email_source_name = (
             email_source_name
             or os.environ.get("CHATGPT_EMAIL_SOURCE")

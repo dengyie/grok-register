@@ -14,7 +14,7 @@
 #   - Grok stays Python (register_cli + grok_register_ttk + cpa_xai)
 #   - MiMo is providers/mimo (Node/Playwright register-one.js)
 #   - ChatGPT is providers/chatgpt (in-process curl_cffi + EmailSource)
-#   - Shared ops: clash/mihomo 7897, Xvfb, fail-fast, no alias-email farm
+#   - Shared ops: project nodes.json egress (no Clash required), Xvfb, fail-fast
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -38,18 +38,24 @@ Layers (register_core):
   See register_core/README.md
 
 Env (shared):
-  GROK_NODE / GROK_CONFIG   clash node/config (grok path)
-  MIMO_PROXY                default http://127.0.0.1:7897
+  GROK_NODE / GROK_CONFIG   optional clash node/config (grok browser only)
+  MIMO_PROXY                optional; MiMo may still default local mixed port
   MIMO_RUNTIME              node_modules home (pxed: /personal/mimo-register)
-  CHATGPT_PROXY             default http://127.0.0.1:7897
-  CHATGPT_EMAIL_SOURCE      default tinyhost
+  REGISTER_NODES_FILE       project nodes catalog (default ./nodes.json)
+  CHATGPT_PROXY             optional fixed URL (empty = use nodes/list)
+  CHATGPT_PROXY_LIST        explicit self-controlled pool
+  CHATGPT_EMAIL_SOURCE      default gmail_imap (via runner)
   HEADLESS / HEADLESS_FLAG  browser mode
   OTP_RETRIES               MiMo temp-mail polls
+
+Nodes (project-owned egress — no external VPN required):
+  python -m register_core nodes list|check|add
+  cp nodes.example.json nodes.json   # edit real HTTP proxy URLs
 
 Deploy layout example (pxed):
   /personal/grok-register or ai-register-machine   this monorepo
   /personal/mimo-register                       optional Node runtime
-  /personal/clash                               mihomo
+  nodes.json under monorepo root (gitignored credentials)
 
 Env:
   GROK_CODE_ROOT   optional override for monorepo root on remote

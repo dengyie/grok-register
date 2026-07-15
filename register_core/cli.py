@@ -32,12 +32,26 @@ def cmd_list(_: argparse.Namespace) -> int:
     print("providers:", ", ".join(list_providers()))
     print("email_sources:", ", ".join(list_email_sources()))
     print("layers: contracts → email → providers → verify → sink → pipeline → cli")
+    print("nodes: python -m register_core nodes list|check|add  (project-owned egress)")
     print(
         "note: grok/mimo are black-box (email_source=provider). "
         "chatgpt is in-process (use --email-source tinyhost|auto). "
         "Hub: ./register.sh grok|mimo|chatgpt"
     )
     return 0
+
+
+def cmd_nodes(args: argparse.Namespace) -> int:
+    """Delegate to register_core.nodes.cli (project-owned egress, no Clash)."""
+    from register_core.nodes.cli import main as nodes_main
+
+    # Rebuild argv for nodes CLI: everything after `nodes`
+    sub = list(args.nodes_argv or [])
+    if sub and sub[0] == "--":
+        sub = sub[1:]
+    if args.file:
+        sub = ["--file", args.file, *sub]
+    return int(nodes_main(sub if sub else ["list"]))
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -104,6 +118,18 @@ def build_parser() -> argparse.ArgumentParser:
     pl = sub.add_parser("list", help="List providers and email sources")
     pl.set_defaults(func=cmd_list)
 
+    pn = sub.add_parser(
+        "nodes",
+        help="Project-owned egress nodes (list/check/add) — no Clash required",
+    )
+    pn.add_argument("--file", "-f", default="", help="nodes catalog path")
+    pn.add_argument(
+        "nodes_argv",
+        nargs=argparse.REMAINDER,
+        help="nodes subcommand: list | check | add URL | urls",
+    )
+    pn.set_defaults(func=cmd_nodes)
+
     pr = sub.add_parser("run", help="Run registration pipeline")
     pr.add_argument("--provider", "-p", required=True, help="grok | mimo | chatgpt")
     pr.add_argument("--count", "-n", type=int, default=1)
@@ -141,9 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument(
         "--proxy-rotate",
-        choices=("off", "list", "clash"),
+        choices=("off", "list", "nodes", "clash"),
         default="",
-        help="egress rotation: list=pool URLs (preferred); clash=dedicated group only",
+        help=(
+            "egress rotation: list/nodes=pool URLs from --proxy-list or nodes.json "
+            "(preferred, no Clash); clash=dedicated group only (legacy)"
+        ),
     )
     pr.add_argument(
         "--proxy-rotate-every",

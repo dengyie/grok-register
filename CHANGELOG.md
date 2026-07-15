@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-07-16
+
+### Added
+
+- **Project-owned node runtime** (`register_core/nodes/`): catalog (`nodes.json` / `nodes.txt`), health probe (`curl_cffi` → ipify), `NodeManager` rotation, CLI `python -m register_core nodes list|check|add|urls`
+- `register_core/util/proxy.py` seeds list-mode pool from nodes catalog when `PROXY_LIST` empty
+- Examples: `nodes.example.json`, `nodes.example.txt`; gitignore for credential catalogs
+- Tests: `test_register_core_nodes.py` (catalog, manager, proxy util, pipeline wiring)
+
+### Changed
+
+- ChatGPT runner / adapter: **no default Clash `127.0.0.1:7897`** — egress from `nodes.json` / `PROXY_LIST` / explicit `CHATGPT_PROXY`
+- Docs: ARCHITECTURE egress section; ChatGPT README + hub help describe nodes-first path
+
+### Notes
+
+- Operators supply HTTP/SOCKS proxy endpoints they control; no embedded VLESS client and no Clash selector dependency
+- Clash mode remains optional legacy for Grok browser only
+
 ## [1.4.1] - 2026-07-15
 
 ### Added

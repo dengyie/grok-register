@@ -1,12 +1,12 @@
 """Register-scoped egress selection for layered providers.
 
-Self-controlled nodes: prefer ``list`` mode with explicit proxy URLs
-(``PROXY_LIST`` / ``proxy_list``). That path never calls Clash to select a
-node — each register attempt uses a concrete upstream from the pool.
+Self-controlled nodes (preferred):
+  1. Project catalog ``nodes.json`` / ``REGISTER_NODES_FILE`` via ``register_core.nodes``
+  2. Explicit ``PROXY_LIST`` / ``proxy_list`` / ``CHATGPT_PROXY_LIST``
+  3. Single fixed ``CHATGPT_PROXY`` / ``proxy`` URL
 
-Clash mode remains available for Grok browser paths that already use a
-dedicated GROK-REG group, but in-process providers (ChatGPT) should default
-to list / fixed URL.
+None of the above require Clash/mihomo UI. Clash mode remains an optional
+legacy path for Grok browser only — never the ChatGPT default.
 """
 
 from __future__ import annotations
@@ -30,11 +30,26 @@ def _env_first(*names: str, default: str = "") -> str:
     return default
 
 
-def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Build proxy_rotate.configure() dict from extra + env (CLI-friendly).
+def _load_nodes_proxy_list() -> str:
+    """Pull enabled URLs from project-owned node catalog (empty if none)."""
+    disable = _env_first("REGISTER_NODES", "USE_NODES", default="1").lower()
+    if disable in {"0", "false", "off", "no"}:
+        return ""
+    try:
+        from register_core.nodes import get_manager
 
-    Priority: extra keys > CHATGPT_* env > PROXY_* env > defaults.
-    If a proxy list is present and mode is empty, auto-select ``list``.
+        mgr = get_manager()
+        return mgr.as_proxy_list_value(healthy_only=False)
+    except Exception as exc:
+        log.debug("nodes catalog unavailable: %s", exc)
+        return ""
+
+
+def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build proxy_rotate.configure() dict from extra + env + nodes catalog.
+
+    Priority for pool: extra.proxy_list > env PROXY_LIST > nodes.json.
+    If a proxy list is present and mode is unset, auto-select ``list``.
     """
     extra = extra if isinstance(extra, dict) else {}
 
@@ -54,6 +69,12 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
         or _env_first("CHATGPT_PROXY_LIST", "PROXY_LIST", "PROXY_POOL")
         or ""
     )
+    nodes_source = ""
+    if not proxy_list:
+        nodes_source = _load_nodes_proxy_list()
+        if nodes_source:
+            proxy_list = nodes_source
+
     base_proxy = str(
         extra.get("proxy")
         or _env_first(
@@ -66,12 +87,17 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
         )
         or ""
     ).strip()
+    # If pool from nodes and no fixed proxy, seed base with first URL for status.
+    if not base_proxy and proxy_list:
+        first = str(proxy_list).split(",")[0].strip()
+        if first:
+            base_proxy = first
 
     # Self-control default: unset mode + explicit pool ⇒ list (no Clash selector).
     # Explicit proxy_rotate_mode=off stays off even if a list is present.
     if not mode_explicit and proxy_list:
         mode = "list"
-    if mode in {"proxy_list", "pool", "url", "urls"}:
+    if mode in {"proxy_list", "pool", "url", "urls", "nodes"}:
         mode = "list"
 
     every_raw = extra.get("proxy_rotate_every")
@@ -110,6 +136,7 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
         "proxy_list": proxy_list,
         "proxy": base_proxy,
         "proxy_rotate_update_cpa": False,
+        "nodes_pool": bool(nodes_source),
     }
 
     # Optional clash knobs only if operator explicitly chose clash.

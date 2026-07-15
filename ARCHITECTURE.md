@@ -35,11 +35,13 @@ ai-register-machine/
 │   ├── errors.py
 │   ├── pipeline.py
 │   ├── cli.py
+│   ├── nodes/                  # project-owned egress catalog (no Clash)
 │   ├── email/                  # EmailSource registry + sources/*
 │   ├── providers/              # adapter registry (black-box OK)
 │   ├── verify/
 │   ├── sink/
-│   └── util/
+│   └── util/                   # proxy rotation bridged to nodes + list mode
+├── nodes.example.json          # copy → nodes.json (gitignored credentials)
 ├── providers/                  # product packages (runtime authority)
 │   ├── README.md
 │   ├── _template/              # copy-me skeleton for a new product
@@ -81,6 +83,33 @@ hub / GUI / apps
 Black-box providers (`grok`, `mimo`) **own mail internally**. Passing `--email-source=tinyhost` is rejected so we never pretend the pipeline controls their mailbox.
 
 In-process providers (`chatgpt`) **must** use `EmailSource` (default tinyhost). Protocol path: authorize PKCE → register → email OTP → create_account → oauth/token. Artifacts under `providers/chatgpt/output/` (gitignored). No silent production CPA inject.
+
+## Egress / nodes (project-owned)
+
+ChatGPT and other in-process providers **must not require Clash/mihomo/system VPN**.
+
+```text
+extra.proxy_list / CHATGPT_PROXY_LIST / PROXY_LIST
+        │
+        ▼ (if empty)
+register_core.nodes catalog (nodes.json / nodes.txt)
+        │
+        ▼
+proxy_rotate list mode → concrete URL per attempt
+        │
+        ▼
+provider curl_cffi session (proxy=URL)
+```
+
+| Path | Authority |
+|------|-----------|
+| Catalog | `register_core/nodes/` + `nodes.json` (gitignored) |
+| CLI | `python -m register_core nodes list\|check\|add` |
+| Wiring | `register_core/util/proxy.py` auto-loads catalog → list mode |
+| Optional Clash | Grok browser legacy only; never ChatGPT default |
+
+Operators supply HTTP/SOCKS proxy endpoints they control. Embedding a full
+VLESS/Hysteria client binary is out of scope.
 
 ## Production authority (do not invert)
 

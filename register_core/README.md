@@ -48,9 +48,24 @@ CLI / register.sh
 python -m register_core list
 python -m register_core run -p mimo -n 1 --sink output/core-mimo.jsonl
 python -m register_core run -p grok -n 1 --no-verify
+python -m register_core run -p chatgpt -n 1 --email-source gmail_imap
 # 错误示例（会 exit 2）：
 python -m register_core run -p mimo --email-source tinyhost
 ```
+
+## Egress nodes（项目自有，不依赖 Clash）
+
+```bash
+cp nodes.example.json nodes.json   # 填入你控制的 HTTP/SOCKS 代理
+python -m register_core nodes list
+python -m register_core nodes check
+python -m register_core nodes add 'http://user:pass@host:port' --label us1
+```
+
+- 目录：`register_core/nodes/`（catalog / manager / health）
+- 接线：`register_core/util/proxy.py` 在 `PROXY_LIST` 为空时从 `nodes.json` 拉池并自动 `list` 轮换
+- 关闭：`REGISTER_NODES=0`
+- 详见 `register_core/nodes/README.md`
 
 ## 新增产品
 

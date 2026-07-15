@@ -15,6 +15,12 @@ config.json
 config.local.json
 config.json.bak*
 .env
+# Project-owned egress catalog (may contain proxy credentials)
+nodes.json
+nodes.txt
+nodes.list
+proxy_list.txt
+nodes.json.tmp
 accounts_*.txt
 emails_used.txt
 emails_error.txt

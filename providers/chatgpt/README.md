@@ -20,9 +20,13 @@ auth-file pools (CLIProxyAPI / codex-lb consumers), **not** a chat2api gateway.
 ./register.sh chatgpt [count]
 # or layered:
 ./register.sh core run -p chatgpt -n 1 --email-source gmail_imap
-CHATGPT_PROXY=http://127.0.0.1:7897 ./providers/chatgpt/run-register.sh 1
 
-# Self-controlled nodes (no Clash selector dependency):
+# Project-owned nodes (no external VPN / Clash required):
+cp nodes.example.json nodes.json   # edit real HTTP proxy URLs
+python -m register_core nodes check
+./providers/chatgpt/run-register.sh 1
+
+# Or explicit pool:
 CHATGPT_PROXY_LIST='http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080' \
   ./providers/chatgpt/run-register.sh 3
 # equivalent:
@@ -30,29 +34,35 @@ CHATGPT_PROXY_LIST='http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080' \
   --proxy-list 'http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080'
 ```
 
-## Egress (self-controlled)
+## Egress (project-owned; no Clash)
 
-Register machine owns the node pool. **Preferred:** `list` mode with explicit
-proxy URLs — each attempt binds `curl_cffi` to a concrete upstream from
-`CHATGPT_PROXY_LIST` / `--proxy-list`. This does **not** call Clash API to
-pick a GLOBAL/PROXY node.
+Register machine owns the node pool via `nodes.json` / `PROXY_LIST`.
+**No Clash / mihomo / system VPN is required.** Each attempt binds `curl_cffi`
+to a concrete upstream HTTP/SOCKS proxy URL.
 
-| Mode | How | Clash dependency |
-|------|-----|------------------|
-| fixed `CHATGPT_PROXY` | single URL (often local mixed port) | optional local forwarder only |
-| `list` + `CHATGPT_PROXY_LIST` | rotate explicit URLs per attempt | **none** |
-| `clash` | dedicated group only (legacy Grok path) | controller API; never main selector |
+| Source | How | External VPN |
+|--------|-----|--------------|
+| `nodes.json` / `nodes.txt` | project catalog; auto list rotation | **none** |
+| `CHATGPT_PROXY_LIST` / `--proxy-list` | rotate explicit URLs per attempt | **none** |
+| fixed `CHATGPT_PROXY` | single URL | optional only |
+| `clash` mode | dedicated group (legacy Grok) | controller API |
 
-Empty list + no mode → fixed proxy (default `http://127.0.0.1:7897`).
-Setting a non-empty proxy list auto-enables `list` mode.
+Priority: explicit list → `nodes.json` → fixed `CHATGPT_PROXY` → none.
+Empty everything → no proxy (direct). Setting a non-empty pool auto-enables `list`.
+
+```bash
+python -m register_core nodes list|check|add 'http://u:p@host:port'
+```
 
 ## Env
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `CHATGPT_PROXY` | `http://127.0.0.1:7897` | Fixed outbound proxy when not rotating |
-| `CHATGPT_PROXY_LIST` / `PROXY_LIST` | empty | Self-controlled node pool (comma/newline/`.txt`) |
-| `CHATGPT_PROXY_ROTATE_MODE` / `PROXY_ROTATE_MODE` | auto | `off` \| `list` \| `clash` (list auto if pool set) |
+| `REGISTER_NODES_FILE` / `NODES_FILE` | `./nodes.json` | Project-owned egress catalog |
+| `REGISTER_NODES` | `1` | Set `0` to ignore catalog |
+| `CHATGPT_PROXY` | empty | Fixed outbound proxy when not rotating |
+| `CHATGPT_PROXY_LIST` / `PROXY_LIST` | empty (falls back to nodes) | Self-controlled node pool |
+| `CHATGPT_PROXY_ROTATE_MODE` / `PROXY_ROTATE_MODE` | auto | `off` \| `list` \| `nodes` \| `clash` |
 | `CHATGPT_PROXY_ROTATE_EVERY` | `1` | Rotate every N attempts |
 | `CHATGPT_EMAIL_DOMAIN` | `publicvm.com` | Force tinyhost domain (higher OTP deliverability) |
 | `CHATGPT_OTP_TIMEOUT` | `180` | OTP poll seconds |

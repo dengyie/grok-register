@@ -2,10 +2,11 @@
 # ChatGPT / OpenAI platform register runner (in-process via register_core).
 # Usage:
 #   ./providers/chatgpt/run-register.sh [count]
-#   COUNT=1 CHATGPT_PROXY=http://127.0.0.1:7897 ./providers/chatgpt/run-register.sh
-# Self-controlled nodes (preferred — no Clash selector):
-#   CHATGPT_PROXY_LIST='http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080' \
-#     ./providers/chatgpt/run-register.sh 3
+#
+# Project-owned egress (preferred — no Clash / no system VPN):
+#   1. Put proxies in ./nodes.json (see nodes.example.json)
+#   2. Or: CHATGPT_PROXY_LIST='http://u:p@host:port,...'
+#   3. Or: CHATGPT_PROXY=http://user:pass@host:port
 set -euo pipefail
 
 COUNT="${COUNT:-${1:-1}}"
@@ -18,18 +19,18 @@ else
   PY="${PYTHON:-python3}"
 fi
 
-export CHATGPT_PROXY="${CHATGPT_PROXY:-${MIMO_PROXY:-http://127.0.0.1:7897}}"
+# No default to Clash 7897 — nodes.json / PROXY_LIST own egress.
+export CHATGPT_PROXY="${CHATGPT_PROXY:-${MIMO_PROXY:-}}"
 export CHATGPT_EMAIL_SOURCE="${CHATGPT_EMAIL_SOURCE:-gmail_imap}"
-# Self-controlled egress: set CHATGPT_PROXY_LIST / PROXY_LIST to a pool of
-# upstream URLs. When set, rotation auto-selects list mode — no Clash node pick.
 export CHATGPT_PROXY_LIST="${CHATGPT_PROXY_LIST:-${PROXY_LIST:-}}"
 export CHATGPT_PROXY_ROTATE_MODE="${CHATGPT_PROXY_ROTATE_MODE:-${PROXY_ROTATE_MODE:-}}"
 export CHATGPT_PROXY_ROTATE_EVERY="${CHATGPT_PROXY_ROTATE_EVERY:-${PROXY_ROTATE_EVERY:-1}}"
+export REGISTER_NODES_FILE="${REGISTER_NODES_FILE:-${NODES_FILE:-$ROOT/nodes.json}}"
 
 SINK="${CHATGPT_SINK:-$ROOT/providers/chatgpt/output/pipeline.jsonl}"
 mkdir -p "$(dirname "$SINK")"
 
-echo "[chatgpt] COUNT=$COUNT proxy=$CHATGPT_PROXY proxy_list=${CHATGPT_PROXY_LIST:-'(none)'} rotate=${CHATGPT_PROXY_ROTATE_MODE:-auto} email_source=$CHATGPT_EMAIL_SOURCE" >&2
+echo "[chatgpt] COUNT=$COUNT proxy=${CHATGPT_PROXY:-'(nodes/list)'} proxy_list=${CHATGPT_PROXY_LIST:-'(nodes.json)'} rotate=${CHATGPT_PROXY_ROTATE_MODE:-auto} email_source=$CHATGPT_EMAIL_SOURCE nodes=$REGISTER_NODES_FILE" >&2
 
 ARGS=(
   -m register_core run
