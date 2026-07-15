@@ -45,6 +45,31 @@ def _load_nodes_proxy_list() -> str:
         return ""
 
 
+def _load_core_proxy_url() -> str:
+    """Ensure project mihomo core and return its mixed-port URL (or empty)."""
+    mode = _env_first("REGISTER_CORE", "USE_CORE", "REGISTER_MIHOMO", default="auto").lower()
+    if mode in {"0", "false", "off", "no"}:
+        return ""
+    try:
+        from register_core.nodes import core_runtime as core
+
+        st = core.status()
+        if not st.get("bin_exists") or not st.get("config_exists"):
+            if mode in {"1", "true", "on", "yes", "require", "force"}:
+                log.warning("project mihomo core missing bin/config under .nodes/")
+            return ""
+        if mode == "auto" and not st.get("running"):
+            # auto: only attach if already running, unless REGISTER_CORE_AUTOSTART=1
+            autostart = _env_first("REGISTER_CORE_AUTOSTART", "CORE_AUTOSTART", default="1").lower()
+            if autostart not in {"1", "true", "yes", "on"}:
+                return ""
+        url = core.ensure_proxy_url(start_core=True)
+        return (url or "").strip()
+    except Exception as exc:
+        log.debug("project core unavailable: %s", exc)
+        return ""
+
+
 def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build proxy_rotate.configure() dict from extra + env + nodes catalog.
 
@@ -70,10 +95,21 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
         or ""
     )
     nodes_source = ""
+    core_source = ""
     if not proxy_list:
         nodes_source = _load_nodes_proxy_list()
         if nodes_source:
             proxy_list = nodes_source
+    # Embedded mihomo core local mixed port (protocol nodes from YAML).
+    # Used when no explicit pool; can also be merged if REGISTER_CORE_MERGE=1.
+    if not proxy_list:
+        core_source = _load_core_proxy_url()
+        if core_source:
+            proxy_list = core_source
+    elif _env_first("REGISTER_CORE_MERGE", default="").lower() in {"1", "true", "yes", "on"}:
+        core_source = _load_core_proxy_url()
+        if core_source and core_source not in str(proxy_list):
+            proxy_list = f"{proxy_list},{core_source}" if proxy_list else core_source
 
     base_proxy = str(
         extra.get("proxy")
@@ -87,11 +123,13 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
         )
         or ""
     ).strip()
-    # If pool from nodes and no fixed proxy, seed base with first URL for status.
+    # If pool from nodes/core and no fixed proxy, seed base with first URL for status.
     if not base_proxy and proxy_list:
         first = str(proxy_list).split(",")[0].strip()
         if first:
             base_proxy = first
+    if not base_proxy and core_source:
+        base_proxy = core_source
 
     # Self-control default: unset mode + explicit pool ⇒ list (no Clash selector).
     # Explicit proxy_rotate_mode=off stays off even if a list is present.
@@ -137,6 +175,7 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
         "proxy": base_proxy,
         "proxy_rotate_update_cpa": False,
         "nodes_pool": bool(nodes_source),
+        "core_pool": bool(core_source),
     }
 
     # Optional clash knobs only if operator explicitly chose clash.

@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-07-16
+
+### Added
+
+- **Embedded mihomo mini-core** under `.nodes/bin/mihomo` + `.nodes/config/runtime.yaml`
+- `register_core/nodes/core_runtime.py` + CLI: `nodes core start|stop|status|select|proxies|url`
+- `scripts/import_clash_to_nodes.py` — copy Clash Verge YAMLs into project path and pack runtime
+- `scripts/bootstrap_nodes_core.sh` — download official MetaCubeX mihomo for the host arch
+- `util/proxy.py` can auto-start core and use `http://127.0.0.1:17897` when HTTP catalog empty
+
+### Notes
+
+- Protocol nodes (vless/ss/vmess/trojan/…) live in project runtime YAML; dialable HTTP/SOCKS still in `nodes.json`
+- No dependency on Clash Verge UI / system TUN / `:7897` for ChatGPT path
+- `.nodes/` is gitignored (binary + credentials)
+
 ## [1.5.0] - 2026-07-16
 
 ### Added
@@ -21,8 +37,7 @@ project versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Notes
 
-- Operators supply HTTP/SOCKS proxy endpoints they control; no embedded VLESS client and no Clash selector dependency
-- Clash mode remains optional legacy for Grok browser only
+- Operators supply HTTP/SOCKS proxy endpoints they control; Clash mode remains optional legacy for Grok browser only
 
 ## [1.4.1] - 2026-07-15
 

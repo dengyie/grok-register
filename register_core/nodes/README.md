@@ -1,48 +1,53 @@
 # Project-owned egress nodes
 
-Register machine keeps its own node catalog. **No Clash / mihomo / system VPN
-is required** for ChatGPT or other in-process providers.
+Two layers — both live **inside this repo**, not Clash Verge UI:
 
-## Catalog
+| Layer | Path | What |
+|-------|------|------|
+| HTTP/SOCKS catalog | `nodes.json` | dialable URLs for curl_cffi |
+| Protocol core | `.nodes/` + mihomo | VLESS/SS/VMess/Trojan… from your YAML → `http://127.0.0.1:17897` |
+
+## 1) HTTP/SOCKS catalog
 
 | File | Format |
 |------|--------|
 | `nodes.json` | `{ "version": 1, "nodes": [ { "url", "id", "label", "tags", "enabled" } ] }` |
 | `nodes.txt` / `nodes.list` | one `http://user:pass@host:port` per line |
 
-Path resolution: `REGISTER_NODES_FILE` / `NODES_FILE` → first existing default → `./nodes.json`.
-
-Copy `nodes.example.json` → `nodes.json` and replace with real upstream proxies
-(residential / ISP / static HTTP proxies you control). Files are gitignored.
-
-## CLI
-
 ```bash
 python -m register_core nodes list
-python -m register_core nodes check          # probe ipify via curl_cffi
+python -m register_core nodes check
 python -m register_core nodes add 'http://u:p@host:port' --label us1
-python -m register_core nodes urls --redact
 ```
 
-## How registration uses nodes
+## 2) Embedded mihomo core (YAML protocol nodes)
 
-1. `Pipeline` / `register_core.util.proxy` loads enabled URLs from the catalog.
-2. Auto-enables **list** rotation (`proxy_rotate`) — each attempt binds a concrete URL.
-3. ChatGPT `curl_cffi` session uses that URL directly (not a local Clash port).
+```bash
+./scripts/bootstrap_nodes_core.sh
+python scripts/import_clash_to_nodes.py          # import Clash Verge YAMLs into .nodes/
+python -m register_core nodes core start
+python -m register_core nodes core proxies
+python -m register_core nodes core select '🇺🇸【北美洲】美国04原生丨直连【2x】'
+python -m register_core nodes core url            # http://127.0.0.1:17897
+```
 
-Priority:
+Import packs medium profiles into `.nodes/config/runtime.yaml` (gitignored).
+Mega free lists (>400 proxies/file) are skipped for core; their HTTP/SOCKS still
+go into `nodes.json`.
+
+## How registration picks egress
 
 ```text
-extra.proxy_list / CHATGPT_PROXY_LIST / PROXY_LIST
-  → nodes.json enabled URLs
-  → single CHATGPT_PROXY / proxy
-  → (none — fail if required)
+extra.proxy_list / PROXY_LIST
+  → nodes.json enabled HTTP/SOCKS
+  → project mihomo mixed-port (.nodes core, auto-start)
+  → fixed CHATGPT_PROXY
 ```
 
-Disable catalog: `REGISTER_NODES=0`.
+Env: `REGISTER_CORE=auto|1|0`, `REGISTER_CORE_AUTOSTART=1`, `REGISTER_NODES=0` to
+skip HTTP catalog only.
 
 ## Not in scope
 
-- Embedding a full VLESS/Hysteria client binary (operators supply **HTTP/SOCKS
-  proxy endpoints** the process can dial).
-- Driving external Clash UI to switch GLOBAL/PROXY — that is explicitly out.
+- Driving **external** Clash Verge UI / system TUN as a required dependency
+- Shipping subscription credentials in git (`.nodes/` and `nodes.json` are gitignored)

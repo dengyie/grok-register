@@ -86,13 +86,16 @@ In-process providers (`chatgpt`) **must** use `EmailSource` (default tinyhost). 
 
 ## Egress / nodes (project-owned)
 
-ChatGPT and other in-process providers **must not require Clash/mihomo/system VPN**.
+ChatGPT and other in-process providers **must not require Clash Verge UI / system TUN**.
 
 ```text
 extra.proxy_list / CHATGPT_PROXY_LIST / PROXY_LIST
         │
         ▼ (if empty)
-register_core.nodes catalog (nodes.json / nodes.txt)
+register_core.nodes catalog (nodes.json HTTP/SOCKS)
+        │
+        ▼ (if empty)
+project mihomo core (.nodes/) → http://127.0.0.1:17897
         │
         ▼
 proxy_rotate list mode → concrete URL per attempt
@@ -103,13 +106,14 @@ provider curl_cffi session (proxy=URL)
 
 | Path | Authority |
 |------|-----------|
-| Catalog | `register_core/nodes/` + `nodes.json` (gitignored) |
-| CLI | `python -m register_core nodes list\|check\|add` |
-| Wiring | `register_core/util/proxy.py` auto-loads catalog → list mode |
-| Optional Clash | Grok browser legacy only; never ChatGPT default |
+| HTTP catalog | `nodes.json` + `register_core/nodes/` |
+| Protocol YAML | `.nodes/config/runtime.yaml` (imported Clash profiles) |
+| Mini-core | `.nodes/bin/mihomo` via `nodes core start` |
+| CLI | `python -m register_core nodes list\|check\|core …` |
+| Import | `scripts/import_clash_to_nodes.py` |
+| Optional external Clash | Grok browser legacy only; never ChatGPT default |
 
-Operators supply HTTP/SOCKS proxy endpoints they control. Embedding a full
-VLESS/Hysteria client binary is out of scope.
+VLESS/SS/… require the project mihomo core; plain HTTP/SOCKS can skip it.
 
 ## Production authority (do not invert)
 

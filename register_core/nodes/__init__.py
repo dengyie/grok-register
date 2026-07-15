@@ -1,8 +1,10 @@
-"""Project-owned egress nodes (no external Clash/mihomo required).
+"""Project-owned egress nodes + optional embedded mihomo core.
 
-Operators put proxy URLs in ``nodes.json`` / ``nodes.txt`` (gitignored).
-``NodeManager`` health-checks and rotates them; ``register_core.util.proxy``
-pulls the pool automatically so providers never depend on a local VPN UI.
+Two layers:
+
+1. ``nodes.json`` / ``nodes.txt`` — dialable HTTP/SOCKS URLs for curl_cffi
+2. ``.nodes/`` + mihomo core — protocol proxies from Clash YAML (vless/ss/…)
+   exposed as local ``http://127.0.0.1:17897`` without Clash Verge UI
 """
 
 from __future__ import annotations

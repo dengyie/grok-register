@@ -1,4 +1,4 @@
-"""CLI for project-owned egress nodes (no Clash)."""
+"""CLI for project-owned egress nodes + embedded mihomo core."""
 
 from __future__ import annotations
 
@@ -81,17 +81,56 @@ def cmd_urls(args: argparse.Namespace) -> int:
         print(json.dumps(urls, ensure_ascii=False))
     else:
         for u in urls:
-            # never print credentials raw if possible — still need real URL for operators
             from proxy_bridge import proxy_log_label
 
             print(proxy_log_label(u) if args.redact else u)
     return 0 if urls else 1
 
 
+def cmd_core(args: argparse.Namespace) -> int:
+    from register_core.nodes import core_runtime as core
+
+    action = args.core_action
+    if action == "status":
+        st = core.status()
+        print(json.dumps(st, ensure_ascii=False, indent=2))
+        return 0 if st.get("bin_exists") else 2
+    if action == "start":
+        res = core.start(wait_s=float(args.wait))
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res.get("ok") else 1
+    if action == "stop":
+        res = core.stop()
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+    if action == "select":
+        res = core.select(args.name)
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res.get("ok") else 1
+    if action == "proxies":
+        names = core.list_proxy_names()
+        if args.json:
+            print(json.dumps(names, ensure_ascii=False, indent=2))
+        else:
+            for n in names:
+                print(n)
+        return 0 if names else 1
+    if action == "url":
+        try:
+            url = core.ensure_proxy_url(start_core=not args.no_start)
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
+            return 1
+        print(url)
+        return 0
+    print(f"unknown core action: {action}", file=sys.stderr)
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="register_core.nodes",
-        description="Project-owned egress nodes (self-controlled; no Clash required)",
+        description="Project-owned egress nodes + embedded mihomo core (no Clash Verge required)",
     )
     p.add_argument(
         "--file",
@@ -101,13 +140,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pl = sub.add_parser("list", help="List nodes (public labels, no secrets)")
+    pl = sub.add_parser("list", help="List HTTP/SOCKS nodes (public labels)")
     pl.add_argument("--json", action="store_true")
     pl.set_defaults(func=cmd_list)
 
-    pc = sub.add_parser("check", help="Health-check all enabled nodes via curl_cffi")
+    pc = sub.add_parser("check", help="Health-check enabled HTTP/SOCKS nodes via curl_cffi")
     pc.add_argument("--timeout", type=float, default=15.0)
-    pc.add_argument("--no-save", action="store_true", help="do not write last_* back to catalog")
+    pc.add_argument("--no-save", action="store_true")
     pc.set_defaults(func=cmd_check)
 
     pa = sub.add_parser("add", help="Append a proxy URL to the catalog")
@@ -121,6 +160,18 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--json", action="store_true")
     pu.add_argument("--redact", action="store_true")
     pu.set_defaults(func=cmd_urls)
+
+    pcore = sub.add_parser("core", help="Project mihomo mini-core (VLESS/SS/… distribution)")
+    pcore.add_argument(
+        "core_action",
+        choices=("status", "start", "stop", "select", "proxies", "url"),
+        help="core lifecycle / select proxy / print local mixed URL",
+    )
+    pcore.add_argument("name", nargs="?", default="", help="for select: proxy name")
+    pcore.add_argument("--wait", type=float, default=8.0, help="start wait seconds")
+    pcore.add_argument("--no-start", action="store_true", help="url: do not auto-start")
+    pcore.add_argument("--json", action="store_true")
+    pcore.set_defaults(func=cmd_core)
 
     return p
 

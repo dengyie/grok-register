@@ -21,6 +21,8 @@ nodes.txt
 nodes.list
 proxy_list.txt
 nodes.json.tmp
+# Embedded mihomo core + imported Clash YAML (secrets + large binary)
+.nodes/
 accounts_*.txt
 emails_used.txt
 emails_error.txt
