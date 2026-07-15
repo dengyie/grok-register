@@ -5085,8 +5085,8 @@ class GrokRegisterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("AI 注册机 · ai-register-machine")
-        self.root.geometry("980x860")
-        self.root.minsize(900, 760)
+        self.root.geometry("1080x820")
+        self.root.minsize(960, 700)
         self.is_running = False
         self.batch_count = 0
         self.success_count = 0
@@ -5097,7 +5097,13 @@ class GrokRegisterGUI:
         self.accounts_output_file = ""
         self.stats_lock = threading.Lock()
         self._tutorial_window = None
+        self._batch_target = 0
+        self._log_max_lines = 4000
+        self._form_widgets = []
+        self._closed = False
         self.setup_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(80, self._drain_ui_queue)
         self.root.after(200, self._maybe_show_tutorial_on_start)
 
     def setup_ui(self):
@@ -5117,9 +5123,6 @@ class GrokRegisterGUI:
         style.configure("Accent.TButton", padding=(12, 4))
         style.configure("Card.TLabelframe", padding=8)
         style.configure("Card.TLabelframe.Label", font=("", 10, "bold"))
-
-        self.root.geometry("1080x820")
-        self.root.minsize(960, 700)
 
         root_pad = ttk.Frame(self.root, padding=(12, 10))
         root_pad.pack(fill=tk.BOTH, expand=True)
@@ -5407,6 +5410,8 @@ class GrokRegisterGUI:
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 6))
         self.clear_btn = ttk.Button(btn_row, text="清空日志", command=self.clear_log)
         self.clear_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self.copy_log_btn = ttk.Button(btn_row, text="复制日志", command=self.copy_log)
+        self.copy_log_btn.pack(side=tk.LEFT, padx=(0, 6))
         self.help_btn = ttk.Button(btn_row, text="教程", command=self.show_tutorial)
         self.help_btn.pack(side=tk.LEFT)
 
@@ -5449,7 +5454,47 @@ class GrokRegisterGUI:
         self.log_text.tag_configure("err", foreground="#cf222e")
         self.log_text.tag_configure("warn", foreground="#9a6700")
         self.log_text.tag_configure("info", foreground="#0969da")
+        self.log_text.configure(state=tk.DISABLED)
 
+        out_row = ttk.Frame(right)
+        out_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(out_row, text="输出").pack(side=tk.LEFT)
+        self.output_path_var = tk.StringVar(value="—")
+        self.output_path_label = ttk.Label(
+            out_row, textvariable=self.output_path_var, foreground="#555", wraplength=280
+        )
+        self.output_path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 6))
+        self.open_output_btn = ttk.Button(
+            out_row, text="打开结果", command=self.open_output_file, state=tk.DISABLED
+        )
+        self.open_output_btn.pack(side=tk.RIGHT)
+
+        # Widgets locked while a batch is running (log/stop remain usable).
+        self._form_widgets = [
+            self.email_provider_combo,
+            self.count_spinbox,
+            self.thread_spinbox,
+            self.nsfw_check,
+            self.proxy_entry,
+            self.api_key_entry,
+            self.cloudflare_api_base_entry,
+            self.cloudflare_api_key_entry,
+            self.cloudflare_auth_mode_combo,
+            self.cloudflare_paths_entry,
+            self.cloudmail_url_entry,
+            self.cloudmail_admin_email_entry,
+            self.cloudmail_password_entry,
+            self.hotmail_accounts_file_entry,
+            self.default_domains_entry,
+            self.gmail_imap_user_entry,
+            self.gmail_imap_password_entry,
+            self.grok2api_local_auto_check,
+            self.grok2api_local_file_entry,
+            self.grok2api_pool_name_combo,
+            self.grok2api_remote_auto_check,
+            self.grok2api_remote_base_entry,
+            self.grok2api_remote_key_entry,
+        ]
         self._batch_target = 0
         self._on_provider_changed()
 
@@ -5496,66 +5541,239 @@ class GrokRegisterGUI:
         if hasattr(self, "provider_badge_var"):
             self.provider_badge_var.set(f"Provider: grok · mail={key}")
 
-    def log(self, message):
+    def _ui_thread(self) -> bool:
+        return threading.current_thread() is threading.main_thread()
+
+    def _enqueue_ui(self, fn, *args, **kwargs):
+        """Marshal UI work onto the Tk main thread."""
+        if self._closed:
+            return
+        if self._ui_thread():
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                pass
+            return
+        self.ui_queue.put((fn, args, kwargs))
+
+    def _drain_ui_queue(self):
+        if self._closed:
+            return
+        try:
+            while True:
+                fn, args, kwargs = self.ui_queue.get_nowait()
+                try:
+                    fn(*args, **kwargs)
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(80, self._drain_ui_queue)
+        except Exception:
+            pass
+
+    def _on_close(self):
+        if self.is_running:
+            if not messagebox.askyesno("退出确认", "注册任务仍在运行，确定退出？\n（会请求停止，浏览器线程随后退出）"):
+                return
+            self.stop_requested = True
+        self._closed = True
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def _set_form_enabled(self, enabled: bool):
+        """Lock config controls while a batch runs; stop/log stay usable."""
+        for w in getattr(self, "_form_widgets", []):
+            try:
+                if isinstance(w, ttk.Combobox):
+                    w.configure(state=("readonly" if enabled else tk.DISABLED))
+                else:
+                    w.configure(state=(tk.NORMAL if enabled else tk.DISABLED))
+            except Exception:
+                pass
+
+    def _select_mail_tab(self):
+        nb = getattr(self, "_ui_notebook", None)
+        if nb is None:
+            return
+        try:
+            # tab order: 0 basic, 1 mail, 2 adv
+            nb.select(1)
+        except Exception:
+            pass
+
+    def _focus_widget(self, widget):
+        try:
+            widget.focus_set()
+        except Exception:
+            pass
+
+    def _validation_fail(self, message: str, *, focus=None, mail_tab: bool = False):
+        self.log(f"[!] {message}")
+        if mail_tab:
+            self._select_mail_tab()
+        if focus is not None:
+            self.root.after(50, lambda: self._focus_widget(focus))
+        try:
+            messagebox.showwarning("配置不完整", message, parent=self.root)
+        except Exception:
+            pass
+
+    def _apply_log_line(self, message: str):
+        if self._closed or not hasattr(self, "log_text"):
+            return
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        # 仅当用户当前就在底部时自动跟随，避免手动上滑后被强制拉回底部
-        yview = self.log_text.yview()
-        at_bottom = bool(yview) and yview[1] >= 0.999
+        try:
+            yview = self.log_text.yview()
+            at_bottom = bool(yview) and yview[1] >= 0.999
+        except Exception:
+            at_bottom = True
         line = f"[{timestamp}] {message}\n"
-        tag = None
         msg = str(message or "")
         if msg.startswith("[+]") or "注册成功" in msg:
             tag = "ok"
-        elif msg.startswith("[-]") or msg.startswith("[!]") or "失败" in msg[:20]:
-            tag = "err" if (msg.startswith("[-]") or "失败" in msg[:20]) else "warn"
-        elif msg.startswith("[*]") or msg.startswith("[cpa]"):
+        elif msg.startswith("[-]") or "失败" in msg[:24]:
+            tag = "err"
+        elif msg.startswith("[!]"):
+            tag = "warn"
+        elif msg.startswith("[*]") or msg.startswith("[cpa]") or msg.startswith("---"):
             tag = "info"
-        if tag:
-            self.log_text.insert(tk.END, line, tag)
         else:
-            self.log_text.insert(tk.END, line)
-        if at_bottom:
-            self.log_text.see(tk.END)
+            tag = None
+        try:
+            self.log_text.configure(state=tk.NORMAL)
+            if tag:
+                self.log_text.insert(tk.END, line, tag)
+            else:
+                self.log_text.insert(tk.END, line)
+            # Cap growth so multi-hour runs don't freeze the Text widget.
+            try:
+                end_line = int(float(str(self.log_text.index("end-1c")).split(".")[0]))
+                max_lines = int(getattr(self, "_log_max_lines", 4000) or 4000)
+                if end_line > max_lines:
+                    # delete oldest ~20%
+                    cut = max(1, end_line - max_lines + max_lines // 5)
+                    self.log_text.delete("1.0", f"{cut}.0")
+            except Exception:
+                pass
+            if at_bottom:
+                self.log_text.see(tk.END)
+            self.log_text.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+    def log(self, message):
+        self._enqueue_ui(self._apply_log_line, message)
 
     def clear_log(self):
-        self.log_text.delete(1.0, tk.END)
+        def _clear():
+            try:
+                self.log_text.configure(state=tk.NORMAL)
+                self.log_text.delete(1.0, tk.END)
+                self.log_text.configure(state=tk.DISABLED)
+            except Exception:
+                pass
+        self._enqueue_ui(_clear)
 
-    def update_stats(self):
+    def copy_log(self):
+        def _copy():
+            try:
+                content = self.log_text.get("1.0", tk.END)
+                self.root.clipboard_clear()
+                self.root.clipboard_append(content)
+                self.status_var.set("日志已复制")
+            except Exception as exc:
+                self._apply_log_line(f"[!] 复制日志失败: {exc}")
+        self._enqueue_ui(_copy)
+
+    def open_output_file(self):
+        path = (self.accounts_output_file or "").strip()
+        if not path or not os.path.exists(path):
+            messagebox.showinfo("打开结果", "还没有生成账号结果文件。", parent=self.root)
+            return
+        try:
+            if sys.platform == "darwin":
+                os.system(f'open "{path}"')
+            elif sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                os.system(f'xdg-open "{path}" >/dev/null 2>&1 &')
+        except Exception as exc:
+            messagebox.showerror("打开结果", f"无法打开: {exc}", parent=self.root)
+
+    def _apply_stats(self):
         target = int(getattr(self, "_batch_target", 0) or 0)
-        done = int(self.success_count) + int(self.fail_count)
+        with self.stats_lock:
+            ok = int(self.success_count)
+            fail = int(self.fail_count)
+        done = ok + fail
         if target > 0:
-            self.stats_var.set(
-                f"成功 {self.success_count} · 失败 {self.fail_count} · 目标 {target}"
-            )
+            self.stats_var.set(f"成功 {ok} · 失败 {fail} · 目标 {target}")
             pct = min(100.0, (done / target) * 100.0)
             if hasattr(self, "progress_var"):
                 self.progress_var.set(pct)
             if hasattr(self, "progress_label_var"):
                 self.progress_label_var.set(f"进度 {done}/{target} ({pct:.0f}%)")
         else:
-            self.stats_var.set(f"成功 {self.success_count} · 失败 {self.fail_count} · 目标 —")
+            self.stats_var.set(f"成功 {ok} · 失败 {fail} · 目标 —")
 
-    def _set_running_ui(self, running):
+    def update_stats(self):
+        self._enqueue_ui(self._apply_stats)
+
+    def _apply_running_ui(self, running: bool):
         self.is_running = running
-        self.start_btn.config(state=tk.DISABLED if running else tk.NORMAL)
-        self.stop_btn.config(state=tk.NORMAL if running else tk.DISABLED)
+        try:
+            self.start_btn.config(state=tk.DISABLED if running else tk.NORMAL)
+            self.stop_btn.config(state=tk.NORMAL if running else tk.DISABLED)
+        except Exception:
+            pass
+        self._set_form_enabled(not running)
         if running:
             self.status_var.set("运行中")
-            self.status_label.config(foreground="#0969da")
+            try:
+                self.status_label.config(foreground="#0969da")
+            except Exception:
+                pass
             if hasattr(self, "phase_var"):
                 self.phase_var.set("阶段：注册进行中")
         else:
             self.status_var.set("就绪")
-            self.status_label.config(foreground="#1a7f37")
+            try:
+                self.status_label.config(foreground="#1a7f37")
+            except Exception:
+                pass
             if hasattr(self, "phase_var"):
                 target = int(getattr(self, "_batch_target", 0) or 0)
-                done = int(self.success_count) + int(self.fail_count)
+                with self.stats_lock:
+                    ok = int(self.success_count)
+                    fail = int(self.fail_count)
+                done = ok + fail
                 if target and done:
-                    self.phase_var.set(
-                        f"阶段：已结束 · 成功 {self.success_count} / 失败 {self.fail_count}"
-                    )
+                    self.phase_var.set(f"阶段：已结束 · 成功 {ok} / 失败 {fail}")
+                elif getattr(self, "stop_requested", False) and done:
+                    self.phase_var.set(f"阶段：已停止 · 成功 {ok} / 失败 {fail}")
                 else:
                     self.phase_var.set("阶段：待命")
+            # enable open-output if file exists
+            path = (self.accounts_output_file or "").strip()
+            try:
+                if path and os.path.exists(path):
+                    self.output_path_var.set(path)
+                    self.open_output_btn.config(state=tk.NORMAL)
+            except Exception:
+                pass
+
+    def _set_running_ui(self, running):
+        self._enqueue_ui(self._apply_running_ui, running)
+
+    def set_phase(self, text: str):
+        def _set():
+            if hasattr(self, "phase_var"):
+                self.phase_var.set(text)
+        self._enqueue_ui(_set)
 
     def _maybe_show_tutorial_on_start(self):
         if bool(config.get("show_tutorial_on_start", True)):
@@ -5757,46 +5975,94 @@ class GrokRegisterGUI:
             config["register_threads"] = max(1, min(10, int(self.thread_var.get())))
         except Exception:
             config["register_threads"] = 1
+        try:
+            count = int(self.count_var.get())
+            if count < 1:
+                raise ValueError("count < 1")
+            count = min(100, count)
+            config["register_count"] = count
+        except Exception:
+            self._validation_fail("注册数量无效（1-100）", focus=self.count_spinbox)
+            return
         raw_paths = [x.strip() for x in self.cloudflare_paths_var.get().split(",") if x.strip()]
         if len(raw_paths) >= 4:
             config["cloudflare_path_domains"] = raw_paths[0] if raw_paths[0].startswith("/") else ("/" + raw_paths[0])
             config["cloudflare_path_accounts"] = raw_paths[1] if raw_paths[1].startswith("/") else ("/" + raw_paths[1])
             config["cloudflare_path_token"] = raw_paths[2] if raw_paths[2].startswith("/") else ("/" + raw_paths[2])
             config["cloudflare_path_messages"] = raw_paths[3] if raw_paths[3].startswith("/") else ("/" + raw_paths[3])
-        save_config()
-        if config["email_provider"] == "cloudflare" and not config["cloudflare_api_base"]:
-            self.log("[!] Cloudflare 模式需要先填写 Cloudflare API Base")
+
+        provider = self._normalize_provider_key(config["email_provider"])
+        # Validate before save so incomplete configs don't overwrite good ones silently
+        if provider in ("duckmail", "yyds") and not config.get("duckmail_api_key"):
+            self._validation_fail(
+                f"{provider} 模式需要填写 API Key",
+                focus=self.api_key_entry,
+                mail_tab=True,
+            )
             return
-        if config["email_provider"] == "cloudmail":
+        if provider == "cloudflare" and not config.get("cloudflare_api_base"):
+            self._validation_fail(
+                "Cloudflare 模式需要先填写 Cloudflare API Base",
+                focus=self.cloudflare_api_base_entry,
+                mail_tab=True,
+            )
+            return
+        if provider == "cloudmail":
             if not config.get("cloudmail_url"):
-                self.log("[!] CloudMail 模式需要先填写 CloudMail URL")
+                self._validation_fail(
+                    "CloudMail 模式需要先填写 CloudMail URL",
+                    focus=self.cloudmail_url_entry,
+                    mail_tab=True,
+                )
                 return
             if not config.get("cloudmail_admin_email"):
-                self.log("[!] CloudMail 模式需要先填写 CloudMail 管理员邮箱")
+                self._validation_fail(
+                    "CloudMail 模式需要先填写 CloudMail 管理员邮箱",
+                    focus=self.cloudmail_admin_email_entry,
+                    mail_tab=True,
+                )
                 return
             if not config.get("cloudmail_password"):
-                self.log("[!] CloudMail 模式需要先填写 CloudMail 管理员密码")
+                self._validation_fail(
+                    "CloudMail 模式需要先填写 CloudMail 管理员密码",
+                    focus=self.cloudmail_password_entry,
+                    mail_tab=True,
+                )
                 return
-        if config["email_provider"] in ("hotmail", "outlook", "outlookmail", "microsoft"):
+        if provider == "hotmail":
             hotmail_path = get_hotmail_accounts_file()
             if not os.path.exists(hotmail_path):
-                self.log(f"[!] Hotmail/Outlook 模式账号文件不存在: {hotmail_path}")
+                self._validation_fail(
+                    f"Hotmail/Outlook 模式账号文件不存在: {hotmail_path}",
+                    focus=self.hotmail_accounts_file_entry,
+                    mail_tab=True,
+                )
                 return
-        if config["email_provider"] in ("gmail", "google", "googlemail"):
+        if provider == "gmail":
+            # push UI into config for getters
             if not get_gmail_imap_user():
-                self.log("[!] Gmail 模式需要 gmail_imap_user / GMAIL_IMAP_USER")
+                self._validation_fail(
+                    "Gmail 模式需要 gmail_imap_user / GMAIL_IMAP_USER",
+                    focus=self.gmail_imap_user_entry,
+                    mail_tab=True,
+                )
                 return
             if not get_gmail_imap_password():
-                self.log("[!] Gmail 模式需要 gmail_imap_password / GMAIL_IMAP_PASSWORD（应用专用密码）")
+                self._validation_fail(
+                    "Gmail 模式需要应用专用密码（界面填写或环境变量 GMAIL_IMAP_PASSWORD）",
+                    focus=self.gmail_imap_password_entry,
+                    mail_tab=True,
+                )
                 return
             if not _gmail_default_domains():
-                self.log("[!] Gmail 模式需要在 defaultDomains 配置 catch-all 域名")
+                self._validation_fail(
+                    "Gmail 模式需要在 defaultDomains 配置 catch-all 域名",
+                    focus=self.default_domains_entry,
+                    mail_tab=True,
+                )
                 return
-        try:
-            count = int(self.count_var.get())
-        except Exception:
-            self.log("[!] 注册数量无效")
-            return
+
+        save_config()
         self.stop_requested = False
         self.success_count = 0
         self.fail_count = 0
@@ -5812,20 +6078,31 @@ class GrokRegisterGUI:
         self.accounts_output_file = os.path.join(
             os.path.dirname(__file__), f"accounts_{now}.txt"
         )
+        self.output_path_var.set(self.accounts_output_file)
+        try:
+            self.open_output_btn.config(state=tk.DISABLED)
+        except Exception:
+            pass
         self.update_stats()
         self._set_running_ui(True)
         worker_count = max(1, min(config.get("register_threads", 1), count))
         self.log(f"[*] 配置已保存，开始执行。目标数量: {count}，并发线程: {worker_count}")
         self.log(f"[*] 成功账号将实时保存到: {self.accounts_output_file}")
+        self.log(f"[*] 邮箱服务商: {provider}")
         threading.Thread(
             target=self.run_registration,
             args=(count, worker_count),
             daemon=True,
+            name="grok-register-batch",
         ).start()
 
     def stop_registration(self):
+        if not self.is_running and not self.stop_requested:
+            self.log("[!] 当前没有运行中的任务")
+            return
         self.stop_requested = True
-        self.log("[!] 用户停止注册")
+        self.set_phase("阶段：正在停止…")
+        self.log("[!] 用户停止注册（等待当前步骤结束后退出）")
 
     def _run_single_registration(self, idx, total, logf):
         email = ""
@@ -5967,6 +6244,7 @@ class GrokRegisterGUI:
                 except queue.Empty:
                     break
                 logf(f"--- 开始第 {idx}/{total} 个账号 ---")
+                self.set_phase(f"阶段：账号 {idx}/{total}")
                 stop_after = False
                 try:
                     self._run_single_registration(idx, total, logf)
@@ -5998,16 +6276,31 @@ class GrokRegisterGUI:
             start_interval = 0.8
         if start_interval < 0:
             start_interval = 0.0
+        self.set_phase(f"阶段：启动 {worker_count} 个工作线程")
         for wid in range(1, worker_count + 1):
-            t = threading.Thread(target=self._worker_loop, args=(wid, count, task_queue), daemon=True)
+            t = threading.Thread(
+                target=self._worker_loop,
+                args=(wid, count, task_queue),
+                daemon=True,
+                name=f"grok-worker-{wid}",
+            )
             workers.append(t)
             t.start()
             if wid < worker_count and start_interval > 0:
                 sleep_with_cancel(start_interval, self.should_stop)
         for t in workers:
             t.join()
+        with self.stats_lock:
+            ok = int(self.success_count)
+            fail = int(self.fail_count)
+        stopped = bool(self.stop_requested)
         self._set_running_ui(False)
-        self.log("[*] 任务结束")
+        if stopped:
+            self.log(f"[*] 任务已停止。成功 {ok} · 失败 {fail} · 目标 {count}")
+        else:
+            self.log(f"[*] 任务结束。成功 {ok} · 失败 {fail} · 目标 {count}")
+        if self.accounts_output_file and ok:
+            self.log(f"[*] 结果文件: {self.accounts_output_file}")
 
 def main():
     root = tk.Tk()

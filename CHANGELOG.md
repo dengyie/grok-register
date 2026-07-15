@@ -9,6 +9,7 @@ project versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Desktop GUI deep polish**: thread-safe `ui_queue` pump, form lock while running, validation focus/tab jump, log cap, copy log / open results, persist `register_count`
 - **Desktop GUI redesign** (`grok_register_ttk.py`): Notebook tabs (基础 / 邮箱 / 进阶)、邮箱服务商字段动态显隐、右侧进度条与彩色日志
 - **Multi-provider hub**: `./register.sh` (`grok` / `mimo` / `core` / `smoke`)
 - **`register_core/`** layered framework: contracts, email sources, provider adapters, verify, sink, pipeline, CLI
