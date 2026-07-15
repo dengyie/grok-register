@@ -655,6 +655,129 @@ def test_remote_inject_chat_ok_hard_gate() -> None:
     print("PASS remote inject chat_ok hard gate")
 
 
+
+def test_probe_transport_direct_uses_bearer_and_cli_headers() -> None:
+    probe = _load("cpa_xai.probe_transport", ROOT / "cpa_xai" / "probe.py")
+    assert hasattr(probe, "build_probe_transport")
+    assert hasattr(probe, "probe_request_headers")
+    t = probe.build_probe_transport(
+        via="direct",
+        upstream_base_url="https://cli-chat-proxy.grok.com/v1",
+        cpa_base_url="https://cpa.example/v1",
+        cpa_api_key="sk-cpa",
+        access_token="tok-xai",
+    )
+    assert t["mode"] == "direct"
+    assert t["base_url"].rstrip("/") == "https://cli-chat-proxy.grok.com/v1"
+    h = probe.probe_request_headers(t, access_token="tok-xai")
+    assert h["Authorization"] == "Bearer tok-xai"
+    assert "x-grok-client-identifier" in h
+    assert h.get("x-grok-client-identifier") == "grok-pager"
+    print("PASS direct transport headers")
+
+
+def test_probe_transport_cpa_uses_api_key_not_xai_token() -> None:
+    probe = _load("cpa_xai.probe_transport2", ROOT / "cpa_xai" / "probe.py")
+    t = probe.build_probe_transport(
+        via="cpa",
+        upstream_base_url="https://cli-chat-proxy.grok.com/v1",
+        cpa_base_url="https://cpa.mangoq.ccwu.cc/v1",
+        cpa_api_key="sk-cpa-key",
+        access_token="tok-xai-should-not-be-auth",
+        credential_pin="xai-user@example.com.json",
+        pin_header="X-CPA-Credential",
+    )
+    assert t["mode"] == "cpa"
+    assert t["base_url"].endswith("/v1") or "cpa.mangoq" in t["base_url"]
+    h = probe.probe_request_headers(t, access_token="tok-xai-should-not-be-auth")
+    assert h["Authorization"] == "Bearer sk-cpa-key"
+    assert h.get("X-CPA-Credential") == "xai-user@example.com.json"
+    assert "tok-xai" not in h["Authorization"]
+    print("PASS cpa transport headers")
+
+
+def test_build_probe_transport_rejects_unpinned_cpa_as_gate_mode() -> None:
+    """Spec §6: unpinned cpa must not be used as entitlement gate without hybrid."""
+    probe = _load("cpa_xai.probe_transport3", ROOT / "cpa_xai" / "probe.py")
+    policy = probe.resolve_gate_probe_policy(
+        via="cpa",
+        cpa_base_url="https://cpa.example/v1",
+        cpa_api_key="sk",
+        credential_pin="",
+        allow_unpinned_cpa_gate=False,
+    )
+    assert policy["gate_via"] == "direct"
+    assert policy["cpa_smoke"] is True
+    assert policy["reason"] in ("unpinned_cpa_hybrid", "hybrid")
+    print("PASS unpinned cpa → hybrid policy")
+
+
+def test_cpa_gateway_401_not_entitlement() -> None:
+    probe = _load("cpa_xai.probe_cls_gw", ROOT / "cpa_xai" / "probe.py")
+    out = {
+        "ok": False,
+        "status": 401,
+        "error": "invalid api key",
+        "transport_mode": "cpa",
+        "error_code": "unauthorized",
+    }
+    cls = probe.classify_chat_probe(out)
+    remapped = probe.remap_cpa_gateway_failure(out, cls)
+    assert remapped["entitlement_denied"] is False
+    assert remapped["reason"] in ("auth_or_protocol", "cpa_gateway_auth")
+    print("PASS cpa gateway 401 not entitlement")
+
+
+def test_config_example_documents_mid_tier_probe_keys() -> None:
+    raw = (ROOT / "config.example.json").read_text(encoding="utf-8")
+    assert "cpa_probe_via" in raw
+    assert "cpa_probe_base_url" in raw
+    assert "cpa_probe_api_key" in raw
+    assert "cpa_probe_credential_pin_mode" in raw
+    assert "cli-chat-proxy.grok.com" in raw
+    print("PASS config.example mid-tier keys")
+
+
+def test_mint_passes_transport_kwargs_signature() -> None:
+    src = (ROOT / "cpa_xai" / "mint.py").read_text(encoding="utf-8")
+    assert "probe_via" in src
+    assert "build_probe_transport" in src or "resolve_gate_probe_policy" in src
+    assert "probe_via_cpa_ok" in src or "cpa_smoke" in src
+    assert "build_cpa_xai_auth" in src
+    print("PASS mint transport kwargs signature")
+
+
+def test_export_resolves_env_api_key() -> None:
+    src = (ROOT / "cpa_export.py").read_text(encoding="utf-8")
+    assert "cpa_probe_via" in src
+    assert "CPA_PROBE_API_KEY" in src
+    assert "resolve_gate_probe_policy" in src
+    print("PASS export mid-tier resolve")
+
+
+def test_inject_ignores_probe_via_cpa_ok_without_chat_ok() -> None:
+    """Observational CPA smoke alone must never unlock remote inject."""
+    exp = _load("cpa_export_midtier_inject", ROOT / "cpa_export.py")
+    cfg = {
+        "cpa_remote_inject": True,
+        "cpa_remote_inject_require_chat_ok": True,
+    }
+    denied = exp.evaluate_remote_inject_gate(
+        {
+            "chat_ok": False,
+            "usable": False,
+            "entitlement_denied": False,
+            "probe_via_cpa_ok": True,
+            "fail_reason": "usage_exhausted",
+            "import_gate": "usage_exhausted",
+        },
+        cfg,
+    )
+    assert denied.get("allow") is False
+    assert denied.get("reason") != "chat_ok"
+    print("PASS inject ignores probe_via_cpa_ok without chat_ok")
+
+
 def main() -> int:
     test_classify_chat_probe()
     test_probe_mini_response_attaches_classification()
@@ -670,6 +793,14 @@ def main() -> int:
     test_backfill_chat_stamps_script_exists()
     test_finalize_probe_and_gate_behavior()
     test_remote_inject_chat_ok_hard_gate()
+    test_probe_transport_direct_uses_bearer_and_cli_headers()
+    test_probe_transport_cpa_uses_api_key_not_xai_token()
+    test_build_probe_transport_rejects_unpinned_cpa_as_gate_mode()
+    test_cpa_gateway_401_not_entitlement()
+    test_config_example_documents_mid_tier_probe_keys()
+    test_mint_passes_transport_kwargs_signature()
+    test_export_resolves_env_api_key()
+    test_inject_ignores_probe_via_cpa_ok_without_chat_ok()
     print("\nALL PASS (cpa chat entitlement gate)")
     return 0
 
