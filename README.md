@@ -18,13 +18,19 @@
 
 | 文档 | 说明 |
 |------|------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | **Monorepo 骨架与分层边界**（canonical） |
+| [docs/ADDING_PROVIDER.md](docs/ADDING_PROVIDER.md) | 如何新增 provider |
+| [docs/LAYOUT.md](docs/LAYOUT.md) | 目录速查 |
 | [DISCLAIMER.md](DISCLAIMER.md) | 免责声明 |
 | [SECURITY.md](SECURITY.md) | 密钥与泄露处理 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发 / 测试 / PR |
 | [CHANGELOG.md](CHANGELOG.md) | 版本（当前 **v1.3.0**） |
 | [LICENSE](LICENSE) | MIT |
 | [register_core/README.md](register_core/README.md) | 分层通用框架 |
+| [providers/README.md](providers/README.md) | 产品包一览 |
 | [providers/mimo/README.md](providers/mimo/README.md) | MiMo TTS Key 注册 |
+| [apps/README.md](apps/README.md) | CLI / GUI 入口图 |
+| `Makefile` | `make test` / `syntax` / `doctor` / `example` |
 | `config.simple.example.json` | **Grok 简易配置**（推荐新人） |
 | `config.example.json` | Grok 全量字段 + 注释 |
 | `scripts/setup_simple.sh` | 一键配置 + 环境 doctor |
@@ -89,12 +95,22 @@ uv run python grok_register_ttk.py
 
 > MiMo 当前以 `./register.sh mimo` 生产路径为主；GUI 先覆盖 Grok 全链路（最重、字段最多）。hub 可继续扩展。
 
-### 分层架构（register_core）
+### Monorepo 骨架
+
+对标 [ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register) 的 `register/<product>` + 共享 util，以及 LiteLLM 式 **ARCHITECTURE / Makefile / registry**，本仓固定为：
+
+```text
+apps/                 入口图（CLI/GUI）
+register_core/        分层库：email → providers → verify → sink → pipeline
+providers/            产品包：mimo（生产）、grok（说明）、_template（复制起步）
+docs/ examples/ tests/ scripts/
+register.sh Makefile ARCHITECTURE.md
+```
 
 ```text
 ./register.sh
      │
-     ├─ grok  → register_cli / grok_register_ttk / cpa_xai   （生产权威）
+     ├─ grok  → register_cli / grok_register_ttk / cpa_xai   （生产权威，暂根目录）
      ├─ mimo  → providers/mimo/run-register.sh               （生产权威）
      └─ core  → python -m register_core                      （编排 + 本轮归因）
 ```
@@ -107,7 +123,7 @@ uv run python grok_register_ttk.py
 | 落盘 | `register_core/sink` | JSONL 0600；public 脱敏 |
 | 编排 | `register_core/pipeline` | count + fail-fast；verify 失败必失败 |
 
-详见 [register_core/README.md](register_core/README.md) · [providers/mimo/README.md](providers/mimo/README.md)。
+详见 [ARCHITECTURE.md](ARCHITECTURE.md) · [docs/ADDING_PROVIDER.md](docs/ADDING_PROVIDER.md) · [register_core/README.md](register_core/README.md)。
 
 部署布局示例（pxed）：代码仓 `/personal/grok-register`（或 `ai-register-machine`）+ Node runtime `/personal/mimo-register` + clash `:7897`。
 
@@ -125,6 +141,7 @@ uv run python grok_register_ttk.py
 | 卡住了 | [常见卡点](#常见卡点) · [故障排查](#故障排查) |
 | MiMo TTS Key | [providers/mimo/README.md](providers/mimo/README.md) · `./register.sh mimo` |
 | 分层通用框架 | [register_core/README.md](register_core/README.md) · `./register.sh core` |
+| Monorepo 骨架 / 新 provider | [ARCHITECTURE.md](ARCHITECTURE.md) · [docs/ADDING_PROVIDER.md](docs/ADDING_PROVIDER.md) · `make test-unit` |
 
 ---
 

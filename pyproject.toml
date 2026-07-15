@@ -28,8 +28,9 @@ Changelog = "https://github.com/dengyie/ai-register-machine/blob/main/CHANGELOG.
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = [".", "tests"]
 python_files = ["test_*.py"]
+pythonpath = ["."]
 addopts = "-q"
 filterwarnings = [
     "ignore::DeprecationWarning",

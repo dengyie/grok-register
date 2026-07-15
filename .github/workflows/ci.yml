@@ -34,6 +34,7 @@ jobs:
           bash -n register.sh
           bash -n providers/mimo/run-register.sh
           bash -n providers/mimo/smoke.sh
+          bash -n providers/_template/run-register.sh
 
       - name: Syntax check
         run: |

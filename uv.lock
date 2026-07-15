@@ -3,6 +3,28 @@ revision = 3
 requires-python = "==3.13.*"
 
 [[package]]
+name = "ai-register-machine"
+version = "1.3.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "curl-cffi" },
+    { name = "drissionpage" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "curl-cffi", specifier = ">=0.7" },
+    { name = "drissionpage", specifier = ">=4.1" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "certifi"
 version = "2026.6.17"
 source = { registry = "https://pypi.org/simple" }
@@ -176,28 +198,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/e3/ee/29c668c50888588c4
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/e3/f1fae3647d170919c2cf2a898e77e7d1a4e5c7cae0aed7bb4bd3f5ebff6f/filelock-3.29.5-py3-none-any.whl", hash = "sha256:8af830889ba3a0ffcefbd6c7d2af8a54012058103771f2e10848222f476a1693", size = 45073, upload-time = "2026-07-03T03:50:30.445Z" },
 ]
-
-[[package]]
-name = "grok-register"
-version = "1.2.3"
-source = { virtual = "." }
-dependencies = [
-    { name = "curl-cffi" },
-    { name = "drissionpage" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "curl-cffi", specifier = ">=0.7" },
-    { name = "drissionpage", specifier = ">=4.1" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "idna"

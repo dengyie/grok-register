@@ -24,19 +24,23 @@ bash scripts/doctor_secrets.sh   # hygiene; never prints secret contents
 
 Python **3.13** is required (`requires-python` in `pyproject.toml`). Install via [uv](https://docs.astral.sh/uv/): `uv python install 3.13`.
 
-Repo layout (multi-provider):
+Repo layout (multi-provider) — see [ARCHITECTURE.md](ARCHITECTURE.md):
 
-- `register_cli.py` / `grok_register_ttk.py` / `cpa_xai/` — Grok production path
+- `register_cli.py` / `grok_register_ttk.py` / `cpa_xai/` — Grok production path (root until migrate)
 - `providers/mimo/` — MiMo production path (Node)
+- `providers/_template/` — copy-me for new products ([docs/ADDING_PROVIDER.md](docs/ADDING_PROVIDER.md))
 - `register_core/` — layered orchestration (not a browser rewrite)
-- `./register.sh` — unified hub
+- `./register.sh` / `Makefile` — unified hub + dev targets
+- `apps/`, `docs/`, `examples/`, `tests/` — entry map, how-tos, samples, unit tests
 
 ## Tests
 
 Offline (default, used by CI):
 
 ```bash
-uv run python -m pytest -q
+make test          # or: uv run python -m pytest -q
+make test-unit
+make syntax
 bash -n scripts/setup_simple.sh scripts/doctor_secrets.sh register.sh
 bash scripts/doctor_secrets.sh || test $? -eq 2
 ```

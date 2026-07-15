@@ -54,15 +54,19 @@ python -m register_core run -p mimo --email-source tinyhost
 
 ## 新增产品
 
-1. 实现 `RegisterProvider.register_one` → 本轮可验证的 `RegisterResult`
-2. 注册到 `providers/registry`
-3. 若 in-process：可接 `EmailSource`；若 black-box：加入 pipeline 黑名单并文档说明
-4. 单测覆盖：历史污染、exit0 无增量、public 脱敏、fail-fast
+完整清单见仓库根 [docs/ADDING_PROVIDER.md](../docs/ADDING_PROVIDER.md) 与 [ARCHITECTURE.md](../ARCHITECTURE.md)。
+
+1. 复制 `providers/_template` → `providers/<name>`
+2. 实现 `RegisterProvider.register_one` → 本轮可验证的 `RegisterResult`
+3. 注册到 `providers/registry`
+4. 若 in-process：可接 `EmailSource`；若 black-box：加入 pipeline 黑名单并文档说明
+5. 单测覆盖：历史污染、exit0 无增量、public 脱敏、fail-fast
 
 ## 测试
 
 ```bash
-python test_register_core_layers.py
+make test-unit
 # or
-python -m pytest test_register_core_layers.py -q
+python test_register_core_layers.py
+python -m pytest tests/unit test_register_core_layers.py -q
 ```

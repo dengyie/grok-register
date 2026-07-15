@@ -16,12 +16,17 @@ project versioning follows [Semantic Versioning](https://semver.org/).
 - Unit tests: `test_register_core_layers.py`, `test_mimo_cpa_openai_inject.py`
 - Grok Gmail IMAP: HTTP CONNECT via configured proxy (container/no-public egress)
 - Positioning docs vs [ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register): higher production usability, richer pipeline, **TTK UI** (form input + live log/status)
+- **Monorepo skeleton** (inspired by ai-register product dirs + LiteLLM-style ARCHITECTURE/Makefile):
+  - `ARCHITECTURE.md`, `docs/LAYOUT.md`, `docs/ADDING_PROVIDER.md`
+  - `providers/_template/`, `providers/grok/README.md`, `providers/README.md`
+  - `apps/{cli,gui}/`, `examples/minimal_pipeline.py`, `tests/unit/`, `Makefile`
 
 ### Changed
 
 - Project rename path: **`grok-register` → `register-machine` → `ai-register-machine`** (GitHub + package metadata)
 - README highlights desktop UI (`grok_register_ttk.py`): count/threads/mail/proxy form, start/stop, status, scrolling logs, tutorial
 - Fail-fast + this-run result attribution (no historical tail as success); public redact password/secret
+- pytest `pythonpath` + `tests/` tree; gitignore all `providers/*/output|node_modules`
 
 ### Security
 
