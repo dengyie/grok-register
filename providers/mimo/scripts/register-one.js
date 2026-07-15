@@ -7,25 +7,53 @@ const path = require('path');
 const { chromium } = require('playwright');
 const { generateTempMailAddress: rawGenerateTempMailAddress } = require('../dist/temp-mail');
 
-const BAD_DOMAIN_RE = /(infinityfree|000\.pe|\.\.$|\.\s*$)/i;
-const LOCAL_FALLBACK_DOMAINS = ['graphiclens.site', 'sewink.my.id', 'nexorabio.pro.vn', 'kimora.space', 'sasukiez.shop'];
+// Hard-block: historically 0 dual-OTP delivery in live runs.
+const BAD_DOMAIN_RE =
+  /(infinityfree|000\.pe|work\.gd|empva1\.io\.vn|\.io\.vn$|\.\.$|\.\s*$)/i;
+// Prefer first: publicvm historically best for dual OTP (register + Account Authentication).
+const PREFER_DOMAIN_RE = /publicvm\.com$/i;
+const SOFT_PREFER_DOMAIN_RE =
+  /(publicvm\.com|graphiclens\.site|sewink\.my\.id|kimora\.space)$/i;
+const LOCAL_FALLBACK_DOMAINS = [
+  'publicvm.com',
+  'graphiclens.site',
+  'sewink.my.id',
+  'kimora.space',
+  'nexorabio.pro.vn',
+  'sasukiez.shop',
+];
+
+function isValidTempDomain(domain) {
+  if (!domain) return false;
+  if (BAD_DOMAIN_RE.test(domain)) return false;
+  if (domain.includes('..') || domain.startsWith('.') || domain.endsWith('.')) return false;
+  return /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(domain);
+}
 
 async function generateTempMailAddress() {
-  for (let i = 0; i < 8; i++) {
+  // MIMO_LIVE_OTP_HARDEN_V2
+  const soft = [];
+  for (let i = 0; i < 40; i++) {
     let email = await rawGenerateTempMailAddress();
     email = String(email || '').trim().replace(/\.+$/, '');
     const [user, domain] = email.split('@');
-    if (!user || !domain) continue;
-    if (BAD_DOMAIN_RE.test(domain)) continue;
-    if (domain.includes('..') || domain.startsWith('.') || domain.endsWith('.')) continue;
-    if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(domain)) continue;
-    return `${user}@${domain}`;
+    if (!user || !isValidTempDomain(domain)) continue;
+    if (PREFER_DOMAIN_RE.test(domain)) {
+      console.log('[mail] prefer hit', email);
+      return `${user}@${domain}`;
+    }
+    if (SOFT_PREFER_DOMAIN_RE.test(domain)) soft.push(`${user}@${domain}`);
   }
-  // last resort local random on fallback domain
+  if (soft.length) {
+    console.log('[mail] soft prefer', soft[0]);
+    return soft[0];
+  }
+  // last resort local random on known-better fallback domain
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let local = '';
   for (let i = 0; i < 10; i++) local += chars[Math.floor(Math.random() * chars.length)];
   const dom = LOCAL_FALLBACK_DOMAINS[Math.floor(Math.random() * LOCAL_FALLBACK_DOMAINS.length)];
+  console.log('[mail] fallback domain', `${local}@${dom}`);
   return `${local}@${dom}`;
 }
 
@@ -65,6 +93,12 @@ async function pollTempMailOTP(emailAddress, maxRetries = 40, newerThan = new Da
   if (!user || !domain) throw new Error(`Invalid temp mail address: ${emailAddress}`);
   const url = `${TEMP_MAIL_BASE}/api/email/${encodeURIComponent(domain)}/${encodeURIComponent(user)}/?page=1&limit=100`;
   const since = newerThan.getTime() - 15 * 1000;
+  // Early abort: if inbox stays empty for N polls, domain is almost certainly dead for dual-OTP.
+  const emptyAbortAfter = Math.max(
+    4,
+    Math.min(12, Number(process.env.OTP_EMPTY_ABORT_POLLS || 8) || 8),
+  );
+  let emptyStreak = 0;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -80,6 +114,16 @@ async function pollTempMailOTP(emailAddress, maxRetries = 40, newerThan = new Da
       const data = await response.json();
       const emails = Array.isArray(data?.emails) ? data.emails : [];
       console.log(`[otp] poll ${attempt}/${maxRetries}: ${emails.length} mail(s)`);
+      if (emails.length === 0) {
+        emptyStreak += 1;
+        if (emptyStreak >= emptyAbortAfter) {
+          throw new Error(
+            `OTP empty-inbox early-abort after ${emptyStreak} polls domain=${domain}`,
+          );
+        }
+      } else {
+        emptyStreak = 0;
+      }
       const xiaomi = emails
         .filter((m) => /xiaomi/i.test(`${m.sender || ''} ${m.subject || ''}`))
         .filter((m) => {
@@ -100,7 +144,9 @@ async function pollTempMailOTP(emailAddress, maxRetries = 40, newerThan = new Da
         }
       }
     } catch (err) {
-      console.log(`[otp] poll error: ${err && err.message ? err.message : err}`);
+      const msg = err && err.message ? err.message : String(err);
+      if (/early-abort/i.test(msg)) throw err;
+      console.log(`[otp] poll error: ${msg}`);
     }
     await sleep(3000);
   }
@@ -558,12 +604,41 @@ async function waitOtpAndSubmit(page, email) {
 
     console.log('[otp] round', round, 'polling tinyhost for', email, 'sent=', sent);
     const pollStart = sent || round > 1 ? new Date() : started;
-    const otp = await pollTempMailOTP(
-      email,
-      Number(process.env.OTP_RETRIES || 40),
-      pollStart,
-      usedCodes,
-    );
+    let otp;
+    try {
+      otp = await pollTempMailOTP(
+        email,
+        Number(process.env.OTP_RETRIES || 40),
+        pollStart,
+        usedCodes,
+      );
+    } catch (e) {
+      // one Resend + shorter re-poll before fail-fast (dual-OTP second mail often delayed)
+      console.log(
+        '[otp] round',
+        round,
+        'first poll failed, try Resend once:',
+        e && e.message ? e.message : e,
+      );
+      for (const name of [/Resend/i, /^Send$/i, /Send code/i]) {
+        const b = page.getByRole('button', { name });
+        if (await b.count()) {
+          const dis = await b.first().isDisabled().catch(() => true);
+          if (!dis) {
+            await b.first().click({ force: true }).catch(() => {});
+            console.log('[otp] Resend clicked', String(name));
+            break;
+          }
+        }
+      }
+      await page.waitForTimeout(1500);
+      otp = await pollTempMailOTP(
+        email,
+        Math.max(20, Math.floor(Number(process.env.OTP_RETRIES || 40) / 2)),
+        new Date(),
+        usedCodes,
+      );
+    }
     usedCodes.add(otp);
     console.log('[otp] round', round, 'got code');
     await fillOtpInputs(page, otp);

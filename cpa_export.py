@@ -867,7 +867,11 @@ def export_cpa_xai_for_account(
     # PKCE authorization-code flow (default) yields chat-usable tokens; legacy
     # device-code flow is known to produce /models-ok-but-chat-403 tokens.
     protocol_flow = (str(cfg.get("cpa_protocol_flow") or "pkce")).strip().lower() or "pkce"
-    allow_device_flow_fallback = _config_bool(cfg.get("cpa_allow_device_flow_fallback"), default=False)
+    # Default true: PKCE CreateCookieSetterLink often fails; device-flow still local-mints.
+    # chat entitlement_denied remains hard-gated for remote inject (not remint-spin).
+    allow_device_flow_fallback = _config_bool(
+        cfg.get("cpa_allow_device_flow_fallback"), default=True
+    )
     auth_priority = _config_priority(cfg)
 
     from cpa_xai.accounts import normalize_sso_cookie

@@ -113,7 +113,9 @@ DEFAULT_CONFIG = {
     "clash_restore_on_exit": True,
     # CPA mint protocol: pkce (authorization-code, chat-usable) | device (legacy device-code, chat-403)
     "cpa_protocol_flow": "pkce",
-    "cpa_allow_device_flow_fallback": False,
+    # PKCE often fails CreateCookieSetterLink; device fallback completes local mint.
+    # entitlement_denied still hard-blocks tebi/live inject (no remint spin).
+    "cpa_allow_device_flow_fallback": True,
 }
 
 config = DEFAULT_CONFIG.copy()

@@ -42,7 +42,7 @@ def mint_and_export(
     prefer_protocol: bool = True,
     protocol_only: bool = False,
     protocol_poll_timeout_sec: float = 90.0,
-    allow_device_flow_fallback: bool = False,
+    allow_device_flow_fallback: bool = True,
     protocol_flow: str = "pkce",
     priority: int = 1000,
     log: LogFn | None = None,

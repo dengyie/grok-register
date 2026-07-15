@@ -216,6 +216,21 @@ def fatal_stop_reason() -> str:
         return _fatal_reason[0]
 
 
+def is_turnstile_headless_upgradeable(msg: str) -> bool:
+    """Turnstile stuck with empty token while headless — may recover once headed.
+
+    Evidence from live runs: headless often token_len=0; same env headed
+    passes. Upgrade is allowed once per process, never loops.
+    """
+    text = str(msg or "")
+    if "Turnstile 卡住 fail-fast" not in text and "Turnstile 获取 token 失败" not in text:
+        return False
+    if "token_len=0" in text or "token_len = 0" in text:
+        return True
+    # pre-submit retry exhaustion without token is the same class
+    return "pre-submit retries exhausted" in text or "retries exhausted" in text
+
+
 def is_fatal_register_error(msg: str) -> bool:
     """Hard blockers that must stop the job (no retry / no empty loop)."""
     text = str(msg or "")
@@ -241,9 +256,15 @@ def is_fatal_register_error(msg: str) -> bool:
         "AUTHENTICATIONFAILED",
         "Invalid credentials",
         # Xvfb/datacenter 上 Turnstile 恒 0 时，整批空转无意义；单号失败后停止本批
+        # (after optional one-shot headless→headed upgrade)
         "Turnstile 卡住 fail-fast",
     )
     return any(m in text for m in markers)
+
+
+# Process-wide: only one headless→headed Turnstile upgrade attempt.
+_turnstile_headed_upgrade_lock = threading.Lock()
+_turnstile_headed_upgrade_done = False
 
 
 def resolve_mint_workers(
@@ -562,12 +583,53 @@ def register_one(
                     cancel_callback=cancel,
                 )
             except Exception as profile_exc:
+                msg = str(profile_exc)
+                # headless Turnstile token_len=0 → one-shot upgrade to headed, then retry slot
+                if (
+                    is_turnstile_headless_upgradeable(msg)
+                    and bool((getattr(reg, "config", {}) or {}).get("browser_headless", False))
+                    and bool(
+                        (getattr(reg, "config", {}) or {}).get(
+                            "turnstile_auto_headed_on_fail", True
+                        )
+                    )
+                ):
+                    global _turnstile_headed_upgrade_done
+                    do_upgrade = False
+                    with _turnstile_headed_upgrade_lock:
+                        if not _turnstile_headed_upgrade_done:
+                            _turnstile_headed_upgrade_done = True
+                            do_upgrade = True
+                    if do_upgrade:
+                        log(
+                            worker_id,
+                            "[!] Turnstile headless 失败，自动切 headed 重试一次（不空转）",
+                        )
+                        reg.config["browser_headless"] = False
+                        try:
+                            reg.stop_browser()
+                        except Exception:
+                            pass
+                        _hard_recycle_browser(worker_id)
+                        # Re-enter outer while as slot-style retry without burning fatal
+                        if email:
+                            try:
+                                reg.mark_error(
+                                    email, reason=f"turnstile-headed-upgrade:{msg[:80]}"
+                                )
+                            except Exception:
+                                pass
+                        slot_retry += 1
+                        if slot_retry <= max(max_slot_retry, 1):
+                            reg.sleep_with_cancel(1.0, cancel)
+                            continue
+                        # slot budget exhausted after upgrade — fall through fatal
                 # Turnstile/datacenter hard stuck: stop whole batch, do not slot-retry spin
-                if is_fatal_register_error(str(profile_exc)):
+                if is_fatal_register_error(msg):
                     log(worker_id, f"! 致命错误，停止整批（不空转）: {profile_exc}")
                     _inc("reg_fail")
-                    request_fatal_stop(str(profile_exc))
-                    raise FatalRegisterError(str(profile_exc)) from profile_exc
+                    request_fatal_stop(msg)
+                    raise FatalRegisterError(msg) from profile_exc
                 raise
             log(worker_id, f"资料已填: {profile.get('given_name')} {profile.get('family_name')}")
             log(worker_id, "5. 等待 sso cookie")

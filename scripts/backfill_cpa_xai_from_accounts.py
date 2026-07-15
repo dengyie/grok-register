@@ -64,6 +64,11 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="0 = all missing")
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--email", default="", help="Only this email")
+    ap.add_argument(
+        "--emails",
+        default="",
+        help="Alias of --email (single address). Kept for CLI muscle memory.",
+    )
     ap.add_argument("--skip-existing", action="store_true", default=True)
     ap.add_argument("--no-skip-existing", action="store_false", dest="skip_existing")
     ap.add_argument(
@@ -128,6 +133,11 @@ def main() -> int:
         args.headed = False
     else:
         args.headless = False
+
+    # Accept --emails as alias of --email (first token if comma/space list)
+    if not (args.email or "").strip() and (args.emails or "").strip():
+        raw = args.emails.replace(",", " ").split()
+        args.email = raw[0] if raw else ""
 
     cfg = _load_config(args.config)
 
@@ -221,7 +231,12 @@ def main() -> int:
                 browser_timeout_sec=args.timeout,
                 force_standalone=args.force_standalone,
                 sso=acc.sso or None,
-                prefer_protocol=True,
+                prefer_protocol=bool(run_cfg.get("cpa_prefer_protocol", True)),
+                protocol_only=bool(run_cfg.get("cpa_protocol_only", False)),
+                allow_device_flow_fallback=bool(
+                    run_cfg.get("cpa_allow_device_flow_fallback", True)
+                ),
+                protocol_flow=str(run_cfg.get("cpa_protocol_flow") or "pkce"),
                 log=log,
             )
             if r.get("ok") and r.get("path") and cpa_dir:
