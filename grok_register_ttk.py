@@ -5101,53 +5101,174 @@ class GrokRegisterGUI:
         self.root.after(200, self._maybe_show_tutorial_on_start)
 
     def setup_ui(self):
+        """Desktop UI: notebook sections + progress/log (provider-aware forms)."""
         load_config()
-        main_frame = ttk.Frame(self.root, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        config_frame = ttk.LabelFrame(main_frame, text="配置", padding=10)
-        config_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(config_frame, text="邮箱服务商:").grid(row=0, column=0, sticky=tk.W)
+        style = ttk.Style()
+        try:
+            # Prefer native themes that look less dated.
+            for theme in ("aqua", "clam", "alt", "default"):
+                if theme in style.theme_names():
+                    style.theme_use(theme)
+                    break
+        except Exception:
+            pass
+        style.configure("Header.TLabel", font=("", 14, "bold"))
+        style.configure("Status.TLabel", font=("", 11, "bold"))
+        style.configure("Accent.TButton", padding=(12, 4))
+        style.configure("Card.TLabelframe", padding=8)
+        style.configure("Card.TLabelframe.Label", font=("", 10, "bold"))
+
+        self.root.geometry("1080x820")
+        self.root.minsize(960, 700)
+
+        root_pad = ttk.Frame(self.root, padding=(12, 10))
+        root_pad.pack(fill=tk.BOTH, expand=True)
+
+        # --- Header ---
+        header = ttk.Frame(root_pad)
+        header.pack(fill=tk.X, pady=(0, 8))
+        left_h = ttk.Frame(header)
+        left_h.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(left_h, text="AI 注册机", style="Header.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            left_h,
+            text="ai-register-machine · Grok 生产路径 · 表单输入 / 实时进度 / 滚动日志",
+            foreground="#555",
+        ).pack(anchor=tk.W, pady=(2, 0))
+        right_h = ttk.Frame(header)
+        right_h.pack(side=tk.RIGHT)
+        self.provider_badge_var = tk.StringVar(value="Provider: grok")
+        ttk.Label(right_h, textvariable=self.provider_badge_var).pack(anchor=tk.E)
+        self.version_badge_var = tk.StringVar(value="v1.3.0")
+        ttk.Label(right_h, textvariable=self.version_badge_var, foreground="#777").pack(anchor=tk.E)
+
+        # --- Body: left notebook + right run panel ---
+        body = ttk.Panedwindow(root_pad, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        left = ttk.Frame(body, padding=(0, 0, 8, 0))
+        right = ttk.Frame(body, padding=(8, 0, 0, 0))
+        body.add(left, weight=3)
+        body.add(right, weight=2)
+
+        notebook = ttk.Notebook(left)
+        notebook.pack(fill=tk.BOTH, expand=True)
+        self._ui_notebook = notebook
+
+        tab_basic = ttk.Frame(notebook, padding=10)
+        tab_mail = ttk.Frame(notebook, padding=10)
+        tab_adv = ttk.Frame(notebook, padding=10)
+        notebook.add(tab_basic, text="  基础  ")
+        notebook.add(tab_mail, text="  邮箱  ")
+        notebook.add(tab_adv, text="  进阶 / 入池  ")
+
+        # Track rows for provider-aware show/hide: {provider: [widgets...]}
+        self._mail_rows = {
+            "duckmail": [],
+            "yyds": [],
+            "cloudflare": [],
+            "cloudmail": [],
+            "hotmail": [],
+            "gmail": [],
+            "common": [],
+        }
+
+        def _row(parent, r, label, widget, providers=None, sticky=tk.EW):
+            lbl = ttk.Label(parent, text=label)
+            lbl.grid(row=r, column=0, sticky=tk.W, pady=4, padx=(0, 8))
+            widget.grid(row=r, column=1, sticky=sticky, pady=4)
+            parent.columnconfigure(1, weight=1)
+            bag = providers if providers is not None else ["common"]
+            for key in bag:
+                self._mail_rows.setdefault(key, []).extend([lbl, widget])
+            return lbl, widget
+
+        # ===== BASIC =====
+        basic_card = ttk.LabelFrame(tab_basic, text="运行参数", style="Card.TLabelframe", padding=10)
+        basic_card.pack(fill=tk.X, pady=(0, 8))
+        basic_card.columnconfigure(1, weight=1)
+        basic_card.columnconfigure(3, weight=1)
+
+        ttk.Label(basic_card, text="邮箱服务商").grid(row=0, column=0, sticky=tk.W, pady=4, padx=(0, 8))
         self.email_provider_var = tk.StringVar(value=config.get("email_provider", "duckmail"))
-        self.email_provider_combo = ttk.Combobox(config_frame, textvariable=self.email_provider_var, values=["duckmail", "yyds", "cloudflare", "cloudmail", "hotmail", "outlookmail", "gmail"], width=12, state="readonly")
-        self.email_provider_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
-        ttk.Label(config_frame, text="注册数量:").grid(row=0, column=2, sticky=tk.W, padx=10)
-        self.count_var = tk.StringVar(value=str(config.get("register_count", 1)))
-        self.count_spinbox = ttk.Spinbox(config_frame, from_=1, to=100, width=8, textvariable=self.count_var)
-        self.count_spinbox.grid(row=0, column=3, sticky=tk.W, padx=5)
-        ttk.Label(config_frame, text="并发线程:").grid(row=1, column=2, sticky=tk.W, padx=10)
-        self.thread_var = tk.StringVar(value=str(config.get("register_threads", 1)))
-        self.thread_spinbox = ttk.Spinbox(config_frame, from_=1, to=10, width=8, textvariable=self.thread_var)
-        self.thread_spinbox.grid(row=1, column=3, sticky=tk.W, padx=5)
-        self.nsfw_var = tk.BooleanVar(value=config.get("enable_nsfw", True))
-        self.nsfw_check = ttk.Checkbutton(config_frame, text="注册后开启 NSFW", variable=self.nsfw_var)
-        self.nsfw_check.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=5)
-        ttk.Label(config_frame, text="代理（可选）:").grid(row=2, column=0, sticky=tk.W)
-        self.proxy_var = tk.StringVar(value=config.get("proxy", ""))
-        self.proxy_entry = ttk.Entry(config_frame, textvariable=self.proxy_var, width=30)
-        self.proxy_entry.grid(row=2, column=1, columnspan=3, sticky=tk.W, padx=5)
-        ttk.Label(config_frame, text="DuckMail API Key:").grid(row=3, column=0, sticky=tk.W)
-        self.api_key_var = tk.StringVar(value=config.get("duckmail_api_key", ""))
-        self.api_key_entry = ttk.Entry(config_frame, textvariable=self.api_key_var, width=30)
-        self.api_key_entry.grid(row=3, column=1, columnspan=3, sticky=tk.W, padx=5)
-        ttk.Label(config_frame, text="Cloudflare API Base:").grid(row=4, column=0, sticky=tk.W)
-        self.cloudflare_api_base_var = tk.StringVar(value=config.get("cloudflare_api_base", ""))
-        self.cloudflare_api_base_entry = ttk.Entry(config_frame, textvariable=self.cloudflare_api_base_var, width=30)
-        self.cloudflare_api_base_entry.grid(row=4, column=1, columnspan=3, sticky=tk.W, padx=5)
-        ttk.Label(config_frame, text="Cloudflare API Key:").grid(row=5, column=0, sticky=tk.W)
-        self.cloudflare_api_key_var = tk.StringVar(value=config.get("cloudflare_api_key", ""))
-        self.cloudflare_api_key_entry = ttk.Entry(config_frame, textvariable=self.cloudflare_api_key_var, width=30)
-        self.cloudflare_api_key_entry.grid(row=5, column=1, columnspan=3, sticky=tk.W, padx=5)
-        ttk.Label(config_frame, text="Cloudflare 鉴权模式:").grid(row=6, column=0, sticky=tk.W)
-        self.cloudflare_auth_mode_var = tk.StringVar(value=config.get("cloudflare_auth_mode", "bearer"))
-        self.cloudflare_auth_mode_combo = ttk.Combobox(
-            config_frame,
-            textvariable=self.cloudflare_auth_mode_var,
-            values=["query-key", "bearer", "x-api-key", "none"],
-            width=12,
+        self.email_provider_combo = ttk.Combobox(
+            basic_card,
+            textvariable=self.email_provider_var,
+            values=["duckmail", "yyds", "cloudflare", "cloudmail", "hotmail", "outlookmail", "gmail"],
+            width=16,
             state="readonly",
         )
-        self.cloudflare_auth_mode_combo.grid(row=6, column=1, sticky=tk.W, padx=5)
-        ttk.Label(config_frame, text="CF 路径(domains/accounts/token/messages):").grid(row=7, column=0, sticky=tk.W)
+        self.email_provider_combo.grid(row=0, column=1, sticky=tk.W, pady=4)
+        self.email_provider_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_provider_changed())
+
+        ttk.Label(basic_card, text="注册数量").grid(row=0, column=2, sticky=tk.W, pady=4, padx=(16, 8))
+        self.count_var = tk.StringVar(value=str(config.get("register_count", 1)))
+        self.count_spinbox = ttk.Spinbox(basic_card, from_=1, to=100, width=8, textvariable=self.count_var)
+        self.count_spinbox.grid(row=0, column=3, sticky=tk.W, pady=4)
+
+        ttk.Label(basic_card, text="并发线程").grid(row=1, column=0, sticky=tk.W, pady=4, padx=(0, 8))
+        self.thread_var = tk.StringVar(value=str(config.get("register_threads", 1)))
+        self.thread_spinbox = ttk.Spinbox(basic_card, from_=1, to=10, width=8, textvariable=self.thread_var)
+        self.thread_spinbox.grid(row=1, column=1, sticky=tk.W, pady=4)
+
+        self.nsfw_var = tk.BooleanVar(value=config.get("enable_nsfw", True))
+        self.nsfw_check = ttk.Checkbutton(basic_card, text="注册后开启 NSFW", variable=self.nsfw_var)
+        self.nsfw_check.grid(row=1, column=2, columnspan=2, sticky=tk.W, pady=4, padx=(16, 0))
+
+        ttk.Label(basic_card, text="代理（可选）").grid(row=2, column=0, sticky=tk.W, pady=4, padx=(0, 8))
+        self.proxy_var = tk.StringVar(value=config.get("proxy", ""))
+        self.proxy_entry = ttk.Entry(basic_card, textvariable=self.proxy_var)
+        self.proxy_entry.grid(row=2, column=1, columnspan=3, sticky=tk.EW, pady=4)
+
+        tip = ttk.Label(
+            tab_basic,
+            text="提示：只显示当前邮箱服务商相关字段。切换「邮箱」页填写凭证；点「开始注册」自动保存 config.json。",
+            foreground="#555",
+            wraplength=520,
+            justify=tk.LEFT,
+        )
+        tip.pack(fill=tk.X, pady=(4, 0))
+
+        # ===== MAIL =====
+        mail_hint = ttk.Label(tab_mail, textvariable=tk.StringVar(value=""), foreground="#555")
+        self.mail_hint_var = tk.StringVar(
+            value="按服务商显示字段。Gmail 应用专用密码建议用环境变量 GMAIL_IMAP_PASSWORD，界面可不落盘。"
+        )
+        mail_hint.configure(textvariable=self.mail_hint_var, wraplength=520, justify=tk.LEFT)
+        mail_hint.pack(fill=tk.X, pady=(0, 8))
+
+        mail_card = ttk.LabelFrame(tab_mail, text="邮箱凭证", style="Card.TLabelframe", padding=10)
+        mail_card.pack(fill=tk.BOTH, expand=True)
+        mail_card.columnconfigure(1, weight=1)
+        self._mail_card = mail_card
+        r = 0
+
+        self.api_key_var = tk.StringVar(value=config.get("duckmail_api_key", ""))
+        self.api_key_entry = ttk.Entry(mail_card, textvariable=self.api_key_var, show="*")
+        _row(mail_card, r, "DuckMail / YYDS API Key", self.api_key_entry, ["duckmail", "yyds"])
+        r += 1
+
+        self.cloudflare_api_base_var = tk.StringVar(value=config.get("cloudflare_api_base", ""))
+        self.cloudflare_api_base_entry = ttk.Entry(mail_card, textvariable=self.cloudflare_api_base_var)
+        _row(mail_card, r, "Cloudflare API Base", self.cloudflare_api_base_entry, ["cloudflare"])
+        r += 1
+
+        self.cloudflare_api_key_var = tk.StringVar(value=config.get("cloudflare_api_key", ""))
+        self.cloudflare_api_key_entry = ttk.Entry(mail_card, textvariable=self.cloudflare_api_key_var, show="*")
+        _row(mail_card, r, "Cloudflare API Key", self.cloudflare_api_key_entry, ["cloudflare"])
+        r += 1
+
+        self.cloudflare_auth_mode_var = tk.StringVar(value=config.get("cloudflare_auth_mode", "bearer"))
+        self.cloudflare_auth_mode_combo = ttk.Combobox(
+            mail_card,
+            textvariable=self.cloudflare_auth_mode_var,
+            values=["query-key", "bearer", "x-api-key", "none"],
+            width=14,
+            state="readonly",
+        )
+        _row(mail_card, r, "Cloudflare 鉴权模式", self.cloudflare_auth_mode_combo, ["cloudflare"], sticky=tk.W)
+        r += 1
+
         self.cloudflare_paths_var = tk.StringVar(
             value=",".join(
                 [
@@ -5158,97 +5279,241 @@ class GrokRegisterGUI:
                 ]
             )
         )
-        self.cloudflare_paths_entry = ttk.Entry(config_frame, textvariable=self.cloudflare_paths_var, width=30)
-        self.cloudflare_paths_entry.grid(row=7, column=1, columnspan=3, sticky=tk.W, padx=5)
+        self.cloudflare_paths_entry = ttk.Entry(mail_card, textvariable=self.cloudflare_paths_var)
+        _row(mail_card, r, "CF 路径 domains/accounts/token/messages", self.cloudflare_paths_entry, ["cloudflare"])
+        r += 1
 
-        ttk.Label(config_frame, text="CloudMail URL:").grid(row=8, column=0, sticky=tk.W)
         self.cloudmail_url_var = tk.StringVar(value=str(config.get("cloudmail_url", "")))
-        self.cloudmail_url_entry = ttk.Entry(config_frame, textvariable=self.cloudmail_url_var, width=30)
-        self.cloudmail_url_entry.grid(row=8, column=1, columnspan=3, sticky=tk.W, padx=5)
+        self.cloudmail_url_entry = ttk.Entry(mail_card, textvariable=self.cloudmail_url_var)
+        _row(mail_card, r, "CloudMail URL", self.cloudmail_url_entry, ["cloudmail"])
+        r += 1
 
-        ttk.Label(config_frame, text="CloudMail 管理员邮箱:").grid(row=9, column=0, sticky=tk.W)
         self.cloudmail_admin_email_var = tk.StringVar(value=str(config.get("cloudmail_admin_email", "")))
-        self.cloudmail_admin_email_entry = ttk.Entry(config_frame, textvariable=self.cloudmail_admin_email_var, width=30)
-        self.cloudmail_admin_email_entry.grid(row=9, column=1, columnspan=3, sticky=tk.W, padx=5)
+        self.cloudmail_admin_email_entry = ttk.Entry(mail_card, textvariable=self.cloudmail_admin_email_var)
+        _row(mail_card, r, "CloudMail 管理员邮箱", self.cloudmail_admin_email_entry, ["cloudmail"])
+        r += 1
 
-        ttk.Label(config_frame, text="CloudMail 管理员密码:").grid(row=10, column=0, sticky=tk.W)
         self.cloudmail_password_var = tk.StringVar(value=str(config.get("cloudmail_password", "")))
-        self.cloudmail_password_entry = ttk.Entry(config_frame, textvariable=self.cloudmail_password_var, width=30, show="*")
-        self.cloudmail_password_entry.grid(row=10, column=1, columnspan=3, sticky=tk.W, padx=5)
+        self.cloudmail_password_entry = ttk.Entry(mail_card, textvariable=self.cloudmail_password_var, show="*")
+        _row(mail_card, r, "CloudMail 管理员密码", self.cloudmail_password_entry, ["cloudmail"])
+        r += 1
 
-        ttk.Label(config_frame, text="grok2api 本地自动入池:").grid(row=11, column=0, sticky=tk.W)
+        self.hotmail_accounts_file_var = tk.StringVar(
+            value=str(config.get("hotmail_accounts_file", "mail_credentials.txt"))
+        )
+        self.hotmail_accounts_file_entry = ttk.Entry(mail_card, textvariable=self.hotmail_accounts_file_var)
+        _row(
+            mail_card,
+            r,
+            "Hotmail 账号文件 (email----pw----client----token)",
+            self.hotmail_accounts_file_entry,
+            ["hotmail"],
+        )
+        r += 1
+
+        self.default_domains_var = tk.StringVar(value=str(config.get("defaultDomains", "")))
+        self.default_domains_entry = ttk.Entry(mail_card, textvariable=self.default_domains_var)
+        _row(
+            mail_card,
+            r,
+            "默认域名 defaultDomains",
+            self.default_domains_entry,
+            ["cloudflare", "cloudmail", "gmail"],
+        )
+        r += 1
+
+        # Gmail: surface user (password prefers env; field optional for session)
+        self.gmail_imap_user_var = tk.StringVar(value=str(config.get("gmail_imap_user", "")))
+        self.gmail_imap_user_entry = ttk.Entry(mail_card, textvariable=self.gmail_imap_user_var)
+        _row(mail_card, r, "Gmail IMAP 用户", self.gmail_imap_user_entry, ["gmail"])
+        r += 1
+
+        self.gmail_imap_password_var = tk.StringVar(value="")  # never preload secret into UI
+        self.gmail_imap_password_entry = ttk.Entry(
+            mail_card, textvariable=self.gmail_imap_password_var, show="*"
+        )
+        _row(
+            mail_card,
+            r,
+            "Gmail 应用专用密码（可选；优先环境变量）",
+            self.gmail_imap_password_entry,
+            ["gmail"],
+        )
+        r += 1
+
+        # ===== ADVANCED =====
+        adv_card = ttk.LabelFrame(tab_adv, text="grok2api 入池（可选）", style="Card.TLabelframe", padding=10)
+        adv_card.pack(fill=tk.X)
+        adv_card.columnconfigure(1, weight=1)
+
         self.grok2api_local_auto_var = tk.BooleanVar(value=bool(config.get("grok2api_auto_add_local", True)))
-        self.grok2api_local_auto_check = ttk.Checkbutton(config_frame, variable=self.grok2api_local_auto_var)
-        self.grok2api_local_auto_check.grid(row=11, column=1, sticky=tk.W, padx=5)
+        self.grok2api_local_auto_check = ttk.Checkbutton(
+            adv_card, text="本地自动入池", variable=self.grok2api_local_auto_var
+        )
+        self.grok2api_local_auto_check.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=4)
 
-        ttk.Label(config_frame, text="grok2api 本地 token.json:").grid(row=12, column=0, sticky=tk.W)
+        ttk.Label(adv_card, text="本地 token.json").grid(row=1, column=0, sticky=tk.W, pady=4, padx=(0, 8))
         self.grok2api_local_file_var = tk.StringVar(value=str(config.get("grok2api_local_token_file", "")))
-        self.grok2api_local_file_entry = ttk.Entry(config_frame, textvariable=self.grok2api_local_file_var, width=30)
-        self.grok2api_local_file_entry.grid(row=12, column=1, columnspan=3, sticky=tk.W, padx=5)
+        self.grok2api_local_file_entry = ttk.Entry(adv_card, textvariable=self.grok2api_local_file_var)
+        self.grok2api_local_file_entry.grid(row=1, column=1, sticky=tk.EW, pady=4)
 
-        ttk.Label(config_frame, text="grok2api 池名:").grid(row=13, column=0, sticky=tk.W)
+        ttk.Label(adv_card, text="池名").grid(row=2, column=0, sticky=tk.W, pady=4, padx=(0, 8))
         self.grok2api_pool_name_var = tk.StringVar(value=str(config.get("grok2api_pool_name", "ssoBasic")))
         self.grok2api_pool_name_combo = ttk.Combobox(
-            config_frame,
+            adv_card,
             textvariable=self.grok2api_pool_name_var,
             values=["ssoBasic", "ssoSuper"],
-            width=12,
+            width=14,
             state="readonly",
         )
-        self.grok2api_pool_name_combo.grid(row=13, column=1, sticky=tk.W, padx=5)
+        self.grok2api_pool_name_combo.grid(row=2, column=1, sticky=tk.W, pady=4)
 
-        ttk.Label(config_frame, text="grok2api 远端自动入池:").grid(row=14, column=0, sticky=tk.W)
         self.grok2api_remote_auto_var = tk.BooleanVar(value=bool(config.get("grok2api_auto_add_remote", False)))
-        self.grok2api_remote_auto_check = ttk.Checkbutton(config_frame, variable=self.grok2api_remote_auto_var)
-        self.grok2api_remote_auto_check.grid(row=14, column=1, sticky=tk.W, padx=5)
+        self.grok2api_remote_auto_check = ttk.Checkbutton(
+            adv_card, text="远端自动入池", variable=self.grok2api_remote_auto_var
+        )
+        self.grok2api_remote_auto_check.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=4)
 
-        ttk.Label(config_frame, text="grok2api 远端 Base:").grid(row=15, column=0, sticky=tk.W)
+        ttk.Label(adv_card, text="远端 Base").grid(row=4, column=0, sticky=tk.W, pady=4, padx=(0, 8))
         self.grok2api_remote_base_var = tk.StringVar(value=str(config.get("grok2api_remote_base", "")))
-        self.grok2api_remote_base_entry = ttk.Entry(config_frame, textvariable=self.grok2api_remote_base_var, width=30)
-        self.grok2api_remote_base_entry.grid(row=15, column=1, columnspan=3, sticky=tk.W, padx=5)
+        self.grok2api_remote_base_entry = ttk.Entry(adv_card, textvariable=self.grok2api_remote_base_var)
+        self.grok2api_remote_base_entry.grid(row=4, column=1, sticky=tk.EW, pady=4)
 
-        ttk.Label(config_frame, text="grok2api 远端 app_key:").grid(row=16, column=0, sticky=tk.W)
+        ttk.Label(adv_card, text="远端 app_key").grid(row=5, column=0, sticky=tk.W, pady=4, padx=(0, 8))
         self.grok2api_remote_key_var = tk.StringVar(value=str(config.get("grok2api_remote_app_key", "")))
-        self.grok2api_remote_key_entry = ttk.Entry(config_frame, textvariable=self.grok2api_remote_key_var, width=30)
-        self.grok2api_remote_key_entry.grid(row=16, column=1, columnspan=3, sticky=tk.W, padx=5)
-        ttk.Label(config_frame, text="默认域名(defaultDomains):").grid(row=17, column=0, sticky=tk.W)
-        self.default_domains_var = tk.StringVar(value=str(config.get("defaultDomains", "")))
-        self.default_domains_entry = ttk.Entry(config_frame, textvariable=self.default_domains_var, width=30)
-        self.default_domains_entry.grid(row=17, column=1, columnspan=3, sticky=tk.W, padx=5)
+        self.grok2api_remote_key_entry = ttk.Entry(
+            adv_card, textvariable=self.grok2api_remote_key_var, show="*"
+        )
+        self.grok2api_remote_key_entry.grid(row=5, column=1, sticky=tk.EW, pady=4)
 
-        ttk.Label(config_frame, text="Hotmail账号文件:").grid(row=18, column=0, sticky=tk.W)
-        self.hotmail_accounts_file_var = tk.StringVar(value=str(config.get("hotmail_accounts_file", "mail_credentials.txt")))
-        self.hotmail_accounts_file_entry = ttk.Entry(config_frame, textvariable=self.hotmail_accounts_file_var, width=30)
-        self.hotmail_accounts_file_entry.grid(row=18, column=1, columnspan=3, sticky=tk.W, padx=5)
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X, pady=10)
-        self.start_btn = ttk.Button(btn_frame, text="开始注册", command=self.start_registration)
-        self.start_btn.pack(side=tk.LEFT, padx=5)
-        self.stop_btn = ttk.Button(btn_frame, text="停止", command=self.stop_registration, state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.LEFT, padx=5)
-        self.clear_btn = ttk.Button(btn_frame, text="清空日志", command=self.clear_log)
-        self.clear_btn.pack(side=tk.LEFT, padx=5)
-        self.help_btn = ttk.Button(btn_frame, text="教程", command=self.show_tutorial)
-        self.help_btn.pack(side=tk.LEFT, padx=5)
-        status_frame = ttk.Frame(main_frame)
-        status_frame.pack(fill=tk.X, pady=5)
+        adv_note = ttk.Label(
+            tab_adv,
+            text="进阶项不影响最小注册链路。生产 CPA live 注入仍由 CLI / config 控制，GUI 不默认写远端生产。",
+            foreground="#555",
+            wraplength=520,
+            justify=tk.LEFT,
+        )
+        adv_note.pack(fill=tk.X, pady=(10, 0))
+
+        # ===== RIGHT: run + progress + log =====
+        run_card = ttk.LabelFrame(right, text="控制台", style="Card.TLabelframe", padding=10)
+        run_card.pack(fill=tk.X)
+
+        btn_row = ttk.Frame(run_card)
+        btn_row.pack(fill=tk.X)
+        self.start_btn = ttk.Button(btn_row, text="开始注册", command=self.start_registration, style="Accent.TButton")
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self.stop_btn = ttk.Button(btn_row, text="停止", command=self.stop_registration, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self.clear_btn = ttk.Button(btn_row, text="清空日志", command=self.clear_log)
+        self.clear_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self.help_btn = ttk.Button(btn_row, text="教程", command=self.show_tutorial)
+        self.help_btn.pack(side=tk.LEFT)
+
+        status_row = ttk.Frame(run_card)
+        status_row.pack(fill=tk.X, pady=(10, 4))
+        ttk.Label(status_row, text="状态").pack(side=tk.LEFT)
         self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(status_frame, text="状态: ").pack(side=tk.LEFT)
-        self.status_label = ttk.Label(status_frame, textvariable=self.status_var, foreground="green")
-        self.status_label.pack(side=tk.LEFT)
-        self.stats_var = tk.StringVar(value="成功: 0 | 失败: 0")
-        ttk.Label(status_frame, textvariable=self.stats_var).pack(side=tk.RIGHT)
-        log_frame = ttk.LabelFrame(main_frame, text="日志", padding=5)
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=15, width=60)
+        self.status_label = ttk.Label(status_row, textvariable=self.status_var, style="Status.TLabel", foreground="#1a7f37")
+        self.status_label.pack(side=tk.LEFT, padx=(8, 0))
+        self.stats_var = tk.StringVar(value="成功 0 · 失败 0 · 目标 —")
+        ttk.Label(status_row, textvariable=self.stats_var).pack(side=tk.RIGHT)
+
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress = ttk.Progressbar(
+            run_card,
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            maximum=100,
+            variable=self.progress_var,
+        )
+        self.progress.pack(fill=tk.X, pady=(4, 2))
+        self.progress_label_var = tk.StringVar(value="进度 0%")
+        ttk.Label(run_card, textvariable=self.progress_label_var, foreground="#555").pack(anchor=tk.W)
+
+        self.phase_var = tk.StringVar(value="阶段：待命")
+        ttk.Label(run_card, textvariable=self.phase_var).pack(anchor=tk.W, pady=(6, 0))
+
+        log_frame = ttk.LabelFrame(right, text="实时日志", style="Card.TLabelframe", padding=6)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame,
+            height=22,
+            width=48,
+            font=("Menlo", 11) if self.root.tk.call("tk", "windowingsystem") == "aqua" else ("Consolas", 10),
+            wrap=tk.WORD,
+        )
         self.log_text.pack(fill=tk.BOTH, expand=True)
+        # simple log tags for severity coloring
+        self.log_text.tag_configure("ok", foreground="#1a7f37")
+        self.log_text.tag_configure("err", foreground="#cf222e")
+        self.log_text.tag_configure("warn", foreground="#9a6700")
+        self.log_text.tag_configure("info", foreground="#0969da")
+
+        self._batch_target = 0
+        self._on_provider_changed()
+
+    def _normalize_provider_key(self, name: str) -> str:
+        p = (name or "duckmail").strip().lower()
+        if p in ("outlook", "outlookmail", "microsoft"):
+            return "hotmail"
+        if p in ("google", "googlemail"):
+            return "gmail"
+        if p == "yyds":
+            return "yyds"
+        return p if p in ("duckmail", "cloudflare", "cloudmail", "hotmail", "gmail", "yyds") else "duckmail"
+
+    def _on_provider_changed(self):
+        key = self._normalize_provider_key(self.email_provider_var.get())
+        hints = {
+            "duckmail": "DuckMail：填写 API Key 即可。推荐新人路径。",
+            "yyds": "YYDS：填写 API Key 或 JWT。",
+            "cloudflare": "Cloudflare 临时邮箱：API Base + 路径 + 鉴权必填。",
+            "cloudmail": "CloudMail：URL + 管理员账号密码 + defaultDomains。",
+            "hotmail": "Hotmail/Outlook：四段凭证文件；禁止 plus-alias 农场扩产。",
+            "gmail": "Gmail IMAP：用户 + 应用专用密码（环境变量优先）+ catch-all 域名。",
+        }
+        if hasattr(self, "mail_hint_var"):
+            self.mail_hint_var.set(hints.get(key, ""))
+        # Hide all provider-specific rows, then show matching + common.
+        shown = set()
+        for group, widgets in getattr(self, "_mail_rows", {}).items():
+            for w in widgets:
+                try:
+                    w.grid_remove()
+                except Exception:
+                    pass
+        for group in (key, "common"):
+            for w in self._mail_rows.get(group, []):
+                wid = id(w)
+                if wid in shown:
+                    continue
+                shown.add(wid)
+                try:
+                    w.grid()
+                except Exception:
+                    pass
+        if hasattr(self, "provider_badge_var"):
+            self.provider_badge_var.set(f"Provider: grok · mail={key}")
 
     def log(self, message):
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         # 仅当用户当前就在底部时自动跟随，避免手动上滑后被强制拉回底部
         yview = self.log_text.yview()
         at_bottom = bool(yview) and yview[1] >= 0.999
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        line = f"[{timestamp}] {message}\n"
+        tag = None
+        msg = str(message or "")
+        if msg.startswith("[+]") or "注册成功" in msg:
+            tag = "ok"
+        elif msg.startswith("[-]") or msg.startswith("[!]") or "失败" in msg[:20]:
+            tag = "err" if (msg.startswith("[-]") or "失败" in msg[:20]) else "warn"
+        elif msg.startswith("[*]") or msg.startswith("[cpa]"):
+            tag = "info"
+        if tag:
+            self.log_text.insert(tk.END, line, tag)
+        else:
+            self.log_text.insert(tk.END, line)
         if at_bottom:
             self.log_text.see(tk.END)
 
@@ -5256,21 +5521,56 @@ class GrokRegisterGUI:
         self.log_text.delete(1.0, tk.END)
 
     def update_stats(self):
-        self.stats_var.set(f"成功: {self.success_count} | 失败: {self.fail_count}")
+        target = int(getattr(self, "_batch_target", 0) or 0)
+        done = int(self.success_count) + int(self.fail_count)
+        if target > 0:
+            self.stats_var.set(
+                f"成功 {self.success_count} · 失败 {self.fail_count} · 目标 {target}"
+            )
+            pct = min(100.0, (done / target) * 100.0)
+            if hasattr(self, "progress_var"):
+                self.progress_var.set(pct)
+            if hasattr(self, "progress_label_var"):
+                self.progress_label_var.set(f"进度 {done}/{target} ({pct:.0f}%)")
+        else:
+            self.stats_var.set(f"成功 {self.success_count} · 失败 {self.fail_count} · 目标 —")
 
     def _set_running_ui(self, running):
         self.is_running = running
         self.start_btn.config(state=tk.DISABLED if running else tk.NORMAL)
         self.stop_btn.config(state=tk.NORMAL if running else tk.DISABLED)
-        self.status_var.set("运行中..." if running else "就绪")
-        self.status_label.config(foreground="blue" if running else "green")
+        if running:
+            self.status_var.set("运行中")
+            self.status_label.config(foreground="#0969da")
+            if hasattr(self, "phase_var"):
+                self.phase_var.set("阶段：注册进行中")
+        else:
+            self.status_var.set("就绪")
+            self.status_label.config(foreground="#1a7f37")
+            if hasattr(self, "phase_var"):
+                target = int(getattr(self, "_batch_target", 0) or 0)
+                done = int(self.success_count) + int(self.fail_count)
+                if target and done:
+                    self.phase_var.set(
+                        f"阶段：已结束 · 成功 {self.success_count} / 失败 {self.fail_count}"
+                    )
+                else:
+                    self.phase_var.set("阶段：待命")
 
     def _maybe_show_tutorial_on_start(self):
         if bool(config.get("show_tutorial_on_start", True)):
             self.show_tutorial()
 
     def _tutorial_text(self):
-        return """欢迎使用 AI 注册机（ai-register-machine）。建议按下面顺序填写（从最关键到可选）：
+        return """欢迎使用 AI 注册机（ai-register-machine）。
+
+界面分区（新）：
+- 「基础」：邮箱服务商、数量、并发、代理、NSFW
+- 「邮箱」：只显示当前服务商相关凭证（切换服务商自动显隐）
+- 「进阶 / 入池」：grok2api 本地/远端入池（可选）
+- 右侧：开始/停止、状态、进度条、实时彩色日志
+
+建议按下面顺序填写（从最关键到可选）：
 
 【第一步：先确定邮箱后端信息从哪里来】
 如果你使用 cloudflare 模式（你当前主要是这套），先去你的临时邮箱服务配置接口查信息：
@@ -5430,7 +5730,15 @@ class GrokRegisterGUI:
 
         config["email_provider"] = self.email_provider_var.get().strip() or "duckmail"
         config["proxy"] = self.proxy_var.get().strip()
+        config["enable_nsfw"] = bool(self.nsfw_var.get())
         config["duckmail_api_key"] = self.api_key_var.get().strip()
+        # Gmail: user may be persisted; password is session/env only (save_config blanks it).
+        if hasattr(self, "gmail_imap_user_var"):
+            config["gmail_imap_user"] = self.gmail_imap_user_var.get().strip()
+        if hasattr(self, "gmail_imap_password_var"):
+            gmail_pw = self.gmail_imap_password_var.get().strip().replace(" ", "")
+            if gmail_pw:
+                config["gmail_imap_password"] = gmail_pw
         config["cloudflare_api_base"] = self.cloudflare_api_base_var.get().strip()
         config["cloudflare_api_key"] = self.cloudflare_api_key_var.get().strip()
         config["cloudflare_auth_mode"] = self.cloudflare_auth_mode_var.get().strip() or "bearer"
@@ -5493,6 +5801,13 @@ class GrokRegisterGUI:
         self.success_count = 0
         self.fail_count = 0
         self.results = []
+        self._batch_target = count
+        if hasattr(self, "progress_var"):
+            self.progress_var.set(0.0)
+        if hasattr(self, "progress_label_var"):
+            self.progress_label_var.set(f"进度 0/{count} (0%)")
+        if hasattr(self, "phase_var"):
+            self.phase_var.set("阶段：启动浏览器 / 排队")
         now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.accounts_output_file = os.path.join(
             os.path.dirname(__file__), f"accounts_{now}.txt"
@@ -5652,21 +5967,21 @@ class GrokRegisterGUI:
                 except queue.Empty:
                     break
                 logf(f"--- 开始第 {idx}/{total} 个账号 ---")
+                stop_after = False
                 try:
                     self._run_single_registration(idx, total, logf)
                 except RegistrationCancelled:
                     logf("[!] 注册被用户停止")
-                    break
+                    stop_after = True
                 except Exception as exc:
                     with self.stats_lock:
                         self.fail_count += 1
                     logf(f"[-] 注册失败: {exc}")
-                finally:
-                    self.update_stats()
-                    if self.should_stop():
-                        break
-                    restart_browser(log_callback=logf)
-                    sleep_with_cancel(1, self.should_stop)
+                self.update_stats()
+                if stop_after or self.should_stop():
+                    break
+                restart_browser(log_callback=logf)
+                sleep_with_cancel(1, self.should_stop)
         except Exception as exc:
             logf(f"[!] 线程异常: {exc}")
         finally:
