@@ -759,4 +759,4 @@ GROK_REGISTER_LIVE=1 uv run python test_hotmail_rest_code.py
 - **CLIProxyAPI / CPA：** 自备；将 `cpa_auths/xai-*.json` 放到 CPA auth-dir 即可热加载
 - **免费 Grok 4.5：** 只走 Build OIDC + `cli-chat-proxy`，不是网页 SSO
 - **仓库：** https://github.com/dengyie/ai-register-machine
-- **最新发布：** https://github.com/dengyie/ai-register-machine/releases/tag/v1.3.0
+- **版本：** 见 [CHANGELOG.md](CHANGELOG.md)（`pyproject.toml` version **1.3.0**；GitHub Release 标签按需打，勿假设已有 `v1.3.0` tag）

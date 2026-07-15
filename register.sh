@@ -44,7 +44,31 @@ Deploy layout example (pxed):
   /personal/grok-register or ai-register-machine   this monorepo
   /personal/mimo-register                       optional Node runtime
   /personal/clash                               mihomo
+
+Env:
+  GROK_CODE_ROOT   optional override for monorepo root on remote
 EOF
+}
+
+# Prefer explicit override, then common deploy dirs that actually exist, then $ROOT.
+_resolve_code_root() {
+  if [[ -n "${GROK_CODE_ROOT:-}" && -d "${GROK_CODE_ROOT}" ]]; then
+    printf '%s\n' "${GROK_CODE_ROOT}"
+    return 0
+  fi
+  local cand
+  for cand in \
+    /personal/ai-register-machine \
+    /personal/register-machine \
+    /personal/grok-register \
+    "$ROOT"
+  do
+    if [[ -d "$cand" && -f "$cand/register_cli.py" ]]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  printf '%s\n' "$ROOT"
 }
 
 cmd="${1:-help}"
@@ -57,14 +81,19 @@ case "$cmd" in
   grok|xai)
     COUNT="${1:-1}"
     THREADS="${2:-1}"
-    if [[ -x /personal/grok-register/run-register.sh && -d /personal/grok-register/.venv ]]; then
-      exec bash /personal/grok-register/run-register.sh "$COUNT" "$THREADS"
+    CODE_ROOT="$(_resolve_code_root)"
+    if [[ -x "$CODE_ROOT/run-register.sh" && -d "$CODE_ROOT/.venv" ]]; then
+      exec bash "$CODE_ROOT/run-register.sh" "$COUNT" "$THREADS"
     fi
-    if [[ -x "$ROOT/run-register.sh" ]]; then
+    if [[ -x "$ROOT/run-register.sh" && "$ROOT" != "$CODE_ROOT" ]]; then
       exec bash "$ROOT/run-register.sh" "$COUNT" "$THREADS"
     fi
-    # local/dev: python CLI
-    if [[ -d "$ROOT/.venv" ]]; then
+    # local/dev: python CLI from monorepo root that has register_cli.py
+    cd "$CODE_ROOT"
+    if [[ -d "$CODE_ROOT/.venv" ]]; then
+      # shellcheck disable=SC1091
+      source "$CODE_ROOT/.venv/bin/activate"
+    elif [[ -d "$ROOT/.venv" ]]; then
       # shellcheck disable=SC1091
       source "$ROOT/.venv/bin/activate"
     fi

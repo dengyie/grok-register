@@ -107,6 +107,16 @@ New products: implement adapter → register factory → optional verifier → d
 3. Exit 0 without this-run identity → **failure**.
 4. Subprocess timeout → kill process group (`start_new_session` + `killpg`).
 
+## Hard safety contracts
+
+| Contract | Enforcement |
+|----------|-------------|
+| API key shape | `register_core.util.secrets` — single source; adapter/verify/inject/redact must agree |
+| Grok product-ready | this-run **SSO** required (`ok=False` if email-only / pending) |
+| MiMo product-ready | this-run **secret** via RESULT_JSON or file delta (never historical tail) |
+| CPA OpenAI inject | no default prod path; `--config`/`CPA_CONFIG` + prod requires `--i-understand-production` |
+| Deploy path | `GROK_CODE_ROOT` or first existing `/personal/{ai-register-machine,register-machine,grok-register}` |
+
 ## Non-goals (this skeleton)
 
 - Mass account farm / alias email expansion

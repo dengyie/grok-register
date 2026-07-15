@@ -194,6 +194,103 @@ class TestMimoVerifier(unittest.TestCase):
         self.assertFalse(bad.ok)
         good = v.verify(RegisterResult(ok=True, provider="mimo", secret="sk-" + "a" * 40))
         self.assertTrue(good.ok)
+        # Hyphenated / underscored vendor keys must pass the same shape gate as inject.
+        hyphen = v.verify(
+            RegisterResult(
+                ok=True,
+                provider="mimo",
+                secret="sk-hyper-abc-def-0123456789abcdef",
+            )
+        )
+        self.assertTrue(hyphen.ok)
+        under = v.verify(
+            RegisterResult(
+                ok=True,
+                provider="mimo",
+                secret="sk-cdqo_test_underscore_0123456789",
+            )
+        )
+        self.assertTrue(under.ok)
+
+
+class TestSecretPatterns(unittest.TestCase):
+    def test_hyphen_underscore_api_keys(self):
+        from register_core.util.secrets import find_api_keys, is_api_key
+
+        self.assertTrue(is_api_key("sk-" + "a" * 24))
+        self.assertTrue(is_api_key("sk-hyper-abc-def-0123456789abcdef"))
+        self.assertTrue(is_api_key("sk-cdqo_test_underscore_0123456789"))
+        self.assertFalse(is_api_key("sk-short"))
+        self.assertFalse(is_api_key("not-a-key"))
+        found = find_api_keys("x sk-hyper-abc-def-0123456789abcdef y")
+        self.assertEqual(len(found), 1)
+
+    def test_redact_hyphenated_key(self):
+        t = redact_log_tail("got sk-hyper-abc-def-0123456789abcdef done")
+        self.assertNotIn("sk-hyper-abc-def-0123456789abcdef", t)
+        self.assertIn("sk-***", t)
+
+    def test_mimo_parse_hyphenated_result_json(self):
+        key = "sk-hyper-abc-def-0123456789abcdef"
+        stdout = (
+            'RESULT_JSON:{"status":"SUCCESS","email":"n@x.com",'
+            f'"password":"p","apiKey":"{key}"}}\n'
+        )
+        email, secret, password = MimoProvider._parse_this_run(
+            stdout=stdout,
+            keys_delta="",
+            accounts_delta="",
+        )
+        self.assertEqual(email, "n@x.com")
+        self.assertEqual(secret, key)
+        self.assertEqual(password, "p")
+
+
+class TestGrokVerifierHonesty(unittest.TestCase):
+    def test_pending_sso_fails_default_verifier(self):
+        from register_core.verify.grok_chat import GrokChatVerifier
+
+        v = GrokChatVerifier()
+        r = v.verify(
+            RegisterResult(
+                ok=True,
+                provider="grok",
+                email="u@x.com",
+                secret="",
+                secret_kind="pending",
+            )
+        )
+        self.assertFalse(r.ok)
+        self.assertIn("missing sso", r.detail.lower())
+
+    def test_sso_soft_passes_without_live_chat(self):
+        from register_core.verify.grok_chat import GrokChatVerifier
+
+        v = GrokChatVerifier()
+        r = v.verify(
+            RegisterResult(
+                ok=True,
+                provider="grok",
+                email="u@x.com",
+                secret="eyJhbGciOiJIUzI1NiJ9.aaa.bbb",
+                secret_kind="sso",
+            )
+        )
+        self.assertTrue(r.ok)
+        self.assertIn("deferred", r.detail)
+
+
+class TestProcessTimeout(unittest.TestCase):
+    def test_timeout_kills_and_sets_flag(self):
+        import sys
+
+        from register_core.util.process import run_command
+
+        # Short sleep child; timeout forces process-group kill path.
+        code = "import time; time.sleep(30)"
+        res = run_command([sys.executable, "-c", code], timeout_s=0.3)
+        self.assertTrue(res.timed_out)
+        self.assertNotEqual(res.returncode, 0)
 
 
 class TestJobFactory(unittest.TestCase):
@@ -291,6 +388,24 @@ class TestGrokParse(unittest.TestCase):
                     r = provider.register_one()
         self.assertFalse(r.ok)
         self.assertIn("no this-run", r.error)
+
+    def test_ledger_email_without_sso_is_fail(self):
+        provider = GrokProvider(accounts_file="/tmp/x")
+        ledger = "user@x.com----pw----\n"
+        fake = CmdResult(
+            returncode=0,
+            stdout="+ 注册成功: user@x.com\n",
+            stderr="",
+            timed_out=False,
+        )
+        with patch("register_core.providers.grok_adapter.run_command", return_value=fake):
+            with patch("register_core.providers.grok_adapter.file_size", return_value=0):
+                with patch("register_core.providers.grok_adapter.read_appended", return_value=ledger):
+                    r = provider.register_one()
+        self.assertFalse(r.ok)
+        self.assertEqual(r.email, "user@x.com")
+        self.assertEqual(r.secret_kind, "pending")
+        self.assertIn("without SSO", r.error)
 
     def test_ledger_delta_success(self):
         provider = GrokProvider(accounts_file="/tmp/x")

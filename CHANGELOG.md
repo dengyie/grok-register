@@ -28,10 +28,19 @@ project versioning follows [Semantic Versioning](https://semver.org/).
 - Fail-fast + this-run result attribution (no historical tail as success); public redact password/secret
 - pytest `pythonpath` + `tests/` tree; gitignore all `providers/*/output|node_modules`
 
+### Fixed
+
+- Align `sk-` patterns across adapter / verifier / inject / redaction (hyphen & underscore vendor keys)
+- Grok adapter no longer reports `ok=True` with empty SSO (`pending`); default Grok verifier requires SSO
+- `inject_cpa_openai.py` no longer defaults to production CPA path; requires `--config`/`CPA_CONFIG` and `--i-understand-production` for prod
+- `register.sh` / MiMo clash starter resolve monorepo root via `GROK_CODE_ROOT` and multi-name candidates (not hard-only `/personal/grok-register`)
+- README no longer links a non-existent `v1.3.0` GitHub Release tag
+
 ### Security
 
 - Jsonl sink `O_CREAT|0600`; black-box providers reject fake external `--email-source`
 - Ignore MiMo runtime output / node_modules; never commit keys or mail ledgers
+- Production CPA inject is opt-in with explicit ack (no silent default path)
 
 ## [1.2.3] - 2026-07-13
 

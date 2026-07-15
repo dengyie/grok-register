@@ -28,7 +28,9 @@ syntax:
 	bash -n scripts/setup_simple.sh
 	bash -n scripts/doctor_secrets.sh
 	$(PY) -m py_compile register_cli.py register_core/cli.py register_core/pipeline.py \
-	  register_core/providers/registry.py providers/mimo/inject_cpa_openai.py
+	  register_core/providers/registry.py register_core/util/secrets.py \
+	  register_core/util/process.py register_core/verify/mimo_tts.py \
+	  register_core/verify/grok_chat.py providers/mimo/inject_cpa_openai.py
 
 doctor:
 	bash scripts/doctor_secrets.sh || test $$? -eq 2

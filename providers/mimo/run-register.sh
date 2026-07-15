@@ -67,11 +67,22 @@ ensure_clash() {
     echo "[mimo] clash already up on 7897"
     return 0
   fi
-  if [[ -x /personal/grok-register/start-clash-for-grok.sh ]]; then
-    echo "[mimo] starting clash via grok helper..."
-    bash /personal/grok-register/start-clash-for-grok.sh
-    return $?
-  fi
+  local starter monorepo
+  for monorepo in \
+    "${GROK_CODE_ROOT:-}" \
+    /personal/ai-register-machine \
+    /personal/register-machine \
+    /personal/grok-register \
+    "$(cd "$PROVIDER_DIR/../.." && pwd)"
+  do
+    [[ -n "$monorepo" ]] || continue
+    starter="$monorepo/start-clash-for-grok.sh"
+    if [[ -x "$starter" ]]; then
+      echo "[mimo] starting clash via $starter ..."
+      bash "$starter"
+      return $?
+    fi
+  done
   echo "[mimo] WARN: no clash starter; ensure $MIMO_PROXY is reachable" >&2
   return 0
 }

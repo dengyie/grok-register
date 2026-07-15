@@ -13,10 +13,10 @@ from register_core.email.base import EmailSource
 from register_core.errors import FailFastError, ProviderError
 from register_core.util.files import file_size, read_appended
 from register_core.util.process import redact_log_tail, run_command
+from register_core.util.secrets import API_KEY_SEARCH_RE, is_api_key
 
 ROOT = Path(__file__).resolve().parents[2]
 MIMO_DIR = ROOT / "providers" / "mimo"
-_SK_RE = re.compile(r"sk-[A-Za-z0-9]{20,}")
 _RESULT_LINE = re.compile(r"^RESULT_JSON:(.+)$", re.M)
 
 
@@ -150,7 +150,11 @@ class MimoProvider:
             if not isinstance(data, dict):
                 continue
             if str(data.get("status") or "").upper() == "SUCCESS":
-                secret = str(data.get("apiKey") or data.get("api_key") or data.get("secret") or "") or secret
+                cand = str(
+                    data.get("apiKey") or data.get("api_key") or data.get("secret") or ""
+                ).strip()
+                if is_api_key(cand):
+                    secret = cand
                 email = str(data.get("email") or "") or email
                 password = str(data.get("password") or "") or password
 
@@ -166,8 +170,8 @@ class MimoProvider:
                     continue
                 if not isinstance(last, dict):
                     continue
-                cand = str(last.get("apiKey") or last.get("api_key") or last.get("key") or "")
-                if cand.startswith("sk-"):
+                cand = str(last.get("apiKey") or last.get("api_key") or last.get("key") or "").strip()
+                if is_api_key(cand):
                     secret = cand
                     email = str(last.get("email") or last.get("address") or email)
                     password = str(last.get("password") or password)
@@ -175,7 +179,7 @@ class MimoProvider:
         # 3) Increment of success_keys.txt only
         if not secret and keys_delta.strip():
             for line in keys_delta.splitlines():
-                m = _SK_RE.search(line)
+                m = API_KEY_SEARCH_RE.search(line)
                 if m:
                     secret = m.group(0)
 

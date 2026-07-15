@@ -103,11 +103,12 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 _OTP_LINE = re.compile(r"(验证码|otp|one[- ]time|\bcode)\s*[:：]\s*\d{4,8}", re.I)
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
-_SK = re.compile(r"\bsk-[A-Za-z0-9]{16,}\b")
 
 
 def redact_log_tail(text: str, *, limit: int = 1200) -> str:
     """Strip OTP / JWT / API keys before storing artifacts."""
+    from register_core.util.secrets import API_KEY_WORD_RE
+
     if not text:
         return ""
     lines: list[str] = []
@@ -116,7 +117,7 @@ def redact_log_tail(text: str, *, limit: int = 1200) -> str:
         if _OTP_LINE.search(s):
             s = re.sub(r"\d{4,8}", "******", s)
         s = _JWT.sub("eyJ***", s)
-        s = _SK.sub("sk-***", s)
+        s = API_KEY_WORD_RE.sub("sk-***", s)
         lines.append(s)
     joined = "\n".join(lines)
     return joined[-limit:] if len(joined) > limit else joined

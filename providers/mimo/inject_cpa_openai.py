@@ -16,11 +16,14 @@ Idempotent: existing keys are left alone. Backs up config before write.
 Does not SIGHUP CPA (CLIProxyAPI watches config via fsnotify).
 
 Usage:
-  python inject_cpa_openai.py --key sk-...
-  python inject_cpa_openai.py --from-file /personal/mimo-register/output/success_keys.txt
-  python inject_cpa_openai.py --from-jsonl /personal/mimo-register/output/accounts.jsonl
+  python inject_cpa_openai.py --config /path/to/config.yaml --key sk-...
+  python inject_cpa_openai.py --config /path/to/config.yaml --from-file success_keys.txt
+  python inject_cpa_openai.py --config /path/to/config.yaml --from-jsonl accounts.jsonl
+  # production (explicit ack required):
+  python inject_cpa_openai.py --config /personal/cpa/config.yaml --i-understand-production --from-jsonl ...
   # remote via ssh host (BatchMode):
-  python inject_cpa_openai.py --ssh tebi-tunnel --from-jsonl ...
+  python inject_cpa_openai.py --ssh tebi-tunnel --config /personal/cpa/config.yaml \\
+    --i-understand-production --from-jsonl ...
 """
 
 from __future__ import annotations
@@ -43,9 +46,11 @@ DEFAULT_MODELS = (
     "mimo-v2.5-tts-voiceclone",
     "mimo-v2.5-tts-voicedesign",
 )
-DEFAULT_CONFIG = "/personal/cpa/config.yaml"
+# Production path is NOT the default — require --config or CPA_CONFIG explicitly.
+PROD_CONFIG_HINT = "/personal/cpa/config.yaml"
 # Allow hyphenated vendor keys (sk-hyper-..., sk-existing-...) while keeping sk- prefix.
-_KEY_RE = re.compile(r"(sk-[A-Za-z0-9][A-Za-z0-9_-]*)")
+# Keep in sync with register_core.util.secrets (standalone script may run without package).
+_KEY_RE = re.compile(r"(sk-[A-Za-z0-9][A-Za-z0-9_-]{15,})")
 
 
 def _redact(key: str) -> str:
@@ -293,7 +298,7 @@ def inject_via_ssh(
     ssh_host: str,
     keys: list[str],
     *,
-    config: str = DEFAULT_CONFIG,
+    config: str,
     channel: str = DEFAULT_CHANNEL,
     base_url: str = DEFAULT_BASE_URL,
     models: tuple[str, ...] = DEFAULT_MODELS,
@@ -370,8 +375,17 @@ def inject_via_ssh(
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Inject MiMo sk- keys into CPA openai-compatibility")
-    p.add_argument("--config", default=DEFAULT_CONFIG)
+    p = argparse.ArgumentParser(
+        description=(
+            "Inject MiMo sk- keys into CPA openai-compatibility. "
+            "Refuses implicit production paths: pass --config or CPA_CONFIG."
+        )
+    )
+    p.add_argument(
+        "--config",
+        default=None,
+        help=f"CPA config.yaml path (or env CPA_CONFIG). Prod hint: {PROD_CONFIG_HINT}",
+    )
     p.add_argument("--channel", default=DEFAULT_CHANNEL)
     p.add_argument("--base-url", default=DEFAULT_BASE_URL)
     p.add_argument("--priority", type=int, default=100)
@@ -381,7 +395,35 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-jsonl", type=Path)
     p.add_argument("--ssh", help="ssh host alias (e.g. tebi-tunnel); runs inject on remote")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--i-understand-production",
+        action="store_true",
+        help="Required when --config points at production CPA path",
+    )
     args = p.parse_args(argv)
+
+    config = (args.config or os.environ.get("CPA_CONFIG") or "").strip()
+    if not config:
+        print(
+            "refusing: pass --config PATH or set CPA_CONFIG "
+            f"(production example: --config {PROD_CONFIG_HINT} --i-understand-production)",
+            file=sys.stderr,
+        )
+        return 2
+
+    config_path = Path(config)
+    looks_prod = (
+        str(config_path) == PROD_CONFIG_HINT
+        or str(config_path).endswith("/personal/cpa/config.yaml")
+        or str(config_path) == "/personal/cpa/config.yaml"
+    )
+    if looks_prod and not args.i_understand_production and not args.dry_run:
+        print(
+            "refusing production CPA path without --i-understand-production "
+            "(or use --dry-run first)",
+            file=sys.stderr,
+        )
+        return 2
 
     keys: list[str] = []
     for k in args.keys or []:
@@ -405,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         result = inject_via_ssh(
             args.ssh,
             keys,
-            config=args.config,
+            config=config,
             channel=args.channel,
             base_url=args.base_url,
             models=models,
@@ -414,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         result = inject_local(
-            Path(args.config),
+            config_path,
             keys,
             channel=args.channel,
             base_url=args.base_url,

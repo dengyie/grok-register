@@ -70,6 +70,9 @@ jobs:
             register_core/verify/__init__.py \
             register_core/sink/jsonl_sink.py \
             register_core/util/process.py \
+            register_core/util/secrets.py \
+            register_core/verify/mimo_tts.py \
+            register_core/verify/grok_chat.py \
             providers/mimo/inject_cpa_openai.py \
             scripts/backfill_cpa_xai_from_accounts.py \
             scripts/backup_registered_accounts.py \

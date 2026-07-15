@@ -124,17 +124,36 @@ class GrokProvider:
                 },
             )
 
+        if not sso:
+            # Email-only ledger row is incomplete for product success (no SSO / mint input).
+            return RegisterResult(
+                ok=False,
+                provider=self.name,
+                email=email,
+                password=password,
+                secret="",
+                secret_kind="pending",
+                error="this-run email without SSO cookie (pending); not product-ready",
+                error_kind="provider",
+                artifacts={
+                    "exit_code": 0,
+                    "ledger": accounts_file,
+                    "note": "require SSO in accounts ledger (email----pw----sso)",
+                    "tail": redact_log_tail(out, limit=800),
+                },
+            )
+
         return RegisterResult(
             ok=True,
             provider=self.name,
             email=email,
             password=password,
             secret=sso,
-            secret_kind="sso" if sso else "pending",
+            secret_kind="sso",
             artifacts={
                 "exit_code": 0,
                 "ledger": accounts_file,
-                "note": "cpa mint may be async; see cpa_auths/",
+                "note": "sso captured; chat entitlement still via cpa_xai.probe",
                 "tail": redact_log_tail(out, limit=800),
             },
         )

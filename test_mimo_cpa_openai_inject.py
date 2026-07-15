@@ -127,6 +127,44 @@ tail: 1
             keys = self.mod.extract_keys_from_jsonl(p)
             self.assertEqual(keys[0][:10], "sk-jsonlcc")
 
+    def test_extract_hyphenated_vendor_key(self) -> None:
+        keys = self.mod.extract_keys_from_text(
+            "1. sk-hyper-abc-def-0123456789abcdef\n"
+        )
+        self.assertEqual(len(keys), 1)
+        self.assertIn("-", keys[0][3:])
+
+    def test_cli_requires_config(self) -> None:
+        code = self.mod.main(["--key", "sk-testdummykeyaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
+        self.assertEqual(code, 2)
+
+    def test_cli_refuses_prod_without_ack(self) -> None:
+        code = self.mod.main(
+            [
+                "--config",
+                "/personal/cpa/config.yaml",
+                "--key",
+                "sk-testdummykeyaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]
+        )
+        self.assertEqual(code, 2)
+
+    def test_cli_dry_run_allows_prod_path_without_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "config.yaml"
+            cfg.write_text(SAMPLE, encoding="utf-8")
+            # Non-prod path dry-run still works with explicit --config
+            code = self.mod.main(
+                [
+                    "--config",
+                    str(cfg),
+                    "--dry-run",
+                    "--key",
+                    "sk-newkeyaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ]
+            )
+            self.assertEqual(code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

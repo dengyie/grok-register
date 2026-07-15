@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from register_core.contracts import RegisterResult, VerifyResult
 from register_core.errors import VerifyError
-
-_KEY_RE = re.compile(r"^sk-[A-Za-z0-9]{20,}$")
+from register_core.util.secrets import is_api_key
 
 
 class MimoTtsVerifier:
@@ -21,7 +19,7 @@ class MimoTtsVerifier:
         if not result.ok:
             return VerifyResult(ok=False, provider="mimo", capability="mimo_tts", detail="register not ok")
         secret = result.secret or ""
-        if not _KEY_RE.match(secret):
+        if not is_api_key(secret):
             return VerifyResult(
                 ok=False,
                 provider="mimo",

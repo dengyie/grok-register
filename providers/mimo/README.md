@@ -90,17 +90,29 @@ npx playwright install chromium
 MiMo 是 **OpenAI-compatible API key**，写入 tebi `config.yaml` 的 `openai-compatibility` 渠道 **`xiaomimimo`**（`base-url: https://api.xiaomimimo.com/v1`），**不是** `auth-dir` 里的 `type: xai` JSON。
 
 ```bash
-# 本机 → tebi（BatchMode ssh 别名）
-python3 providers/mimo/inject_cpa_openai.py --ssh tebi-tunnel \
+# 必须显式 --config（或 CPA_CONFIG）。默认不再指向生产。
+# 本机 → tebi（BatchMode ssh 别名）；生产路径需额外确认开关
+python3 providers/mimo/inject_cpa_openai.py \
+  --ssh tebi-tunnel \
+  --config /personal/cpa/config.yaml \
+  --i-understand-production \
   --from-jsonl /path/to/accounts.jsonl
 
+# 先 dry-run
+python3 providers/mimo/inject_cpa_openai.py \
+  --config /tmp/cpa-config.yaml --dry-run --from-file keys.txt
+
 # 或在 tebi 上本地
-python3 inject_cpa_openai.py --from-file /personal/mimo-register/output/success_keys.txt
+python3 inject_cpa_openai.py \
+  --config /personal/cpa/config.yaml \
+  --i-understand-production \
+  --from-file /personal/mimo-register/output/success_keys.txt
 ```
 
 - 幂等追加 `api-key-entries`；写前 `config.yaml.bak-mimo-<ts>`
 - **不 SIGHUP**（CLIProxyAPI fsnotify 热加载）
 - 默认模型：`mimo-v2.5-tts` / voiceclone / voicedesign
+- **拒绝**隐式生产路径：无 `--config`/`CPA_CONFIG` 直接 exit 2；生产 path 需 `--i-understand-production`（或 `--dry-run`）
 - 单测：`python3 test_mimo_cpa_openai_inject.py`
 
 ## 已知坑
