@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.6.3] - 2026-07-16
+
+### Changed
+
+- **Purity pass for egress UX**
+  - `nodes import` **merges by URL** into `nodes.json` (add/update/keep); `--replace` for full overwrite
+  - Clash Verge profile scan is **opt-in** (`--from-clash-verge`), not default
+  - `nodes list` prints a **sample summary** by default (`--all` for full dump)
+  - `nodes clear --yes` empties HTTP catalog without touching protocol runtime
+  - `auto` egress only uses **known-healthy** (`last_ok=true`) catalog entries; unprobed bulk no longer blocks core
+  - Docs/CLI primary backends: `list|core|direct` (auto/clash advanced)
+  - Canonical script: `scripts/import_nodes.py`; `import_clash_to_nodes.py` deprecated alias
+
+### Added
+
+- Merge plan in import/dry-run JSON (`added`/`updated`/`kept`/`dropped`)
+- Tests for merge/replace and auto healthy-list behavior
+
 ## [1.6.2] - 2026-07-16
 
 ### Added

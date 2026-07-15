@@ -195,6 +195,45 @@ class TestRotationConfig(unittest.TestCase):
             os.environ.pop("REGISTER_EGRESS", None)
             self.assertEqual(egress_mod.resolve_backend({}), "clash")
 
+    def test_auto_skips_unprobed_nodes_json(self) -> None:
+        """Dirty bulk catalog without last_ok=true must not win over core in auto."""
+        os.environ.pop("REGISTER_NODES", None)
+        os.environ["REGISTER_NODES"] = "1"
+        os.environ["REGISTER_CORE"] = "auto"
+        os.environ["REGISTER_EGRESS"] = "auto"
+        with patch.object(
+            core_proxy,
+            "_load_nodes_proxy_list",
+            side_effect=lambda healthy_only=None: (
+                "" if healthy_only is None else "http://dirty:1"
+            ),
+        ), patch.object(
+            core_proxy,
+            "_load_core_proxy_url",
+            return_value="http://127.0.0.1:17897",
+        ):
+            cfg = core_proxy.rotation_config_from_env_and_extra({"egress": "auto"})
+        self.assertEqual(cfg.get("egress_source"), "core")
+        self.assertTrue((cfg.get("proxy") or "").endswith(":17897"))
+
+    def test_auto_uses_known_healthy_list(self) -> None:
+        os.environ["REGISTER_NODES"] = "1"
+        os.environ["REGISTER_EGRESS"] = "auto"
+        with patch.object(
+            core_proxy,
+            "_load_nodes_proxy_list",
+            side_effect=lambda healthy_only=None: (
+                "http://ok:1" if healthy_only is None else "http://ok:1"
+            ),
+        ), patch.object(
+            core_proxy,
+            "_load_core_proxy_url",
+            return_value="http://127.0.0.1:17897",
+        ):
+            cfg = core_proxy.rotation_config_from_env_and_extra({"egress": "auto"})
+        self.assertEqual(cfg.get("egress_source"), "list")
+        self.assertIn("http://ok:1", cfg.get("proxy_list") or "")
+
 
 if __name__ == "__main__":
     unittest.main()

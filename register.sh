@@ -48,15 +48,15 @@ Env (shared):
   HEADLESS / HEADLESS_FLAG  browser mode
   OTP_RETRIES               MiMo temp-mail polls
 
-Egress switch (core=project mihomo / clash=external / list / direct / auto):
-  python -m register_core nodes egress show
-  python -m register_core nodes egress set core   # or clash|list|direct|auto
+Egress (primary list|core|direct; advanced auto|clash):
+  python -m register_core nodes egress set list   # or core|direct
   REGISTER_EGRESS=core ./register.sh chatgpt 1
-  python -m register_core nodes list|check|core start|add
+  python -m register_core nodes list|check|core start|add|clear
 
 Node import (light convert; not on register hot path):
   python -m register_core nodes validate profile.yaml
-  python -m register_core nodes import profile.yaml --no-clash-home
+  python -m register_core nodes import profile.yaml          # merge by URL
+  python -m register_core nodes import profile.yaml --replace
   python -m register_core nodes import links.txt --format uri_list
 
 Deploy layout example (pxed):

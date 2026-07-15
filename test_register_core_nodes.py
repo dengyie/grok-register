@@ -112,18 +112,21 @@ class TestManager(unittest.TestCase):
                 "CHATGPT_PROXY_ROTATE_MODE": "",
                 "REGISTER_NODES_FILE": str(path),
                 "REGISTER_NODES": "1",
+                "REGISTER_EGRESS": "list",
+                "REGISTER_CORE": "0",
             }
             with patch.dict(os.environ, env_clear, clear=False):
                 reset_manager_for_tests()
                 core_proxy.reset_rotation_for_tests()
-                cfg = core_proxy.rotation_config_from_env_and_extra({})
+                # explicit list backend uses full catalog (including unprobed)
+                cfg = core_proxy.rotation_config_from_env_and_extra({"egress": "list"})
                 self.assertEqual(cfg["proxy_rotate_mode"], "list")
                 self.assertIn("http://from-nodes:9", cfg["proxy_list"])
                 self.assertTrue(cfg.get("nodes_pool"))
 
                 proxies = []
                 for _ in range(2):
-                    p, info = core_proxy.resolve_attempt_proxy({})
+                    p, info = core_proxy.resolve_attempt_proxy({"egress": "list"})
                     proxies.append(p)
                     self.assertEqual(info.get("mode"), "list")
                 self.assertEqual(proxies[0], "http://from-nodes:9")
@@ -161,13 +164,15 @@ class TestManager(unittest.TestCase):
                     "PROXY_ROTATE_MODE": "",
                     "CHATGPT_PROXY": "",
                     "REGISTER_NODES": "1",
+                    "REGISTER_EGRESS": "list",
+                    "REGISTER_CORE": "0",
                 },
                 clear=False,
             ):
                 reset_manager_for_tests()
                 core_proxy.reset_rotation_for_tests()
                 pipe = Pipeline(Stub(), verifier=NoopVerifier(), fail_fast=False)
-                pipe.run(1, extra={})
+                pipe.run(1, extra={"egress": "list"})
         self.assertEqual(seen, ["http://pipe-node:1"])
 
 

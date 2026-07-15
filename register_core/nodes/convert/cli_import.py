@@ -6,7 +6,13 @@ import json
 import sys
 from pathlib import Path
 
-from register_core.nodes.convert.pipeline import convert_paths, convert_text, pack_result
+from register_core.nodes.convert.pipeline import (
+    convert_paths,
+    convert_text,
+    load_nodes_for_plan,
+    merge_dialable,
+    pack_result,
+)
 from register_core.nodes.convert.types import DEFAULT_CONTROLLER, DEFAULT_MIXED_PORT
 
 
@@ -40,11 +46,13 @@ def run_import(
     controller: str = DEFAULT_CONTROLLER,
     max_profile_proxies: int = 400,
     dry_run: bool = False,
+    replace_nodes: bool = False,
+    from_clash_verge: bool = False,
     clash_home: Path | None = None,
 ) -> int:
     path_list = [Path(p) for p in paths]
-    # Auto-scan Clash Verge only when user gave no explicit paths (and not pure stdin).
-    if not path_list and clash_home and clash_home.is_dir():
+    # Clash Verge scan is opt-in only (--from-clash-verge).
+    if from_clash_verge and clash_home and clash_home.is_dir():
         active = clash_home / "clash-verge.yaml"
         if active.is_file():
             path_list.append(active)
@@ -59,7 +67,10 @@ def run_import(
                 json.dumps(
                     {
                         "ok": False,
-                        "error": "no paths and empty stdin; pass YAML/JSON/URI files",
+                        "error": (
+                            "no paths and empty stdin; pass YAML/JSON/URI files, "
+                            "or use --from-clash-verge to scan local Clash Verge profiles"
+                        ),
                     },
                     ensure_ascii=False,
                 ),
@@ -74,8 +85,28 @@ def run_import(
         )
         sources = [p for p in path_list if p.is_file()]
 
+    # Always attach merge plan preview (even dry-run / failures with dialable).
+    if result.dialable or replace_nodes:
+        nodes_path = (nodes_json or Path("nodes.json")).expanduser()
+        # resolve relative against repo root when packing; preview uses same default as pack
+        from register_core.nodes.convert.pipeline import _ROOT
+
+        if nodes_json is None:
+            nodes_path = _ROOT / "nodes.json"
+        else:
+            nodes_path = Path(nodes_json).expanduser().resolve()
+        existing = [] if replace_nodes else load_nodes_for_plan(nodes_path)
+        _, plan = merge_dialable(existing, result.dialable, replace=replace_nodes)
+        result.merge = plan
+
     if dry_run:
-        print(json.dumps(result.to_public_dict(), ensure_ascii=False, indent=2))
+        public = result.to_public_dict()
+        public["dry_run"] = True
+        public["hint"] = (
+            "dry-run only; re-run without --dry-run to write "
+            f"(nodes mode={result.merge.mode if result.merge else 'n/a'})"
+        )
+        print(json.dumps(public, ensure_ascii=False, indent=2))
         return 0 if result.ok else 1
 
     if not result.ok:
@@ -89,13 +120,18 @@ def run_import(
         mixed_port=mixed_port,
         controller=controller,
         archive_sources=sources or None,
+        replace_nodes=replace_nodes,
     )
     public = packed.to_public_dict()
-    public["hint"] = (
-        "protocol nodes need: python -m register_core nodes core start && "
-        "python -m register_core nodes egress set core"
-        if packed.needs_core
-        else "HTTP/SOCKS only — use egress=list (no mihomo required)"
-    )
+    if packed.needs_core:
+        public["hint"] = (
+            "protocol nodes need: python -m register_core nodes core start && "
+            "python -m register_core nodes egress set core"
+        )
+    else:
+        public["hint"] = (
+            "HTTP/SOCKS only — REGISTER_EGRESS=list (no mihomo). "
+            f"nodes.json mode={packed.merge.mode if packed.merge else 'n/a'}"
+        )
     print(json.dumps(public, ensure_ascii=False, indent=2))
     return 0 if packed.ok else 1

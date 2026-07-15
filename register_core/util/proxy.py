@@ -37,8 +37,15 @@ def _env_first(*names: str, default: str = "") -> str:
     return default
 
 
-def _load_nodes_proxy_list() -> str:
-    """Pull enabled URLs from project-owned node catalog (empty if none)."""
+def _load_nodes_proxy_list(*, healthy_only: bool | None = None) -> str:
+    """Pull enabled URLs from project-owned node catalog (empty if none).
+
+    ``healthy_only``:
+      - False → all enabled URLs (explicit ``egress=list``)
+      - True  → manager healthy filter (skips hard-failed)
+      - None  → **auto purity**: only ``last_ok is True``; unprobed/dirty dumps
+                return empty so auto falls through to project core
+    """
     disable = _env_first("REGISTER_NODES", "USE_NODES", default="1").lower()
     if disable in {"0", "false", "off", "no"}:
         return ""
@@ -46,7 +53,14 @@ def _load_nodes_proxy_list() -> str:
         from register_core.nodes import get_manager
 
         mgr = get_manager()
-        return mgr.as_proxy_list_value(healthy_only=False)
+        if healthy_only is None:
+            urls = [
+                n.url
+                for n in mgr.enabled_nodes(healthy_only=False)
+                if n.last_ok is True and n.url
+            ]
+            return ",".join(urls)
+        return mgr.as_proxy_list_value(healthy_only=healthy_only)
     except Exception as exc:
         log.debug("nodes catalog unavailable: %s", exc)
         return ""
@@ -118,7 +132,8 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
     elif backend == "list":
         proxy_list = str(explicit_list or "")
         if not proxy_list:
-            nodes_source = _load_nodes_proxy_list()
+            # explicit list backend: use full enabled catalog (operator chose list)
+            nodes_source = _load_nodes_proxy_list(healthy_only=False)
             proxy_list = nodes_source
         base_proxy = str(extra.get("proxy") or "").strip()
         if not base_proxy and proxy_list:
@@ -151,12 +166,13 @@ def rotation_config_from_env_and_extra(extra: dict[str, Any] | None = None) -> d
             proxy_list = ""
         source = "clash"
     else:
-        # auto: list → core → clash fixed → direct
+        # auto: explicit PROXY_LIST → healthy nodes.json → core → clash(if set) → direct
+        # Unprobed/dirty bulk nodes.json must NOT block project core.
         proxy_list = str(explicit_list or "")
         if proxy_list:
             source = "list"
         else:
-            nodes_source = _load_nodes_proxy_list()
+            nodes_source = _load_nodes_proxy_list(healthy_only=None)
             if nodes_source:
                 proxy_list = nodes_source
                 source = "list"

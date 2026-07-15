@@ -9,13 +9,23 @@ Register machine only *consumes* those artifacts; conversion is opt-in CLI.
 
 from __future__ import annotations
 
-from register_core.nodes.convert.pipeline import ImportResult, convert_paths, convert_text
+from register_core.nodes.convert.pipeline import (
+    ImportResult,
+    MergePlan,
+    convert_paths,
+    convert_text,
+    merge_dialable,
+    pack_result,
+)
 from register_core.nodes.convert.validate import ValidationIssue, validate_proxy
 
 __all__ = [
     "ImportResult",
+    "MergePlan",
     "ValidationIssue",
     "convert_paths",
     "convert_text",
+    "merge_dialable",
+    "pack_result",
     "validate_proxy",
 ]

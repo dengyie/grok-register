@@ -139,10 +139,12 @@ def describe(backend: str | None = None) -> dict[str, Any]:
         "preference_path": str(preference_path()),
         "choices": ["auto", "core", "clash", "list", "direct"],
         "meaning": {
-            "auto": "list(nodes.json) → project core → clash fixed URL → direct",
+            "auto": "PROXY_LIST or healthy nodes.json → project core → clash(if set) → direct",
             "core": "project mihomo only (.nodes, :17897)",
-            "clash": "external Clash Verge/mihomo only (default :7897)",
+            "clash": "external mixed-port only (default :7897; advanced)",
             "list": "HTTP/SOCKS catalog only (nodes.json / PROXY_LIST)",
             "direct": "no proxy",
         }.get(b, ""),
+        "primary": ["list", "core", "direct"],
+        "advanced": ["auto", "clash"],
     }

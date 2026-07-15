@@ -135,9 +135,59 @@ proxies:
             self.assertTrue((home / "config" / "runtime.yaml").is_file())
             data = nodes_json.read_text(encoding="utf-8")
             self.assertIn("9.9.9.9", data)
+            self.assertIn("imp-", data)
+            self.assertNotIn("from-clash", data)
             rt = (home / "config" / "runtime.yaml").read_text(encoding="utf-8")
             self.assertIn("trojan", rt)
             self.assertIn("v1", rt)
+            self.assertIsNotNone(packed.merge)
+            self.assertEqual(packed.merge.mode, "merge")
+
+    def test_merge_keeps_existing(self):
+        from register_core.nodes.catalog import load_nodes, save_nodes
+        from register_core.nodes.models import Node
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            nodes_json = td_path / "nodes.json"
+            save_nodes(
+                [Node(url="http://old:1@1.1.1.1:80", id="keep-old", label="old")],
+                nodes_json,
+            )
+            r = convert_text(
+                "proxies:\n  - name: n\n    type: http\n    server: 2.2.2.2\n    port: 8080\n",
+                source="t.yaml",
+            )
+            packed = pack_result(
+                r, nodes_home=td_path / ".nodes", nodes_json=nodes_json, replace_nodes=False
+            )
+            loaded = load_nodes(nodes_json)
+            urls = {n.url for n in loaded}
+            self.assertIn("http://old:1@1.1.1.1:80", urls)
+            self.assertIn("http://2.2.2.2:8080", urls)
+            self.assertEqual(packed.merge.added, 1)
+            self.assertEqual(packed.merge.kept, 1)
+
+    def test_replace_drops_existing(self):
+        from register_core.nodes.catalog import load_nodes, save_nodes
+        from register_core.nodes.models import Node
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            nodes_json = td_path / "nodes.json"
+            save_nodes([Node(url="http://old:1@1.1.1.1:80", label="old")], nodes_json)
+            r = convert_text(
+                "proxies:\n  - name: n\n    type: http\n    server: 2.2.2.2\n    port: 8080\n",
+                source="t.yaml",
+            )
+            packed = pack_result(
+                r, nodes_home=td_path / ".nodes", nodes_json=nodes_json, replace_nodes=True
+            )
+            loaded = load_nodes(nodes_json)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].url, "http://2.2.2.2:8080")
+            self.assertEqual(packed.merge.mode, "replace")
+            self.assertEqual(packed.merge.dropped, 1)
 
 
 class TestParseErrors(unittest.TestCase):

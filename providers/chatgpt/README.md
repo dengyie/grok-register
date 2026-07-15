@@ -51,11 +51,12 @@ CHATGPT_PROXY_LIST='http://u:p@1.2.3.4:8080,http://u:p@5.6.7.8:8080' \
 
 ```bash
 python -m register_core nodes egress show
-python -m register_core nodes egress set core   # or clash|list|direct|auto
+python -m register_core nodes egress set core   # primary: list|core|direct
 REGISTER_EGRESS=core ./providers/chatgpt/run-register.sh 1
 ```
 
 ```bash
+python -m register_core nodes import profile.yaml   # merge HTTP/SOCKS + pack protocol
 python -m register_core nodes list|check|add 'http://u:p@host:port'
 python -m register_core nodes core start|select
 ```

@@ -18,19 +18,54 @@ def cmd_list(args: argparse.Namespace) -> int:
     mgr = get_manager(args.file or None)
     st = mgr.status()
     if args.json:
-        print(json.dumps(st, ensure_ascii=False, indent=2))
+        if not args.all and st.get("nodes"):
+            # summary JSON unless --all
+            sample = st["nodes"][: int(args.sample)]
+            print(
+                json.dumps(
+                    {
+                        "path": st["path"],
+                        "exists": st["exists"],
+                        "total": st["total"],
+                        "enabled": st["enabled"],
+                        "healthy": st["healthy"],
+                        "sample": sample,
+                        "truncated": st["total"] > len(sample),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            print(json.dumps(st, ensure_ascii=False, indent=2))
     else:
         print(f"nodes file: {st['path']} exists={st['exists']}")
         print(f"total={st['total']} enabled={st['enabled']} healthy={st['healthy']}")
-        for n in st["nodes"]:
-            flag = "on " if n.get("enabled") else "off"
-            health = (
-                "ok"
-                if n.get("last_ok") is True
-                else ("fail" if n.get("last_ok") is False else "?")
-            )
-            ip = n.get("last_ip") or "-"
-            print(f"  [{flag}] {health:4} {n.get('label')} ip={ip} id={n.get('id')}")
+        nodes = st["nodes"]
+        if not args.all:
+            limit = max(1, int(args.sample))
+            shown = nodes[:limit]
+            for n in shown:
+                flag = "on " if n.get("enabled") else "off"
+                health = (
+                    "ok"
+                    if n.get("last_ok") is True
+                    else ("fail" if n.get("last_ok") is False else "?")
+                )
+                ip = n.get("last_ip") or "-"
+                print(f"  [{flag}] {health:4} {n.get('label')} ip={ip} id={n.get('id')}")
+            if st["total"] > len(shown):
+                print(f"  … {st['total'] - len(shown)} more (use --all)")
+        else:
+            for n in nodes:
+                flag = "on " if n.get("enabled") else "off"
+                health = (
+                    "ok"
+                    if n.get("last_ok") is True
+                    else ("fail" if n.get("last_ok") is False else "?")
+                )
+                ip = n.get("last_ip") or "-"
+                print(f"  [{flag}] {health:4} {n.get('label')} ip={ip} id={n.get('id')}")
     return 0 if st["total"] else 1
 
 
@@ -128,15 +163,21 @@ def cmd_core(args: argparse.Namespace) -> int:
 
 
 def cmd_import(args: argparse.Namespace) -> int:
-    """Convert Clash YAML / V2Ray JSON / share URIs into project artifacts."""
-    from pathlib import Path
-
+    """Convert YAML / V2Ray JSON / share URIs into project artifacts."""
     from register_core.nodes.convert.cli_import import run_import
     from register_core.nodes.convert.types import DEFAULT_CONTROLLER, DEFAULT_MIXED_PORT
 
+    from_verge = bool(getattr(args, "from_clash_verge", False))
     clash_home = None
-    if not args.no_clash_home:
-        clash_home = Path(args.clash_home).expanduser() if args.clash_home else None
+    if from_verge:
+        raw = (getattr(args, "clash_home", None) or "").strip()
+        if raw:
+            clash_home = Path(raw).expanduser()
+        else:
+            clash_home = (
+                Path.home()
+                / "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
+            )
     nh = (args.nodes_home or "").strip()
     nj = (args.nodes_json or "").strip()
     return run_import(
@@ -148,8 +189,42 @@ def cmd_import(args: argparse.Namespace) -> int:
         controller=str(args.controller or DEFAULT_CONTROLLER),
         max_profile_proxies=int(args.max_profile_proxies),
         dry_run=bool(args.dry_run),
+        replace_nodes=bool(getattr(args, "replace", False)),
+        from_clash_verge=from_verge,
         clash_home=clash_home,
     )
+
+
+def cmd_clear(args: argparse.Namespace) -> int:
+    """Clear HTTP/SOCKS catalog (nodes.json). Does not touch protocol runtime.yaml."""
+    from register_core.nodes import get_manager, save_nodes
+
+    mgr = get_manager(args.file or None)
+    mgr.ensure_loaded()
+    n = len(mgr.nodes)
+    if not args.yes:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "refusing to clear without --yes",
+                    "would_drop": n,
+                    "path": str(mgr.path),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    save_nodes([], mgr.path)
+    try:
+        from register_core.nodes.manager import reset_manager_for_tests
+
+        reset_manager_for_tests()
+    except Exception:
+        pass
+    print(json.dumps({"ok": True, "dropped": n, "path": str(mgr.path)}, ensure_ascii=False))
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -231,7 +306,10 @@ def cmd_egress(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="register_core.nodes",
-        description="Project-owned egress nodes + embedded mihomo core (no Clash Verge required)",
+        description=(
+            "Project egress: import profiles → nodes.json / runtime.yaml; "
+            "list|core|direct backends (optional external clash)"
+        ),
     )
     p.add_argument(
         "--file",
@@ -241,8 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pl = sub.add_parser("list", help="List HTTP/SOCKS nodes (public labels)")
+    pl = sub.add_parser("list", help="Summarize HTTP/SOCKS catalog (use --all for full)")
     pl.add_argument("--json", action="store_true")
+    pl.add_argument("--all", action="store_true", help="print every node")
+    pl.add_argument("--sample", type=int, default=12, help="sample size when not --all")
     pl.set_defaults(func=cmd_list)
 
     pc = sub.add_parser("check", help="Health-check enabled HTTP/SOCKS nodes via curl_cffi")
@@ -256,13 +336,17 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--tag", action="append", default=[])
     pa.set_defaults(func=cmd_add)
 
+    pclr = sub.add_parser("clear", help="Empty nodes.json (requires --yes)")
+    pclr.add_argument("--yes", action="store_true", help="confirm destructive clear")
+    pclr.set_defaults(func=cmd_clear)
+
     pu = sub.add_parser("urls", help="Print pool URLs for PROXY_LIST export")
     pu.add_argument("--healthy", action="store_true")
     pu.add_argument("--json", action="store_true")
     pu.add_argument("--redact", action="store_true")
     pu.set_defaults(func=cmd_urls)
 
-    pcore = sub.add_parser("core", help="Project mihomo mini-core (VLESS/SS/… distribution)")
+    pcore = sub.add_parser("core", help="Project mihomo mini-core (protocol nodes only)")
     pcore.add_argument(
         "core_action",
         choices=("status", "start", "stop", "select", "proxies", "url"),
@@ -276,38 +360,40 @@ def build_parser() -> argparse.ArgumentParser:
 
     pimp = sub.add_parser(
         "import",
-        help="Import Clash YAML / V2Ray JSON / share URI → nodes.json + runtime.yaml",
+        help="Import profile (YAML/JSON/URI) → merge nodes.json + pack runtime.yaml",
     )
-    pimp.add_argument("paths", nargs="*", help="files/dirs (YAML/JSON/txt URI list); empty=stdin")
+    pimp.add_argument("paths", nargs="*", help="files/dirs; empty=stdin")
     pimp.add_argument(
         "--format",
         default="",
         help="force format: clash_yaml | v2ray_json | uri_list (default: auto-detect)",
     )
-    pimp.add_argument("--dry-run", action="store_true", help="parse+validate only, no write")
+    pimp.add_argument("--dry-run", action="store_true", help="parse+validate+merge plan, no write")
+    pimp.add_argument(
+        "--replace",
+        action="store_true",
+        help="replace nodes.json with this import only (default: merge by URL)",
+    )
     pimp.add_argument("--nodes-home", default="", help="default: ./.nodes")
     pimp.add_argument("--nodes-json", default="", help="default: ./nodes.json")
     pimp.add_argument("--mixed-port", type=int, default=17897)
     pimp.add_argument("--controller", default="127.0.0.1:19097")
     pimp.add_argument("--max-profile-proxies", type=int, default=400)
     pimp.add_argument(
-        "--clash-home",
-        default=str(
-            Path.home()
-            / "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
-        ),
-        help="optional Clash Verge data dir (mac default)",
+        "--from-clash-verge",
+        action="store_true",
+        help="opt-in: also scan local Clash Verge profiles (advanced)",
     )
     pimp.add_argument(
-        "--no-clash-home",
-        action="store_true",
-        help="do not auto-scan Clash Verge profiles",
+        "--clash-home",
+        default="",
+        help="with --from-clash-verge: Verge data dir (mac default if empty)",
     )
     pimp.set_defaults(func=cmd_import)
 
     pval = sub.add_parser(
         "validate",
-        help="Validate Clash/V2Ray/URI profiles (legality report, no write)",
+        help="Validate profiles (schema/legality report, no write)",
     )
     pval.add_argument("paths", nargs="*", help="files; empty=stdin")
     pval.add_argument("--format", default="", help="force format (auto default)")
@@ -315,7 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     peg = sub.add_parser(
         "egress",
-        help="Switch egress backend: core (project) vs clash (external) vs list/direct",
+        help="Backend switch: list|core|direct (auto|clash advanced)",
     )
     peg.add_argument(
         "egress_action",

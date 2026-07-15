@@ -32,8 +32,14 @@ def cmd_list(_: argparse.Namespace) -> int:
     print("providers:", ", ".join(list_providers()))
     print("email_sources:", ", ".join(list_email_sources()))
     print("layers: contracts → email → providers → verify → sink → pipeline → cli")
-    print("nodes: python -m register_core nodes list|check|add|core|egress")
-    print("egress: core|clash|list|direct|auto  (REGISTER_EGRESS / --egress / nodes egress set)")
+    print(
+        "nodes: python -m register_core nodes "
+        "import|validate|list|check|add|clear|core|egress"
+    )
+    print(
+        "egress primary: list|core|direct  "
+        "(advanced: auto|clash) via REGISTER_EGRESS / --egress / nodes egress set"
+    )
     print(
         "note: grok/mimo are black-box (email_source=provider). "
         "chatgpt is in-process (use --email-source tinyhost|auto). "
@@ -43,7 +49,7 @@ def cmd_list(_: argparse.Namespace) -> int:
 
 
 def cmd_nodes(args: argparse.Namespace) -> int:
-    """Delegate to register_core.nodes.cli (project-owned egress, no Clash)."""
+    """Delegate to register_core.nodes.cli (import/list/core/egress)."""
     from register_core.nodes.cli import main as nodes_main
 
     # Rebuild argv for nodes CLI: everything after `nodes`
@@ -122,13 +128,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pn = sub.add_parser(
         "nodes",
-        help="Project-owned egress nodes (list/check/add) — no Clash required",
+        help="Egress nodes: import|validate|list|check|core|egress",
     )
     pn.add_argument("--file", "-f", default="", help="nodes catalog path")
     pn.add_argument(
         "nodes_argv",
         nargs=argparse.REMAINDER,
-        help="nodes subcommand: list | check | add URL | urls",
+        help="nodes subcommand: import|validate|list|check|add|clear|core|egress|…",
     )
     pn.set_defaults(func=cmd_nodes)
 

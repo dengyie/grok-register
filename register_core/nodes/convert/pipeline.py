@@ -29,6 +29,17 @@ except ImportError:  # pragma: no cover
 _ROOT = Path(__file__).resolve().parents[3]
 
 
+def load_nodes_for_plan(nodes_json: Path | str | None = None) -> list[Node]:
+    """Load existing catalog for merge preview (empty if missing)."""
+    from register_core.nodes.catalog import load_nodes
+
+    path = Path(nodes_json) if nodes_json else (_ROOT / "nodes.json")
+    try:
+        return load_nodes(path)
+    except Exception:
+        return []
+
+
 def _auth_url(scheme: str, server: str, port, username: str = "", password: str = "") -> str:
     host = f"{server}:{int(port)}"
     user = (username or "").strip()
@@ -71,6 +82,32 @@ def _sig(p: dict[str, Any]) -> str:
 
 
 @dataclass
+class MergePlan:
+    """How dialable nodes will land in nodes.json."""
+
+    mode: str = "merge"  # merge | replace
+    existing: int = 0
+    incoming: int = 0
+    added: int = 0
+    updated: int = 0
+    kept: int = 0
+    dropped: int = 0
+    final: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "existing": self.existing,
+            "incoming": self.incoming,
+            "added": self.added,
+            "updated": self.updated,
+            "kept": self.kept,
+            "dropped": self.dropped,
+            "final": self.final,
+        }
+
+
+@dataclass
 class ImportResult:
     ok: bool
     format: str = ""
@@ -83,6 +120,7 @@ class ImportResult:
     meta_path: str | None = None
     types: dict[str, int] = field(default_factory=dict)
     needs_core: bool = False
+    merge: MergePlan | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -99,7 +137,74 @@ class ImportResult:
             "reports": [r.to_dict() for r in self.reports],
             "dialable_labels": [n.label for n in self.dialable[:20]],
             "protocol_names": [str(p.get("name") or "") for p in self.protocol[:20]],
+            "merge": self.merge.to_dict() if self.merge else None,
         }
+
+
+def merge_dialable(
+    existing: list[Node],
+    incoming: list[Node],
+    *,
+    replace: bool = False,
+) -> tuple[list[Node], MergePlan]:
+    """Merge by URL. Default keeps unknown existing entries; replace drops them."""
+    plan = MergePlan(
+        mode="replace" if replace else "merge",
+        existing=len(existing),
+        incoming=len(incoming),
+    )
+    if replace:
+        plan.added = len(incoming)
+        plan.dropped = len(existing)
+        plan.final = len(incoming)
+        return list(incoming), plan
+
+    by_url: dict[str, Node] = {}
+    order: list[str] = []
+    for n in existing:
+        if not n.url:
+            continue
+        if n.url not in by_url:
+            order.append(n.url)
+        by_url[n.url] = n
+    existing_urls = set(by_url)
+
+    for n in incoming:
+        if not n.url:
+            continue
+        if n.url in by_url:
+            old = by_url[n.url]
+            # refresh label/tags/id toward pure import identity; keep health counters
+            new_id = n.id or old.id
+            if str(old.id or "").startswith("clash-") or not old.id:
+                new_id = n.id or old.id
+            # strip legacy tag when rewriting
+            tags = list(n.tags or [])
+            if not tags:
+                tags = [t for t in (old.tags or []) if t != "from-clash"]
+            merged = Node(
+                url=n.url,
+                id=new_id,
+                label=n.label or old.label,
+                tags=tags,
+                enabled=bool(old.enabled) if old.enabled is not None else n.enabled,
+                last_ok=old.last_ok,
+                last_ip=old.last_ip,
+                last_ms=old.last_ms,
+                last_error=old.last_error,
+                last_checked_at=old.last_checked_at,
+                fail_count=int(old.fail_count or 0),
+            )
+            by_url[n.url] = merged
+            plan.updated += 1
+        else:
+            by_url[n.url] = n
+            order.append(n.url)
+            plan.added += 1
+
+    plan.kept = len(existing_urls - {n.url for n in incoming if n.url})
+    plan.final = len(order)
+    return [by_url[u] for u in order if u in by_url], plan
 
 
 def convert_text(
@@ -298,8 +403,14 @@ def pack_result(
     write_nodes: bool = True,
     write_runtime: bool = True,
     archive_sources: list[Path] | None = None,
+    replace_nodes: bool = False,
 ) -> ImportResult:
-    """Write nodes.json + runtime.yaml + meta. Idempotent overwrite of runtime pack."""
+    """Write nodes.json + runtime.yaml + meta.
+
+    Dialable catalog defaults to **merge by URL** (keeps existing entries).
+    Pass ``replace_nodes=True`` to overwrite nodes.json with only this import.
+    Protocol runtime.yaml is always replaced when protocol proxies are present.
+    """
     home = (nodes_home or (_ROOT / ".nodes")).expanduser().resolve()
     cfg_dir = home / "config"
     imp = home / "profiles" / "import"
@@ -318,14 +429,32 @@ def pack_result(
 
     nodes_path = (nodes_json or (_ROOT / "nodes.json")).expanduser().resolve()
     if write_nodes and result.dialable:
-        from register_core.nodes.catalog import save_nodes
+        from register_core.nodes.catalog import load_nodes, save_nodes
 
-        save_nodes(result.dialable, nodes_path)
+        # Always load existing for merge plan stats (replace still reports dropped).
+        existing = load_nodes(nodes_path)
+        merged, plan = merge_dialable(existing, result.dialable, replace=replace_nodes)
+        result.merge = plan
+        save_nodes(merged, nodes_path)
         result.nodes_path = str(nodes_path)
+        result.dialable = merged
         try:
             nodes_path.chmod(0o600)
         except Exception:
             pass
+    elif write_nodes and not result.dialable and replace_nodes:
+        from register_core.nodes.catalog import load_nodes, save_nodes
+
+        existing = load_nodes(nodes_path)
+        result.merge = MergePlan(
+            mode="replace",
+            existing=len(existing),
+            incoming=0,
+            dropped=len(existing),
+            final=0,
+        )
+        save_nodes([], nodes_path)
+        result.nodes_path = str(nodes_path)
 
     if write_runtime and result.protocol:
         if yaml is None:
