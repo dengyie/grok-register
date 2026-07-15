@@ -66,7 +66,7 @@ def _collect_todo(
     limit: int,
     denied_emails: set[str] | None = None,
 ) -> tuple:
-    from cpa_xai.writer import is_chat_retryable_auth
+    from cpa_xai.writer import is_chat_retryable_auth, is_entitlement_denied_auth
 
     accounts = parse_accounts_file(str(accounts_path))
     by_email = {a.email.lower(): a for a in accounts if a.email and normalize_sso_cookie(a.sso)}
@@ -93,6 +93,7 @@ def _collect_todo(
         "missing": 0,
         "chat_retryable": 0,
         "skipped_denied": 0,
+        "skipped_chat_ok": 0,
     }
 
     def _skip_denied(em: str) -> bool:
@@ -100,7 +101,7 @@ def _collect_todo(
             reasons["skipped_denied"] += 1
             return True
         payload = existing_payload.get(em) or {}
-        if payload.get("entitlement_denied") is True:
+        if is_entitlement_denied_auth(payload):
             reasons["skipped_denied"] += 1
             return True
         return False
@@ -126,6 +127,7 @@ def _collect_todo(
             if _skip_denied(em):
                 continue
             d = existing_payload.get(em) or {}
+            # Already chat_ok: expired tokens can still remint, but never denied.
             if _is_expired(d, now):
                 todo.append((by_email[em], "expired"))
                 reasons["expired"] += 1
@@ -140,6 +142,10 @@ def _collect_todo(
             if _skip_denied(em):
                 continue
             d = existing_payload.get(em) or {}
+            # Never re-queue permanent chat_ok=False entitlement via retryable path
+            if d.get("chat_ok") is True and d.get("usable") is not False and not _is_expired(d, now):
+                reasons["skipped_chat_ok"] += 1
+                continue
             if is_chat_retryable_auth(d) and not _is_expired(d, now):
                 todo.append((by_email[em], "chat_retryable"))
                 reasons["chat_retryable"] += 1
@@ -243,6 +249,7 @@ def main() -> int:
     import cpa_export
 
     ok_n = fail_n = inject_ok = inject_fail = 0
+    chat_ok_n = chat_denied_n = chat_fail_n = 0
     t0 = time.time()
     state_path = Path(args.state)
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,6 +289,11 @@ def main() -> int:
             "email": acc.email,
             "reason": reason,
             "ok": bool(r.get("ok")),
+            "chat_ok": r.get("chat_ok"),
+            "entitlement_denied": bool(r.get("entitlement_denied")),
+            "chat_retryable": bool(r.get("chat_retryable")),
+            "import_gate": r.get("import_gate"),
+            "fail_reason": r.get("fail_reason"),
             "error": r.get("error"),
             "path": r.get("path"),
             "mint_method": r.get("mint_method"),
@@ -290,7 +302,14 @@ def main() -> int:
             "ts": datetime.now(timezone.utc).isoformat(),
         }
 
-        if r.get("ok") and r.get("path"):
+        if r.get("entitlement_denied"):
+            chat_denied_n += 1
+        elif r.get("chat_ok") is True:
+            chat_ok_n += 1
+        elif r.get("chat_ok") is False or r.get("fail_reason") or r.get("error"):
+            chat_fail_n += 1
+
+        if r.get("ok") and r.get("path") and r.get("chat_ok") is True:
             ok_n += 1
             multi = r.get("remote_injects") or []
             if multi:
@@ -299,7 +318,7 @@ def main() -> int:
                         inject_ok += 1
                     elif not item.get("skipped"):
                         inject_fail += 1
-            elif remote_dirs:
+            elif remote_dirs and not r.get("remote_inject_skipped"):
                 # export should have multi-injected; count as fail visibility
                 inject_fail += len(remote_dirs)
         else:
@@ -307,6 +326,22 @@ def main() -> int:
             Path(args.fail_log).parent.mkdir(parents=True, exist_ok=True)
             with open(args.fail_log, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+            # Ensure entitlement lands in ledger even if export path missed it
+            if r.get("entitlement_denied"):
+                try:
+                    from cpa_xai.writer import record_entitlement_denied
+
+                    record_entitlement_denied(
+                        out_dir,
+                        acc.email,
+                        extra={
+                            "path": r.get("path"),
+                            "source": "remint",
+                            "chat_error_code": r.get("chat_error_code"),
+                        },
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log(f"entitlement ledger write failed: {e}")
 
         # periodic state
         if i == 1 or i % 10 == 0 or i == len(todo):
@@ -316,11 +351,17 @@ def main() -> int:
                 "total": len(todo),
                 "ok": ok_n,
                 "fail": fail_n,
+                "chat_ok": chat_ok_n,
+                "chat_denied": chat_denied_n,
+                "chat_fail": chat_fail_n,
+                "skipped_denied": reasons.get("skipped_denied", 0),
                 "inject_ok": inject_ok,
                 "inject_fail": inject_fail,
                 "elapsed_s": round(time.time() - t0, 1),
                 "last_email": acc.email,
                 "last_ok": bool(r.get("ok")),
+                "last_chat_ok": r.get("chat_ok"),
+                "last_import_gate": r.get("import_gate"),
             }
             state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -328,7 +369,10 @@ def main() -> int:
             time.sleep(args.sleep)
 
     print(
-        f"\n=== done ok={ok_n} fail={fail_n} inject_ok={inject_ok} inject_fail={inject_fail} "
+        f"\n=== done ok={ok_n} fail={fail_n} "
+        f"chat_ok={chat_ok_n} chat_denied={chat_denied_n} chat_fail={chat_fail_n} "
+        f"skipped_denied={reasons.get('skipped_denied', 0)} "
+        f"inject_ok={inject_ok} inject_fail={inject_fail} "
         f"elapsed={round(time.time()-t0,1)}s ===",
         flush=True,
     )

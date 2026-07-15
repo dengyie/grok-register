@@ -13,7 +13,7 @@ from .probe import classify_chat_probe, probe_mini_response, probe_models
 from .protocol_mint import ProtocolMintError, extract_sso_from_cookies, mint_with_sso_protocol
 from .proxyutil import proxy_log_label, resolve_proxy, set_runtime_proxy
 from .schema import DEFAULT_BASE_URL, build_cpa_xai_auth
-from .writer import patch_cpa_xai_auth, write_cpa_xai_auth
+from .writer import stamp_auth_chat_fields, write_cpa_xai_auth
 
 LogFn = Callable[[str], None]
 
@@ -338,33 +338,10 @@ def mint_and_export(
 
     # Stamp local auth so remint/ops can skip denied and re-probe transient.
     if result.get("path"):
-        if result.get("entitlement_denied"):
-            import_gate = "entitlement_denied"
-        elif result.get("chat_ok") is True and result.get("usable") is not False:
-            import_gate = "chat_ok"
-        elif result.get("chat_retryable"):
-            import_gate = str(result.get("fail_reason") or "transient")
-        elif result.get("chat_ok") is False:
-            import_gate = str(result.get("fail_reason") or "chat_not_ok")
-        else:
-            import_gate = str(result.get("fail_reason") or ("ok" if result.get("ok") else "not_ready"))
-        result["import_gate"] = import_gate
-        stamp = {
-            "chat_ok": result.get("chat_ok"),
-            "usable": result.get("usable", result.get("ok")),
-            "entitlement_denied": bool(result.get("entitlement_denied")),
-            "chat_retryable": bool(result.get("chat_retryable")),
-            "fail_reason": result.get("fail_reason") or "",
-            "chat_error_code": result.get("chat_error_code") or "",
-            "import_gate": import_gate,
-        }
-        # Drop empty optional noise
-        if not stamp["fail_reason"]:
-            stamp.pop("fail_reason", None)
-        if not stamp["chat_error_code"]:
-            stamp.pop("chat_error_code", None)
         try:
-            patch_cpa_xai_auth(result["path"], stamp)
+            stamped = stamp_auth_chat_fields(result["path"], result)
+            if stamped.get("import_gate"):
+                result["import_gate"] = stamped["import_gate"]
         except Exception as e:  # noqa: BLE001
             log(f"stamp auth chat flags failed: {e}")
     return result

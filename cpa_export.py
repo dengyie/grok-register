@@ -989,14 +989,17 @@ def export_cpa_xai_for_account(
                 f"[cpa] skip remote inject ({result.get('remote_inject_skip_reason')}): {email}"
             )
 
-    # Stamp import_gate on local auth for ops filtering.
-    if result.get("path") and result.get("import_gate"):
+    # Re-stamp full chat fields after finalize/gate (not only import_gate).
+    # mint stamps pre-finalize; finalize may flip entitlement/ok/skip flags.
+    if result.get("path"):
         try:
-            from cpa_xai.writer import patch_cpa_xai_auth
+            from cpa_xai.writer import stamp_auth_chat_fields
 
-            patch_cpa_xai_auth(result["path"], {"import_gate": result["import_gate"]})
+            stamped = stamp_auth_chat_fields(result["path"], result)
+            if stamped.get("import_gate"):
+                result["import_gate"] = stamped["import_gate"]
         except Exception as e:  # noqa: BLE001
-            log(f"[cpa] stamp import_gate failed: {e}")
+            log(f"[cpa] stamp chat fields failed: {e}")
 
     if (
         result.get("ok")

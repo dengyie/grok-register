@@ -93,7 +93,7 @@ def test_mint_default_probe_chat_on() -> None:
     assert "entitlement_denied" in src
     assert "do not remint" in src
     assert "max_attempts" in src
-    assert "patch_cpa_xai_auth" in src
+    assert "stamp_auth_chat_fields" in src
     print("PASS mint default probe_chat on + retry + stamp")
 
 
@@ -104,6 +104,8 @@ def test_export_finalize_and_defaults() -> None:
     assert "def finalize_probe_and_gate" in src
     assert "record_entitlement_denied" in src
     assert "skip remote inject (entitlement_denied)" in src
+    assert "stamp_auth_chat_fields" in src
+    assert "Re-stamp full chat fields after finalize" in src
     print("PASS export finalize + defaults")
 
 
@@ -130,7 +132,11 @@ def test_remint_skips_denied_and_retryable() -> None:
     assert "skipped_denied" in src
     assert "chat_retryable" in src
     assert 'run_cfg["cpa_probe_chat"] = True' in src
-    print("PASS remint denied skip + chat_retryable")
+    assert "is_entitlement_denied_auth" in src
+    assert "chat_ok_n" in src and "chat_denied_n" in src
+    assert "chat_ok=" in src and "chat_denied=" in src
+    assert 'r.get("chat_ok") is True' in src
+    print("PASS remint denied skip + chat_retryable + summary")
 
 
 def test_writer_ledger_roundtrip() -> None:
@@ -163,6 +169,8 @@ def test_writer_ledger_roundtrip() -> None:
         assert data["chat_retryable"] is True
         assert writer.is_chat_retryable_auth(data) is True
         assert writer.is_chat_retryable_auth({"entitlement_denied": True}) is False
+        assert writer.is_entitlement_denied_auth({"import_gate": "entitlement_denied"}) is True
+        assert writer.is_entitlement_denied_auth({"chat_ok": False, "fail_reason": "transient"}) is False
     print("PASS writer ledger roundtrip")
 
 
@@ -232,6 +240,85 @@ def test_finalize_probe_and_gate_behavior() -> None:
     )
     assert out4.get("remote_injects") is None
     print("PASS finalize_probe_and_gate behavior")
+
+
+def test_writer_stamp_and_inventory() -> None:
+    writer = _load("cpa_xai.writer_stamp", ROOT / "cpa_xai" / "writer.py")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        p_ok = root / "xai-ok@example.com.json"
+        p_ok.write_text(
+            json.dumps({"type": "xai", "email": "ok@example.com", "access_token": "t"})
+            + "\n",
+            encoding="utf-8",
+        )
+        stamped = writer.stamp_auth_chat_fields(
+            p_ok,
+            {
+                "chat_ok": True,
+                "usable": True,
+                "entitlement_denied": False,
+                "chat_retryable": False,
+            },
+        )
+        assert stamped.get("chat_ok") is True
+        assert stamped.get("import_gate") == "chat_ok"
+        assert stamped.get("entitlement_denied") is False
+
+        p_den = root / "xai-den@example.com.json"
+        p_den.write_text(
+            json.dumps({"type": "xai", "email": "den@example.com"}) + "\n",
+            encoding="utf-8",
+        )
+        writer.stamp_auth_chat_fields(
+            p_den,
+            {
+                "chat_ok": False,
+                "usable": False,
+                "entitlement_denied": True,
+                "fail_reason": "entitlement_denied",
+                "chat_error_code": "permission_denied",
+            },
+        )
+        den = json.loads(p_den.read_text(encoding="utf-8"))
+        assert den["import_gate"] == "entitlement_denied"
+        assert writer.is_entitlement_denied_auth(den) is True
+        assert writer.is_chat_retryable_auth(den) is False
+
+        p_miss = root / "xai-miss@example.com.json"
+        p_miss.write_text(
+            json.dumps({"type": "xai", "email": "miss@example.com"}) + "\n",
+            encoding="utf-8",
+        )
+        inv = writer.inventory_chat_stamps(root)
+        assert inv["total"] == 3
+        assert inv["chat_ok_true"] == 1
+        assert inv["chat_ok_false"] == 1
+        assert inv["chat_ok_missing"] == 1
+        assert inv["entitlement_denied"] >= 1
+
+        stamp = writer.build_chat_stamp_from_result(
+            {
+                "chat_ok": False,
+                "chat_retryable": True,
+                "fail_reason": "transient",
+                "usable": False,
+            }
+        )
+        assert stamp["import_gate"] == "transient"
+        assert stamp["chat_retryable"] is True
+    print("PASS writer stamp + inventory")
+
+
+def test_backfill_chat_stamps_script_exists() -> None:
+    src = (ROOT / "scripts" / "backfill_chat_stamps.py").read_text(encoding="utf-8")
+    assert "inventory_chat_stamps" in src
+    assert "stamp_auth_chat_fields" in src
+    assert "record_entitlement_denied" in src
+    assert "--probe" in src
+    assert "--inventory-only" in src
+    assert "--only-missing" in src
+    print("PASS backfill_chat_stamps script surface")
 
 
 def test_remote_inject_chat_ok_hard_gate() -> None:
@@ -352,6 +439,8 @@ def main() -> int:
     test_cli_chat_stats()
     test_remint_skips_denied_and_retryable()
     test_writer_ledger_roundtrip()
+    test_writer_stamp_and_inventory()
+    test_backfill_chat_stamps_script_exists()
     test_finalize_probe_and_gate_behavior()
     test_remote_inject_chat_ok_hard_gate()
     print("\nALL PASS (cpa chat entitlement gate)")

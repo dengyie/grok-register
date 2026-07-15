@@ -108,9 +108,7 @@ def load_entitlement_denied_emails(auth_dir: str | Path) -> set[str]:
             continue
         if not isinstance(d, dict):
             continue
-        if d.get("entitlement_denied") is True or (
-            d.get("usable") is False and d.get("fail_reason") == "entitlement_denied"
-        ):
+        if is_entitlement_denied_auth(d):
             em = str(d.get("email") or "").strip().lower()
             if em:
                 out.add(em)
@@ -147,10 +145,27 @@ def record_entitlement_denied(
     return path
 
 
+def is_entitlement_denied_auth(payload: dict[str, Any] | None) -> bool:
+    """True when auth is known permanent free-Build chat denial (do not remint)."""
+    d = payload or {}
+    if d.get("entitlement_denied") is True:
+        return True
+    if d.get("fail_reason") == "entitlement_denied":
+        return True
+    if d.get("import_gate") == "entitlement_denied":
+        return True
+    if d.get("usable") is False and d.get("chat_ok") is False and (
+        str(d.get("fail_reason") or "") == "entitlement_denied"
+        or str(d.get("import_gate") or "") == "entitlement_denied"
+    ):
+        return True
+    return False
+
+
 def is_chat_retryable_auth(payload: dict[str, Any] | None) -> bool:
     """True when local auth exists but chat probe was transient-failed (re-probe candidate)."""
     d = payload or {}
-    if d.get("entitlement_denied") is True:
+    if is_entitlement_denied_auth(d):
         return False
     if d.get("chat_ok") is True and d.get("usable") is not False:
         return False
@@ -159,3 +174,101 @@ def is_chat_retryable_auth(payload: dict[str, Any] | None) -> bool:
     if d.get("fail_reason") == "transient":
         return True
     return False
+
+
+def build_chat_stamp_from_result(result: dict[str, Any] | None) -> dict[str, Any]:
+    """Build auth-file stamp fields from a mint/export result dict.
+
+    Used by mint after probe and by export after finalize/gate so disk stamps
+    always match product chat_ok / entitlement classification.
+    """
+    r = result or {}
+    if r.get("entitlement_denied"):
+        import_gate = "entitlement_denied"
+    elif r.get("chat_ok") is True and r.get("usable") is not False:
+        import_gate = "chat_ok"
+    elif r.get("import_gate"):
+        import_gate = str(r.get("import_gate"))
+    elif r.get("chat_retryable"):
+        import_gate = str(r.get("fail_reason") or "transient")
+    elif r.get("chat_ok") is False:
+        import_gate = str(r.get("fail_reason") or "chat_not_ok")
+    else:
+        import_gate = str(r.get("fail_reason") or ("ok" if r.get("ok") else "not_ready"))
+
+    stamp: dict[str, Any] = {
+        "chat_ok": r.get("chat_ok"),
+        "usable": r.get("usable", r.get("ok")),
+        "entitlement_denied": bool(r.get("entitlement_denied")),
+        "chat_retryable": bool(r.get("chat_retryable")) and not bool(r.get("entitlement_denied")),
+        "fail_reason": r.get("fail_reason") or "",
+        "chat_error_code": r.get("chat_error_code") or "",
+        "import_gate": import_gate,
+    }
+    if stamp["chat_ok"] is None and r.get("probe_chat"):
+        ch = r.get("probe_chat") or {}
+        if isinstance(ch, dict) and ch:
+            stamp["chat_ok"] = bool(ch.get("ok"))
+    if not stamp["fail_reason"]:
+        stamp.pop("fail_reason", None)
+    if not stamp["chat_error_code"]:
+        stamp.pop("chat_error_code", None)
+    return stamp
+
+
+def stamp_auth_chat_fields(
+    path: str | Path,
+    result: dict[str, Any] | None = None,
+    *,
+    updates: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge chat stamp from result/updates into auth file. Returns full payload."""
+    stamp = build_chat_stamp_from_result(result) if result is not None else {}
+    if updates:
+        stamp.update({k: v for k, v in updates.items() if v is not None or k in ("chat_ok", "usable")})
+    if not stamp:
+        return {}
+    return patch_cpa_xai_auth(path, stamp)
+
+
+def inventory_chat_stamps(auth_dir: str | Path) -> dict[str, Any]:
+    """Count chat stamp coverage in an auth dir (ops / backfill planning)."""
+    root = Path(auth_dir).expanduser().resolve()
+    stats = {
+        "total": 0,
+        "chat_ok_true": 0,
+        "chat_ok_false": 0,
+        "chat_ok_missing": 0,
+        "entitlement_denied": 0,
+        "chat_retryable": 0,
+        "usable_true": 0,
+        "usable_false": 0,
+        "import_gate": {},
+    }
+    for p in root.glob("xai-*.json"):
+        if "_selftest" in p.name:
+            continue
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        stats["total"] += 1
+        if "chat_ok" not in d:
+            stats["chat_ok_missing"] += 1
+        elif d.get("chat_ok") is True:
+            stats["chat_ok_true"] += 1
+        else:
+            stats["chat_ok_false"] += 1
+        if is_entitlement_denied_auth(d):
+            stats["entitlement_denied"] += 1
+        if is_chat_retryable_auth(d):
+            stats["chat_retryable"] += 1
+        if d.get("usable") is True:
+            stats["usable_true"] += 1
+        elif d.get("usable") is False:
+            stats["usable_false"] += 1
+        gate = str(d.get("import_gate") or ("missing" if "chat_ok" not in d else "unset"))
+        stats["import_gate"][gate] = int(stats["import_gate"].get(gate, 0)) + 1
+    return stats
