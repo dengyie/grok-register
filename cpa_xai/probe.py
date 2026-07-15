@@ -202,6 +202,114 @@ def probe_models(
         }
 
 
+def probe_chat_with_retries(
+    access_token: str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    proxy: str | None = None,
+    max_attempts: int = 3,
+    timeout: float = 60.0,
+    sleep_fn: Any | None = None,
+    log: Any | None = None,
+) -> dict[str, Any]:
+    """Probe /v1/responses with classification + transient retries.
+
+    Shared by mint and historical backfill so retry/classification stay aligned.
+    Returns the last probe dict (includes classify_chat_probe fields) plus
+    ``attempts`` count.
+    """
+    import time as _time
+
+    _sleep = sleep_fn or _time.sleep
+    _log = log or (lambda _m: None)
+    max_attempts = max(1, int(max_attempts or 1))
+    ch: dict[str, Any] = {}
+    for attempt in range(1, max_attempts + 1):
+        ch = probe_mini_response(
+            access_token, base_url=base_url, proxy=proxy, timeout=timeout
+        )
+        # probe_mini_response already attaches classification; re-apply for safety.
+        cls = classify_chat_probe(ch)
+        for k, v in cls.items():
+            ch.setdefault(k, v)
+        _log(
+            f"probe chat attempt={attempt}/{max_attempts}: ok={ch.get('ok')} "
+            f"status={ch.get('status')} entitlement_denied={ch.get('entitlement_denied')} "
+            f"retryable={ch.get('retryable')} code={ch.get('error_code')!r} "
+            f"model={ch.get('model')} text={ch.get('text')!r}"
+        )
+        if ch.get("ok") or ch.get("entitlement_denied") or not ch.get("retryable"):
+            ch["attempts"] = attempt
+            return ch
+        if attempt < max_attempts:
+            _sleep(1.5 * attempt)
+    ch["attempts"] = max_attempts
+    return ch
+
+
+def apply_chat_probe_to_result(
+    result: dict[str, Any],
+    ch: dict[str, Any] | None,
+    *,
+    models_missing: bool = False,
+    models_status: int | None = None,
+) -> dict[str, Any]:
+    """Mutate mint/backfill result with chat probe classification fields.
+
+    Keeps mint + backfill outcome fields identical for stamp/remint consumers.
+    """
+    if models_missing:
+        result["ok"] = False
+        result["chat_ok"] = False
+        result["usable"] = False
+        result["entitlement_denied"] = False
+        result["chat_retryable"] = bool(
+            models_status in (0, 408, 429, 500, 502, 503, 504)
+        )
+        result["fail_reason"] = "models_missing_grok_45"
+        if not result.get("error"):
+            result["error"] = "token ok but grok-4.5 not listed"
+        return result
+
+    ch = ch or {}
+    result["probe_chat"] = ch
+    result["chat_attempts"] = int(ch.get("attempts") or 0)
+    result["chat_ok"] = bool(ch.get("ok"))
+    result["entitlement_denied"] = bool(ch.get("entitlement_denied"))
+    result["chat_retryable"] = bool(ch.get("retryable")) and not bool(ch.get("ok"))
+    result["chat_error_code"] = ch.get("error_code") or ""
+    if ch.get("ok"):
+        result["ok"] = True
+        result["usable"] = True
+        result["chat_retryable"] = False
+        result["entitlement_denied"] = False
+        result["fail_reason"] = ""
+        result.pop("error", None)
+        return result
+
+    result["ok"] = False
+    result["usable"] = False
+    if ch.get("entitlement_denied"):
+        result["error"] = (
+            "chat entitlement denied (permission-denied): "
+            "account has no free Build chat grant; do not remint"
+        )
+        result["non_retryable"] = True
+        result["chat_retryable"] = False
+        result["fail_reason"] = "entitlement_denied"
+    else:
+        result["error"] = (
+            f"chat probe failed: status={ch.get('status')} "
+            f"code={ch.get('error_code') or ''} "
+            f"{(ch.get('error') or '')[:200]}"
+        )
+        result["non_retryable"] = not bool(ch.get("retryable"))
+        result["fail_reason"] = str(ch.get("reason") or "chat_failed")
+        if ch.get("retryable"):
+            result["chat_retryable"] = True
+    return result
+
+
 def probe_mini_response(
     access_token: str,
     *,

@@ -7,6 +7,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -84,17 +85,86 @@ def test_probe_mini_response_attaches_classification() -> None:
     assert "def classify_chat_probe" in src
     assert "classify_chat_probe(out)" in src
     assert "any HTTP 403" in src or "status == 403" in src
+    assert "def probe_chat_with_retries" in src
+    assert "def apply_chat_probe_to_result" in src
     print("PASS probe_mini_response attaches classification")
+
+
+def test_probe_chat_with_retries_and_apply() -> None:
+    probe = _load("cpa_xai.probe_retry", ROOT / "cpa_xai" / "probe.py")
+    sleeps: list[float] = []
+    calls = {"n": 0}
+
+    def fake_mini(_token, **_kw):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] < 3:
+            out = {"ok": False, "status": 429, "error": "rate", "error_code": "429"}
+            out.update(probe.classify_chat_probe(out))
+            return out
+        out = {"ok": True, "status": 200, "text": "MINT_OK", "model": "grok-4.5"}
+        out.update(probe.classify_chat_probe(out))
+        return out
+
+    probe.probe_mini_response = fake_mini  # type: ignore[assignment]
+    ch = probe.probe_chat_with_retries(
+        "tok",
+        max_attempts=3,
+        sleep_fn=lambda s: sleeps.append(s),
+        log=lambda _m: None,
+    )
+    assert ch.get("ok") is True
+    assert ch.get("attempts") == 3
+    assert calls["n"] == 3
+    assert len(sleeps) == 2
+
+    calls["n"] = 0
+    sleeps.clear()
+
+    def fake_denied(_token, **_kw):  # noqa: ANN001
+        calls["n"] += 1
+        out = {
+            "ok": False,
+            "status": 403,
+            "error": "permission",
+            "error_code": "permission_denied",
+        }
+        out.update(probe.classify_chat_probe(out))
+        return out
+
+    probe.probe_mini_response = fake_denied  # type: ignore[assignment]
+    ch2 = probe.probe_chat_with_retries(
+        "tok", max_attempts=3, sleep_fn=lambda s: sleeps.append(s)
+    )
+    assert ch2.get("entitlement_denied") is True
+    assert ch2.get("attempts") == 1
+    assert calls["n"] == 1
+    assert sleeps == []
+
+    r: dict = {}
+    probe.apply_chat_probe_to_result(r, ch2)
+    assert r["chat_ok"] is False
+    assert r["entitlement_denied"] is True
+    assert r["chat_retryable"] is False
+    assert r["fail_reason"] == "entitlement_denied"
+    assert r["usable"] is False
+
+    r_miss: dict = {}
+    probe.apply_chat_probe_to_result(r_miss, None, models_missing=True, models_status=200)
+    assert r_miss["fail_reason"] == "models_missing_grok_45"
+    assert r_miss["chat_ok"] is False
+    assert r_miss["chat_retryable"] is False
+    print("PASS probe_chat_with_retries + apply")
 
 
 def test_mint_default_probe_chat_on() -> None:
     src = (ROOT / "cpa_xai" / "mint.py").read_text(encoding="utf-8")
     assert "probe_chat: bool = True" in src
     assert "entitlement_denied" in src
-    assert "do not remint" in src
-    assert "max_attempts" in src
+    assert "do not remint" in src or "FAIL-FAST" in src
+    assert "probe_chat_with_retries" in src
+    assert "apply_chat_probe_to_result" in src
     assert "stamp_auth_chat_fields" in src
-    print("PASS mint default probe_chat on + retry + stamp")
+    print("PASS mint default probe_chat on + shared probe + stamp")
 
 
 def test_export_finalize_and_defaults() -> None:
@@ -137,6 +207,136 @@ def test_remint_skips_denied_and_retryable() -> None:
     assert "chat_ok=" in src and "chat_denied=" in src
     assert 'r.get("chat_ok") is True' in src
     print("PASS remint denied skip + chat_retryable + summary")
+
+
+def test_remint_collect_todo_behavior() -> None:
+    """Tempdir behavior: denied skip, missing, expired, chat_retryable, chat_ok skip."""
+    remint_path = ROOT / "scripts" / "remint_expired_and_sync_authdir.py"
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    remint = _load("remint_sync_authdir", remint_path)
+
+    future = (datetime.now(timezone.utc) + timedelta(days=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S+0000"
+    )
+    past = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%S+0000"
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        auth_dir = root / "auths"
+        auth_dir.mkdir()
+        accounts = root / "accounts.txt"
+        accounts.write_text(
+            "\n".join(
+                [
+                    "missing@ex.com----pw----sso=missing-sso-token",
+                    "ok@ex.com----pw----sso=ok-sso-token",
+                    "retry@ex.com----pw----sso=retry-sso-token",
+                    "denied@ex.com----pw----sso=denied-sso-token",
+                    "expired@ex.com----pw----sso=expired-sso-token",
+                    "ledgerden@ex.com----pw----sso=ledger-sso-token",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        (auth_dir / "xai-ok@ex.com.json").write_text(
+            json.dumps(
+                {
+                    "email": "ok@ex.com",
+                    "chat_ok": True,
+                    "usable": True,
+                    "expired": future,
+                    "access_token": "t",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (auth_dir / "xai-retry@ex.com.json").write_text(
+            json.dumps(
+                {
+                    "email": "retry@ex.com",
+                    "chat_ok": False,
+                    "chat_retryable": True,
+                    "fail_reason": "transient",
+                    "usable": False,
+                    "expired": future,
+                    "access_token": "t",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (auth_dir / "xai-denied@ex.com.json").write_text(
+            json.dumps(
+                {
+                    "email": "denied@ex.com",
+                    "chat_ok": False,
+                    "entitlement_denied": True,
+                    "fail_reason": "entitlement_denied",
+                    "import_gate": "entitlement_denied",
+                    "usable": False,
+                    "expired": past,
+                    "access_token": "t",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (auth_dir / "xai-expired@ex.com.json").write_text(
+            json.dumps(
+                {
+                    "email": "expired@ex.com",
+                    "chat_ok": True,
+                    "usable": True,
+                    "expired": past,
+                    "access_token": "t",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        denied_set = {"ledgerden@ex.com"}
+
+        todo, reasons = remint._collect_todo(
+            accounts,
+            auth_dir,
+            include_missing=True,
+            include_expired=True,
+            include_chat_retryable=True,
+            only_email="",
+            limit=0,
+            denied_emails=denied_set,
+        )
+        emails = {acc.email.lower(): reason for acc, reason in todo}
+        assert "missing@ex.com" in emails and emails["missing@ex.com"] == "missing"
+        assert "retry@ex.com" in emails and emails["retry@ex.com"] == "chat_retryable"
+        assert "expired@ex.com" in emails and emails["expired@ex.com"] == "expired"
+        assert "ok@ex.com" not in emails
+        assert "denied@ex.com" not in emails
+        assert "ledgerden@ex.com" not in emails
+        assert reasons["skipped_denied"] >= 2
+        assert reasons["skipped_chat_ok"] >= 1
+        assert reasons["missing"] >= 1
+        assert reasons["chat_retryable"] >= 1
+        assert reasons["expired"] >= 1
+
+        todo2, _ = remint._collect_todo(
+            accounts,
+            auth_dir,
+            include_missing=True,
+            include_expired=True,
+            include_chat_retryable=True,
+            only_email="",
+            limit=1,
+            denied_emails=denied_set,
+        )
+        assert len(todo2) == 1
+    print("PASS remint _collect_todo behavior")
 
 
 def test_writer_ledger_roundtrip() -> None:
@@ -307,6 +507,29 @@ def test_writer_stamp_and_inventory() -> None:
         )
         assert stamp["import_gate"] == "transient"
         assert stamp["chat_retryable"] is True
+        assert stamp["chat_ok"] is False
+
+        # incomplete result must NOT write chat_ok: null
+        incomplete = writer.build_chat_stamp_from_result({"ok": True, "path": "/x"})
+        assert "chat_ok" not in incomplete
+        assert "usable" not in incomplete
+        assert incomplete.get("import_gate") in ("ok", "not_ready")
+
+        p_partial = root / "xai-partial@example.com.json"
+        p_partial.write_text(
+            json.dumps({"type": "xai", "email": "partial@example.com"}) + "\n",
+            encoding="utf-8",
+        )
+        writer.stamp_auth_chat_fields(p_partial, {"ok": True})
+        disk = json.loads(p_partial.read_text(encoding="utf-8"))
+        assert "chat_ok" not in disk  # omit until real probe
+
+        writer.stamp_auth_chat_fields(
+            p_partial, None, updates={"chat_ok": None, "import_gate": "not_ready"}
+        )
+        disk2 = json.loads(p_partial.read_text(encoding="utf-8"))
+        assert "chat_ok" not in disk2
+        assert disk2.get("import_gate") == "not_ready"
     print("PASS writer stamp + inventory")
 
 
@@ -318,6 +541,8 @@ def test_backfill_chat_stamps_script_exists() -> None:
     assert "--probe" in src
     assert "--inventory-only" in src
     assert "--only-missing" in src
+    assert "probe_chat_with_retries" in src
+    assert "apply_chat_probe_to_result" in src
     print("PASS backfill_chat_stamps script surface")
 
 
@@ -433,11 +658,13 @@ def test_remote_inject_chat_ok_hard_gate() -> None:
 def main() -> int:
     test_classify_chat_probe()
     test_probe_mini_response_attaches_classification()
+    test_probe_chat_with_retries_and_apply()
     test_mint_default_probe_chat_on()
     test_export_finalize_and_defaults()
     test_config_example_chat_keys()
     test_cli_chat_stats()
     test_remint_skips_denied_and_retryable()
+    test_remint_collect_todo_behavior()
     test_writer_ledger_roundtrip()
     test_writer_stamp_and_inventory()
     test_backfill_chat_stamps_script_exists()

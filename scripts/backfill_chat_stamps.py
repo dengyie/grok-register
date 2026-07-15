@@ -29,7 +29,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from cpa_xai.probe import classify_chat_probe, probe_mini_response, probe_models  # noqa: E402
+from cpa_xai.probe import apply_chat_probe_to_result, probe_chat_with_retries, probe_models  # noqa: E402
 from cpa_xai.schema import DEFAULT_BASE_URL  # noqa: E402
 from cpa_xai.writer import (  # noqa: E402
     inventory_chat_stamps,
@@ -118,58 +118,30 @@ def _probe_and_stamp(
     )
 
     if not pr.get("has_grok_45"):
-        result.update(
-            {
-                "ok": False,
-                "chat_ok": False,
-                "usable": False,
-                "entitlement_denied": False,
-                "chat_retryable": bool(pr.get("status") in (0, 408, 429, 500, 502, 503, 504)),
-                "fail_reason": "models_missing_grok_45",
-            }
+        apply_chat_probe_to_result(
+            result,
+            None,
+            models_missing=True,
+            models_status=int(pr.get("status") or 0),
         )
     else:
-        max_attempts = 3
-        ch: dict = {}
-        for attempt in range(1, max_attempts + 1):
-            ch = probe_mini_response(token, base_url=base_url, proxy=proxy)
-            cls = classify_chat_probe(ch)
-            for k, v in cls.items():
-                ch.setdefault(k, v)
-            log(
-                f"chat attempt={attempt}/{max_attempts} ok={ch.get('ok')} "
-                f"status={ch.get('status')} denied={ch.get('entitlement_denied')} "
-                f"retryable={ch.get('retryable')} code={ch.get('error_code')!r}"
-            )
-            if ch.get("ok") or ch.get("entitlement_denied") or not ch.get("retryable"):
-                break
-            if attempt < max_attempts:
-                time.sleep(1.5 * attempt)
-        result["probe_chat"] = ch
-        result["chat_ok"] = bool(ch.get("ok"))
-        result["entitlement_denied"] = bool(ch.get("entitlement_denied"))
-        result["chat_retryable"] = bool(ch.get("retryable")) and not bool(ch.get("ok"))
-        result["chat_error_code"] = ch.get("error_code") or ""
-        if ch.get("ok"):
-            result["ok"] = True
-            result["usable"] = True
-            result["chat_retryable"] = False
-            result["entitlement_denied"] = False
-            result["fail_reason"] = ""
-        else:
-            result["ok"] = False
-            result["usable"] = False
-            if ch.get("entitlement_denied"):
-                result["fail_reason"] = "entitlement_denied"
-                result["chat_retryable"] = False
-                result["non_retryable"] = True
-            else:
-                result["fail_reason"] = str(ch.get("reason") or "chat_failed")
-                result["non_retryable"] = not bool(ch.get("retryable"))
+        ch = probe_chat_with_retries(
+            token,
+            base_url=base_url,
+            proxy=proxy,
+            max_attempts=3,
+            log=log,
+        )
+        apply_chat_probe_to_result(result, ch)
+        if result.get("entitlement_denied"):
+            log("FAIL-FAST: chat entitlement_denied — ledger + stamp only (no remint)")
 
     try:
         stamped = stamp_auth_chat_fields(path, result)
         result["import_gate"] = stamped.get("import_gate")
+        if stamped.get("chat_ok") is None and "chat_ok" not in stamped:
+            # incomplete stamp should not happen after full probe; surface for ops
+            log(f"stamp incomplete keys={sorted(stamped.keys())}")
     except Exception as e:  # noqa: BLE001
         result["stamp_error"] = str(e)
         log(f"stamp failed: {e}")

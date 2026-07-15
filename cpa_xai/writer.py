@@ -154,11 +154,6 @@ def is_entitlement_denied_auth(payload: dict[str, Any] | None) -> bool:
         return True
     if d.get("import_gate") == "entitlement_denied":
         return True
-    if d.get("usable") is False and d.get("chat_ok") is False and (
-        str(d.get("fail_reason") or "") == "entitlement_denied"
-        or str(d.get("import_gate") or "") == "entitlement_denied"
-    ):
-        return True
     return False
 
 
@@ -181,38 +176,78 @@ def build_chat_stamp_from_result(result: dict[str, Any] | None) -> dict[str, Any
 
     Used by mint after probe and by export after finalize/gate so disk stamps
     always match product chat_ok / entitlement classification.
+
+    Never writes ``chat_ok`` / ``usable`` as JSON null — omit those keys until a
+    real probe outcome exists (keeps inventory ``chat_ok_missing`` accurate).
     """
     r = result or {}
-    if r.get("entitlement_denied"):
+    chat_ok = r.get("chat_ok")
+    if chat_ok is None:
+        ch = r.get("probe_chat") or {}
+        if isinstance(ch, dict) and ch:
+            if "ok" in ch:
+                chat_ok = bool(ch.get("ok"))
+            elif ch.get("entitlement_denied"):
+                chat_ok = False
+
+    entitlement_denied = bool(r.get("entitlement_denied"))
+    if not entitlement_denied and isinstance(r.get("probe_chat"), dict):
+        entitlement_denied = bool((r.get("probe_chat") or {}).get("entitlement_denied"))
+
+    usable = r.get("usable")
+    if usable is None and chat_ok is True and not entitlement_denied:
+        usable = True
+    elif usable is None and (chat_ok is False or entitlement_denied):
+        usable = False
+    elif usable is None and r.get("ok") is True and chat_ok is None and not entitlement_denied:
+        # models-only success path without chat probe — do not invent usable=true
+        usable = None
+
+    chat_retryable = bool(r.get("chat_retryable")) and not entitlement_denied
+    if not chat_retryable and chat_ok is not True and not entitlement_denied:
+        ch = r.get("probe_chat") or {}
+        if isinstance(ch, dict) and ch.get("retryable") and not ch.get("ok"):
+            chat_retryable = True
+
+    fail_reason = str(r.get("fail_reason") or "").strip()
+    if not fail_reason and entitlement_denied:
+        fail_reason = "entitlement_denied"
+    if not fail_reason and isinstance(r.get("probe_chat"), dict):
+        pr = r.get("probe_chat") or {}
+        if pr.get("reason") and not pr.get("ok"):
+            fail_reason = str(pr.get("reason") or "")
+
+    chat_error_code = str(r.get("chat_error_code") or "").strip()
+    if not chat_error_code and isinstance(r.get("probe_chat"), dict):
+        chat_error_code = str((r.get("probe_chat") or {}).get("error_code") or "").strip()
+
+    if entitlement_denied:
         import_gate = "entitlement_denied"
-    elif r.get("chat_ok") is True and r.get("usable") is not False:
+    elif chat_ok is True and usable is not False:
         import_gate = "chat_ok"
     elif r.get("import_gate"):
         import_gate = str(r.get("import_gate"))
-    elif r.get("chat_retryable"):
-        import_gate = str(r.get("fail_reason") or "transient")
-    elif r.get("chat_ok") is False:
-        import_gate = str(r.get("fail_reason") or "chat_not_ok")
+    elif chat_retryable:
+        import_gate = fail_reason or "transient"
+    elif chat_ok is False:
+        import_gate = fail_reason or "chat_not_ok"
     else:
-        import_gate = str(r.get("fail_reason") or ("ok" if r.get("ok") else "not_ready"))
+        import_gate = fail_reason or ("ok" if r.get("ok") else "not_ready")
 
     stamp: dict[str, Any] = {
-        "chat_ok": r.get("chat_ok"),
-        "usable": r.get("usable", r.get("ok")),
-        "entitlement_denied": bool(r.get("entitlement_denied")),
-        "chat_retryable": bool(r.get("chat_retryable")) and not bool(r.get("entitlement_denied")),
-        "fail_reason": r.get("fail_reason") or "",
-        "chat_error_code": r.get("chat_error_code") or "",
+        "entitlement_denied": entitlement_denied,
+        "chat_retryable": chat_retryable and not entitlement_denied,
         "import_gate": import_gate,
     }
-    if stamp["chat_ok"] is None and r.get("probe_chat"):
-        ch = r.get("probe_chat") or {}
-        if isinstance(ch, dict) and ch:
-            stamp["chat_ok"] = bool(ch.get("ok"))
-    if not stamp["fail_reason"]:
-        stamp.pop("fail_reason", None)
-    if not stamp["chat_error_code"]:
-        stamp.pop("chat_error_code", None)
+    # Only persist booleans — never null (null pollutes inventory as "stamped").
+    if chat_ok is True or chat_ok is False:
+        stamp["chat_ok"] = bool(chat_ok)
+    if usable is True or usable is False:
+        stamp["usable"] = bool(usable)
+    if fail_reason:
+        stamp["fail_reason"] = fail_reason
+    if chat_error_code:
+        stamp["chat_error_code"] = chat_error_code
     return stamp
 
 
@@ -222,10 +257,22 @@ def stamp_auth_chat_fields(
     *,
     updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Merge chat stamp from result/updates into auth file. Returns full payload."""
+    """Merge chat stamp from result/updates into auth file. Returns full payload.
+
+    Omits null ``chat_ok``/``usable`` from the patch so incomplete results do not
+    mark historical files as stamped. Explicit ``updates`` may still set booleans
+    (including False); null values in updates are ignored for those keys.
+    """
     stamp = build_chat_stamp_from_result(result) if result is not None else {}
     if updates:
-        stamp.update({k: v for k, v in updates.items() if v is not None or k in ("chat_ok", "usable")})
+        for k, v in updates.items():
+            if k in ("chat_ok", "usable"):
+                if v is True or v is False:
+                    stamp[k] = bool(v)
+                # skip None — never write null chat_ok/usable
+                continue
+            if v is not None:
+                stamp[k] = v
     if not stamp:
         return {}
     return patch_cpa_xai_auth(path, stamp)
