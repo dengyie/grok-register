@@ -49,6 +49,8 @@ def run_import(
     replace_nodes: bool = False,
     from_clash_verge: bool = False,
     clash_home: Path | None = None,
+    check: bool = False,
+    check_timeout: float = 12.0,
 ) -> int:
     path_list = [Path(p) for p in paths]
     # Clash Verge scan is opt-in only (--from-clash-verge).
@@ -123,15 +125,73 @@ def run_import(
         replace_nodes=replace_nodes,
     )
     public = packed.to_public_dict()
+
+    # Optional post-import live probe of the HTTP/SOCKS catalog.
+    # Import always writes the full catalog; batch register still re-probes and
+    # seeds healthy-only rotation (this flag is convenience, not the authority gate).
+    check_summary: dict | None = None
+    if check and packed.ok and not packed.needs_core:
+        check_summary = _post_import_check(
+            nodes_json=nodes_json,
+            timeout=float(check_timeout or 12.0),
+        )
+        if check_summary is not None:
+            public["check"] = check_summary
+
     if packed.needs_core:
         public["hint"] = (
             "protocol nodes need: python -m register_core nodes core start && "
             "python -m register_core nodes egress set core"
         )
+    elif check and check_summary is not None:
+        healthy = int(check_summary.get("ok") or 0)
+        total = int(check_summary.get("total") or 0)
+        public["hint"] = (
+            f"import+check: {healthy}/{total} live. "
+            "Batch register (egress=list|auto) will re-probe and rotate only healthy URLs; "
+            "dead nodes stay in catalog but never enter the registration pool."
+        )
     else:
         public["hint"] = (
-            "HTTP/SOCKS only — REGISTER_EGRESS=list (no mihomo). "
+            "HTTP/SOCKS catalog written (schema only — not live-probed). "
+            "Before each batch register with egress=list|auto, the pipeline probes "
+            "nodes.json and seeds healthy-only rotation. Optional now: "
+            "`python -m register_core nodes check` or re-import with --check. "
             f"nodes.json mode={packed.merge.mode if packed.merge else 'n/a'}"
         )
     print(json.dumps(public, ensure_ascii=False, indent=2))
     return 0 if packed.ok else 1
+
+
+def _post_import_check(
+    *,
+    nodes_json: Path | None,
+    timeout: float = 12.0,
+) -> dict | None:
+    """Probe catalog after import; returns summary dict or None if catalog empty."""
+    from register_core.nodes.convert.pipeline import _ROOT
+    from register_core.nodes.manager import NodeManager, reset_manager_for_tests
+
+    if nodes_json is None:
+        path = _ROOT / "nodes.json"
+    else:
+        path = Path(nodes_json).expanduser().resolve()
+    if not path.is_file():
+        return {"ok": 0, "total": 0, "error": f"catalog missing: {path}"}
+    # Fresh manager so we don't reuse a stale singleton after pack rewrote the file.
+    reset_manager_for_tests()
+    mgr = NodeManager(path)
+    if not mgr.ensure_loaded():
+        return {"ok": 0, "total": 0, "error": "catalog empty"}
+    results = mgr.check_all(
+        timeout=timeout,
+        log=lambda m: print(m, flush=True),
+        persist=True,
+    )
+    ok_n = sum(1 for r in results if r.get("ok"))
+    return {
+        "ok": ok_n,
+        "total": len(results),
+        "path": str(path),
+        "results": results,
+    }

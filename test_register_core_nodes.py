@@ -436,6 +436,99 @@ class TestManager(unittest.TestCase):
         mgr._max_fail = 3
         self.assertFalse(NodeManager.is_cooling(mgr, n))
 
+    def test_preflight_skip_logs_backend_and_proxy_list(self) -> None:
+        """Skip reasons for non-list backends / operator PROXY_LIST must be explicit."""
+        logs: list[str] = []
+
+        with patch.dict(
+            os.environ,
+            {
+                "REGISTER_NODES": "1",
+                "REGISTER_EGRESS": "direct",
+                "PROXY_LIST": "",
+                "CHATGPT_PROXY_LIST": "",
+            },
+            clear=False,
+        ):
+            core_proxy.reset_rotation_for_tests()
+            extra = core_proxy.preflight_nodes_for_register(
+                {"egress": "direct"}, log_fn=logs.append
+            )
+            self.assertTrue(extra["_nodes_preflight"].get("skipped"))
+            self.assertEqual(extra["_nodes_preflight"].get("reason"), "backend=direct")
+            self.assertTrue(any("preflight skipped: backend=direct" in m for m in logs))
+
+        logs.clear()
+        with patch.dict(
+            os.environ,
+            {
+                "REGISTER_NODES": "1",
+                "REGISTER_EGRESS": "list",
+                "REGISTER_CORE": "0",
+                "PROXY_LIST": "http://op:1",
+                "CHATGPT_PROXY_LIST": "",
+                "REGISTER_NODES_PREFLIGHT": "1",
+            },
+            clear=False,
+        ):
+            core_proxy.reset_rotation_for_tests()
+            extra = core_proxy.preflight_nodes_for_register(
+                {"egress": "list"}, log_fn=logs.append
+            )
+            self.assertTrue(extra["_nodes_preflight"].get("skipped"))
+            self.assertEqual(extra["_nodes_preflight"].get("reason"), "explicit_proxy_list")
+            self.assertTrue(any("explicit_proxy_list" in m or "PROXY_LIST" in m for m in logs))
+
+        logs.clear()
+        with patch.dict(
+            os.environ,
+            {
+                "REGISTER_NODES": "0",
+                "REGISTER_EGRESS": "list",
+                "PROXY_LIST": "",
+                "CHATGPT_PROXY_LIST": "",
+            },
+            clear=False,
+        ):
+            core_proxy.reset_rotation_for_tests()
+            extra = core_proxy.preflight_nodes_for_register(
+                {"egress": "list"}, log_fn=logs.append
+            )
+            self.assertTrue(extra["_nodes_preflight"].get("skipped"))
+            self.assertEqual(extra["_nodes_preflight"].get("reason"), "REGISTER_NODES=0")
+            self.assertTrue(any("REGISTER_NODES=0" in m for m in logs))
+
+    def test_import_hint_mentions_batch_preflight(self) -> None:
+        """Post-import hint must advertise batch healthy-only preflight (product contract)."""
+        from register_core.nodes.convert.cli_import import run_import
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            nodes_json = td_path / "nodes.json"
+            src = td_path / "links.txt"
+            src.write_text("http://user:pass@1.2.3.4:8080\n", encoding="utf-8")
+            with patch("builtins.print") as mock_print:
+                code = run_import(
+                    [str(src)],
+                    format_hint="uri_list",
+                    nodes_home=td_path / ".nodes",
+                    nodes_json=nodes_json,
+                    dry_run=False,
+                    replace_nodes=True,
+                )
+            self.assertEqual(code, 0)
+            dumped = "\n".join(
+                str(c.args[0]) for c in mock_print.call_args_list if c.args
+            )
+            self.assertIn("healthy-only", dumped.lower() + " " + dumped)
+            # either explicit healthy-only phrase or re-probe language
+            self.assertTrue(
+                "healthy-only" in dumped
+                or "re-probe" in dumped
+                or "live-probed" in dumped
+                or "Batch register" in dumped
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

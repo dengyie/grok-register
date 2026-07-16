@@ -25,12 +25,17 @@ python -m register_core nodes import links.txt --format uri_list --dry-run
 # merge is default (by URL). Replace catalog entirely:
 python -m register_core nodes import profile.yaml --replace
 
+# optional convenience: live-probe catalog right after import (batch still re-probes)
+python -m register_core nodes import profile.yaml --check
+
 # empty catalog (does not touch protocol runtime):
 python -m register_core nodes clear --yes
 
 # advanced: scan local Clash Verge profiles (opt-in only)
 python -m register_core nodes import --from-clash-verge
 ```
+
+**Import writes schema only by default** — liveness is enforced on every batch register (see preflight below), not at import time.
 
 | Input | Format |
 |-------|--------|
@@ -62,14 +67,16 @@ python -m register_core nodes add 'http://u:p@host:port' --label us1
 | `nodes.json` | `{ "version": 1, "nodes": [ { "url", "id", "label", "tags", "enabled" } ] }` |
 | `nodes.txt` / `nodes.list` | one URL per line |
 
-### Register adaptation (preflight + quarantine)
+### Register adaptation (preflight + quarantine) — product feature
 
-Registration **probes first**, then rotates only healthy URLs:
+When operators import their own HTTP/SOCKS nodes, **each batch register** live-probes the catalog and only puts healthy URLs into rotation:
 
 ```text
-pipeline.run
-  → preflight_nodes_for_register   # probe catalog (list/auto)
-  → healthy proxy_list only
+nodes import profile.yaml          # write full catalog (schema; optional --check)
+        │
+pipeline.run (egress=list|auto)
+  → preflight_nodes_for_register   # probe nodes.json (authority gate)
+  → seed proxy_list = healthy-only
   → each attempt: inject_attempt_proxy (rotate)
   → on proxy/network fail: mark fail_count, drop from live pool
   → quarantine after REGISTER_NODES_MAX_FAIL (default 3)
@@ -84,6 +91,15 @@ pipeline.run
 | `REGISTER_NODES_REQUIRED` | list-backend true | Zero healthy → fail-fast |
 | `REGISTER_NODES_PROBE_TIMEOUT` | `12` | Probe timeout seconds |
 | `REGISTER_NODES_PROBE_LIMIT` | `40` | Max probes per preflight (`0` = unlimited) |
+
+**Preflight is skipped (logged)** when:
+
+| Reason | When | Operator note |
+|--------|------|---------------|
+| `backend=core\|clash\|direct` | not list/auto | Catalog probe N/A |
+| `REGISTER_NODES=0` | catalog disabled | — |
+| `explicit_proxy_list` | `PROXY_LIST` / `CHATGPT_PROXY_LIST` set | Operator-owned pool; set `force_nodes_preflight=1` to also probe catalog |
+| `preflight_disabled` | `REGISTER_NODES_PREFLIGHT=0` | Not recommended for imported catalogs |
 
 Non-proxy failures (`mail_miss`, captcha, `registration_disallowed`) **do not** quarantine nodes.
 

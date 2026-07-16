@@ -122,8 +122,10 @@ REGISTER_EGRESS / --egress / nodes egress set
 | Import script | `scripts/import_nodes.py` (`import_clash_to_nodes.py` deprecated) |
 
 Primary backends: `list` \| `core` \| `direct`. Advanced: `auto` (healthy list → core → clash-if-set), `clash`.
-Register path **probes first** (`REGISTER_NODES_PREFLIGHT=1`); dead nodes are quarantined after `REGISTER_NODES_MAX_FAIL`.
-VLESS/SS/… need `egress=core`. Import/validate is **not** on the hot register path.
+
+**Product contract (imported catalogs):** After `nodes import` writes `nodes.json`, each batch register with `egress=list|auto` **live-probes** the catalog (`REGISTER_NODES_PREFLIGHT=1` default) and seeds rotation with **healthy-only** URLs. Dead rows stay in the catalog but never enter the pool. Zero healthy on `list` (or `REGISTER_NODES_REQUIRED`) → FailFastError (no account burn). Operator `PROXY_LIST` / `CHATGPT_PROXY_LIST` owns the pool and skips catalog probe unless `force_nodes_preflight=1`. Optional convenience: `nodes import … --check` or `nodes check` (batch preflight remains the authority gate). Skip reasons are logged (`backend=*`, `REGISTER_NODES=0`, `explicit_proxy_list`, `preflight_disabled`).
+
+Dead nodes are quarantined after `REGISTER_NODES_MAX_FAIL`. VLESS/SS/… need `egress=core`. Import/validate is **not** on the hot register path.
 
 ## Production authority (do not invert)
 

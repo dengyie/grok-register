@@ -428,10 +428,13 @@ def preflight_nodes_for_register(
 ) -> dict[str, Any]:
     """Probe project nodes and seed register rotation with healthy-only pool.
 
-    Called once before a pipeline batch. Rules:
+    Called once before a pipeline batch (product gate for imported catalogs). Rules:
     - Only when backend is ``list`` or ``auto`` and nodes catalog is enabled
     - Skipped for ``core`` / ``clash`` / ``direct`` (no HTTP catalog rotation)
+    - Explicit ``PROXY_LIST`` / ``CHATGPT_PROXY_LIST`` skips catalog probe (operator-owned pool)
+      unless ``force_nodes_preflight`` is set
     - ``REGISTER_NODES_PREFLIGHT=0`` disables probe (not recommended)
+    - Skip reasons are always logged for operators
     - On ``list`` (or required), zero healthy nodes → FailFastError
     - Mutates a copy of ``extra``: sets ``proxy_list`` to healthy URLs and forces reconfig
     """
@@ -444,6 +447,15 @@ def preflight_nodes_for_register(
     if base.get("_nodes_preflight_done"):
         return base
 
+    def _log(msg: str) -> None:
+        if log_fn:
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+        else:
+            log.info("%s", msg)
+
     if backend in {"direct", "core", "clash"}:
         base["_nodes_preflight_done"] = True
         base["_nodes_preflight"] = {
@@ -451,6 +463,10 @@ def preflight_nodes_for_register(
             "reason": f"backend={backend}",
             "healthy": 0,
         }
+        _log(
+            f"[nodes] preflight skipped: backend={backend} "
+            "(catalog live-probe only applies to egress=list|auto)"
+        )
         return base
 
     # explicit PROXY_LIST from operator skips catalog probe (they own the pool)
@@ -469,6 +485,7 @@ def preflight_nodes_for_register(
     if nodes_disabled:
         base["_nodes_preflight_done"] = True
         base["_nodes_preflight"] = {"skipped": True, "reason": "REGISTER_NODES=0", "healthy": 0}
+        _log("[nodes] preflight skipped: REGISTER_NODES=0 (catalog disabled)")
         return base
 
     if str(explicit_list).strip() and not base.get("force_nodes_preflight"):
@@ -479,6 +496,11 @@ def preflight_nodes_for_register(
             "reason": "explicit_proxy_list",
             "healthy": 0,
         }
+        _log(
+            "[nodes] preflight skipped: operator PROXY_LIST/CHATGPT_PROXY_LIST owns the pool "
+            "(catalog not probed; set force_nodes_preflight=1 or clear PROXY_LIST to use "
+            "nodes.json live-probe → healthy-only rotation)"
+        )
         return base
 
     if not _nodes_preflight_enabled(base):
@@ -490,6 +512,10 @@ def preflight_nodes_for_register(
                 base["egress"] = "list"
         base["_nodes_preflight_done"] = True
         base["_nodes_preflight"] = {"skipped": True, "reason": "preflight_disabled", "healthy": 0}
+        _log(
+            "[nodes] preflight skipped: REGISTER_NODES_PREFLIGHT=0 "
+            "(not recommended for imported catalogs)"
+        )
         configure_rotation_once(base, log_fn=log_fn, force=True)
         return base
 
@@ -524,15 +550,6 @@ def preflight_nodes_for_register(
             limit = None if parsed == 0 else max(1, parsed)
     except Exception:
         limit = None
-
-    def _log(msg: str) -> None:
-        if log_fn:
-            try:
-                log_fn(msg)
-            except Exception:
-                pass
-        else:
-            log.info("%s", msg)
 
     summary = mgr.preflight(timeout=timeout, log=_log, persist=True, limit=limit)
     healthy_list = summary.get("proxy_list") or ""

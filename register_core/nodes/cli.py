@@ -192,6 +192,8 @@ def cmd_import(args: argparse.Namespace) -> int:
         replace_nodes=bool(getattr(args, "replace", False)),
         from_clash_verge=from_verge,
         clash_home=clash_home,
+        check=bool(getattr(args, "check", False)),
+        check_timeout=float(getattr(args, "check_timeout", 12.0) or 12.0),
     )
 
 
@@ -388,6 +390,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--clash-home",
         default="",
         help="with --from-clash-verge: Verge data dir (mac default if empty)",
+    )
+    pimp.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "after import, live-probe HTTP/SOCKS catalog (optional convenience). "
+            "Batch register still re-probes and uses healthy-only rotation"
+        ),
+    )
+    pimp.add_argument(
+        "--check-timeout",
+        type=float,
+        default=12.0,
+        help="per-node probe timeout seconds when using --check (default 12)",
     )
     pimp.set_defaults(func=cmd_import)
 
