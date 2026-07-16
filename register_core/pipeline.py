@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 from register_core.contracts import RegisterJob, RegisterResult, VerifyResult
 from register_core.email.base import EmailSource
+from register_core.email.mail_proxy import resolve_mail_proxy
 from register_core.email.registry import get_email_source
 from register_core.errors import FailFastError, MailMissError, RegisterCoreError
 from register_core.providers.base import RegisterProvider
@@ -66,9 +67,20 @@ class Pipeline:
                 f"--email-source={job.email_source!r}; use email_source=provider "
                 f"(adapter-internal mail) or an in-process provider"
             )
+        # Mail path must never inherit register egress (PROXY_LIST / attempt proxy).
+        mail_proxy = resolve_mail_proxy(job.extra)
+        kw: dict[str, Any] = {}
+        if mail_proxy:
+            kw["proxy"] = mail_proxy
+        else:
+            # Explicit direct when source accepts proxy kw (tinyhost / duckmail).
+            kw["proxy"] = None
+        domain = str((job.extra or {}).get("email_domain") or "").strip()
+        if domain and name in ("tinyhost", "auto"):
+            kw["domain"] = domain
         if name == "auto":
-            return get_email_source("auto")
-        return get_email_source(name)
+            return get_email_source("auto", **kw)
+        return get_email_source(name, **kw)
 
     @staticmethod
     def _resolve_verifier(job: RegisterJob) -> Verifier:
@@ -168,14 +180,36 @@ class Pipeline:
                 log.error("fail-fast stop: %s", exc)
                 break
             except MailMissError as exc:
+                arts: dict[str, Any] = {}
+                diag = getattr(exc, "diagnostics", None)
+                if diag is not None:
+                    try:
+                        arts["otp_wait"] = (
+                            asdict(diag)
+                            if hasattr(diag, "__dataclass_fields__")
+                            else dict(diag)  # type: ignore[arg-type]
+                        )
+                    except Exception:
+                        arts["otp_wait"] = {"notes": "diagnostics_serialize_failed"}
                 result = RegisterResult(
                     ok=False,
                     provider=self.provider.name,
                     error=str(exc),
                     error_kind="mail_miss",
                     secret_kind="none",
+                    artifacts=arts,
                 )
-                # mail miss is not a dead proxy — do not quarantine
+                # mail_miss is not a dead proxy — still report so soft-cool path
+                # classifies as non_proxy_failure (no quarantine / network cool).
+                try:
+                    self._feedback_proxy(attempt_extra, result)
+                except FailFastError as ff:
+                    stats.results.append(result)
+                    stats.fail += 1
+                    self._emit(result)
+                    stats.stopped_reason = f"fail_fast: {ff}"
+                    log.error("fail-fast stop: %s", ff)
+                    break
                 stats.results.append(result)
                 stats.fail += 1
                 self._emit(result)

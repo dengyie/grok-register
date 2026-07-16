@@ -626,7 +626,9 @@ def is_proxy_network_failure(
     if not text:
         return False
     # OpenAI risk rejection is not a dead proxy.
-    if "registration_disallowed" in text or "disallowed" in text and "registration" in text:
+    if "registration_disallowed" in text or (
+        "disallowed" in text and "registration" in text
+    ):
         return False
     return any(m in text for m in _PROXY_FAIL_MARKERS)
 

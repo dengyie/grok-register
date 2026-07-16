@@ -60,14 +60,25 @@ class NodeManager:
         return self.is_quarantined(n)
 
     def is_cooling(self, n: Node) -> bool:
-        """Soft cooldown — temporary skip without hard quarantine."""
+        """Soft cooldown — temporary skip without hard quarantine.
+
+        Lazy-clears expired ``cooldown_until`` / ``cooldown_reason`` so stale cool
+        fields do not linger in memory (persist happens on next mark/cooldown).
+        """
         until = n.cooldown_until
         if until is None:
             return False
         try:
-            return float(until) > time.time()
+            if float(until) > time.time():
+                return True
         except (TypeError, ValueError):
+            n.cooldown_until = None
+            n.cooldown_reason = ""
             return False
+        # Expired — clear so status/public dict stop advertising cooling.
+        n.cooldown_until = None
+        n.cooldown_reason = ""
+        return False
 
     def cooldown(
         self,

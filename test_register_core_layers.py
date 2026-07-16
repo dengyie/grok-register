@@ -119,6 +119,9 @@ class TestContracts(unittest.TestCase):
 
 
 class TestPipeline(unittest.TestCase):
+    # Offline runs must not probe local nodes.json (backend auto + catalog hang).
+    _OFFLINE_EXTRA = {"egress": "direct", "nodes_preflight": False}
+
     def test_fail_fast_stops(self):
         p = FakeProvider(
             outcomes=[
@@ -127,7 +130,7 @@ class TestPipeline(unittest.TestCase):
             ]
         )
         pipe = Pipeline(p, fail_fast=True, verifier=NoopVerifier())
-        stats = pipe.run(3)
+        stats = pipe.run(3, extra=dict(self._OFFLINE_EXTRA))
         self.assertEqual(p.calls, 1)
         self.assertEqual(stats.fail, 1)
         self.assertEqual(stats.ok, 0)
@@ -136,7 +139,7 @@ class TestPipeline(unittest.TestCase):
     def test_fatal_exception_stops(self):
         p = FakeProvider(raise_fatal_on=1)
         pipe = Pipeline(p, fail_fast=True)
-        stats = pipe.run(5)
+        stats = pipe.run(5, extra=dict(self._OFFLINE_EXTRA))
         self.assertEqual(stats.fail, 1)
         self.assertIn("fail_fast", stats.stopped_reason)
 
@@ -153,7 +156,7 @@ class TestPipeline(unittest.TestCase):
             ]
         )
         pipe = Pipeline(p, fail_fast=False, verifier=BoomVerifier())
-        stats = pipe.run(1)
+        stats = pipe.run(1, extra=dict(self._OFFLINE_EXTRA))
         self.assertEqual(stats.ok, 0)
         self.assertEqual(stats.fail, 1)
         self.assertEqual(stats.results[0].error_kind, "verify")
@@ -180,7 +183,7 @@ class TestPipeline(unittest.TestCase):
                 ]
             )
             pipe = Pipeline(p, sink=sink, verifier=NoopVerifier())
-            stats = pipe.run(1)
+            stats = pipe.run(1, extra=dict(self._OFFLINE_EXTRA))
             self.assertEqual(stats.ok, 1)
             mode = stat.S_IMODE(path.stat().st_mode)
             self.assertEqual(mode, 0o600)

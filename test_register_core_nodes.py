@@ -414,11 +414,19 @@ class TestManager(unittest.TestCase):
             picked = {mgr.pick().url for _ in range(4)}  # type: ignore[union-attr]
             self.assertEqual(picked, {"http://hot:2"})
             # force expire
+            cool_node = None
             for node in mgr.nodes:
                 if node.url == "http://cool:1":
                     node.cooldown_until = time.time() - 1
+                    node.cooldown_reason = "stale"
+                    cool_node = node
             urls = {n.url for n in mgr.enabled_nodes()}
             self.assertIn("http://cool:1", urls)
+            # lazy-clear expired cool fields on is_cooling / enabled scan
+            assert cool_node is not None
+            self.assertFalse(mgr.is_cooling(cool_node))
+            self.assertIsNone(cool_node.cooldown_until)
+            self.assertEqual(cool_node.cooldown_reason, "")
 
     def test_mail_miss_mark_does_not_require_cooldown_api(self) -> None:
         # structural: is_cooling false by default

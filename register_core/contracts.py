@@ -24,6 +24,9 @@ ALLOWED_ERROR_KINDS: frozenset[str] = frozenset(
 def normalize_error_kind(kind: str | None) -> str:
     """Map provider-reported kind into the public taxonomy; unknown → provider."""
     k = (kind or "").strip().lower()
+    # Historical / shorthand alias used in some product error strings.
+    if k == "disallowed":
+        return "registration_disallowed"
     if k in ALLOWED_ERROR_KINDS:
         return k
     return "provider"

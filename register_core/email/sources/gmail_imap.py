@@ -71,10 +71,12 @@ class GmailImapSource:
         except Exception as exc:
             msg = str(exc)
             low = msg.lower()
+            diag.failure_class = "imap_error"
             if "auth" in low or "credential" in low or "authenticationfailed" in low:
-                diag.failure_class = "imap_error"
+                diag.notes = ((diag.notes or "") + " auth_fail").strip()
             else:
-                diag.failure_class = "imap_error"
+                # transport / protocol / timeout from underlying helper
+                diag.notes = ((diag.notes or "") + f" transport:{msg[:80]}").strip()
             diag.elapsed_seconds = _time.time() - started
             self.last_wait_diagnostics = diag
             raise MailMissError(f"gmail OTP failed: {exc}", diagnostics=diag) from exc
@@ -92,7 +94,11 @@ class GmailImapSource:
         if used_codes and code in used_codes:
             diag.failure_class = "stale_code"
             self.last_wait_diagnostics = diag
-            raise MailMissError(f"gmail OTP already used: {code}", diagnostics=diag)
+            # Do not put the raw OTP into the error string (log/sink surface).
+            raise MailMissError(
+                f"gmail OTP already used for {mailbox.address}",
+                diagnostics=diag,
+            )
         diag.matched_at = _time.time()
         diag.matched_after_seconds = diag.matched_at - started
         diag.message_scan_count = 1

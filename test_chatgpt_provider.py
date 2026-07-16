@@ -236,12 +236,33 @@ class TestChatGPTAdapterAttribution(unittest.TestCase):
             access_token="a" * 48,
             refresh_token="r" * 48,
         )
+
+        def _noop_preflight(extra, **_kw):
+            base = dict(extra or {})
+            base["_nodes_preflight_done"] = True
+            base["_nodes_preflight"] = {"skipped": True, "reason": "test"}
+            return base
+
+        def _noop_inject(extra, **_kw):
+            return dict(extra or {})
+
         with tempfile.TemporaryDirectory() as td:
-            with patch(
-                "register_core.providers.chatgpt_adapter.OUTPUT_DIR", Path(td)
-            ), patch(
-                "providers.chatgpt.protocol.flow.register_one",
-                return_value=fake_ok,
+            with (
+                patch(
+                    "register_core.providers.chatgpt_adapter.OUTPUT_DIR", Path(td)
+                ),
+                patch(
+                    "providers.chatgpt.protocol.flow.register_one",
+                    return_value=fake_ok,
+                ),
+                patch(
+                    "register_core.util.proxy.preflight_nodes_for_register",
+                    side_effect=_noop_preflight,
+                ),
+                patch(
+                    "register_core.util.proxy.inject_attempt_proxy",
+                    side_effect=_noop_inject,
+                ),
             ):
                 pipe = Pipeline(
                     provider,
@@ -249,7 +270,10 @@ class TestChatGPTAdapterAttribution(unittest.TestCase):
                     verifier=ChatGPTTokenVerifier(),
                     fail_fast=True,
                 )
-                stats = pipe.run(1)
+                # direct + no preflight: offline unit must never probe nodes.json
+                stats = pipe.run(
+                    1, extra={"egress": "direct", "nodes_preflight": False}
+                )
         self.assertEqual(stats.ok, 1)
         self.assertEqual(stats.fail, 0)
         self.assertTrue(stats.results[0].ok)

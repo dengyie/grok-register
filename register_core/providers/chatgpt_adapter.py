@@ -12,6 +12,7 @@ from typing import Any
 
 from register_core.contracts import RegisterResult, normalize_error_kind
 from register_core.email.base import EmailSource
+from register_core.email.mail_proxy import resolve_mail_proxy
 from register_core.email.registry import get_email_source
 from register_core.errors import FailFastError, MailMissError, ProviderError
 
@@ -22,19 +23,8 @@ if str(ROOT) not in sys.path:
 PROTOCOL_DIR = ROOT / "providers" / "chatgpt"
 OUTPUT_DIR = PROTOCOL_DIR / "output"
 
-
-def resolve_mail_proxy(extra: dict[str, Any] | None = None) -> str:
-    """Mail HTTP path proxy. Never falls back to register egress proxy."""
-    extra = extra if isinstance(extra, dict) else {}
-    for key in ("mail_proxy", "email_proxy"):
-        v = str(extra.get(key) or "").strip()
-        if v:
-            return v
-    for env in ("CHATGPT_MAIL_PROXY", "EMAIL_PROXY", "MAIL_PROXY"):
-        v = str(os.environ.get(env) or "").strip()
-        if v:
-            return v
-    return ""
+# Re-export for callers / tests that import from the adapter.
+__all__ = ["ChatGPTProvider", "resolve_mail_proxy"]
 
 
 def _redact_proxy(url: str) -> str:
@@ -135,12 +125,22 @@ class ChatGPTProvider:
                 source = get_email_source(self.email_source_name, **kw)
             except Exception as exc:
                 raise FailFastError(f"chatgpt email source unavailable: {exc}") from exc
-        elif domain and getattr(source, "name", "") == "tinyhost":
-            # Pipeline may construct TinyhostSource without domain; pin preferred host.
-            try:
-                source.forced_domain = domain  # type: ignore[attr-defined]
-            except Exception:
-                pass
+        else:
+            # Pipeline-injected source: apply mail proxy if source supports it and
+            # currently has none (never use register egress as fallback).
+            if mail_proxy and hasattr(source, "proxy"):
+                cur = str(getattr(source, "proxy", "") or "").strip()
+                if not cur:
+                    try:
+                        source.proxy = mail_proxy  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+            if domain and getattr(source, "name", "") == "tinyhost":
+                # Pipeline may construct TinyhostSource without domain; pin preferred host.
+                try:
+                    source.forced_domain = domain  # type: ignore[attr-defined]
+                except Exception:
+                    pass
 
         mailbox = source.allocate()
         email = (mailbox.address or "").strip()

@@ -35,6 +35,10 @@ class TestErrorKinds(unittest.TestCase):
         self.assertEqual(normalize_error_kind(""), "provider")
         self.assertEqual(normalize_error_kind(None), "provider")  # type: ignore[arg-type]
 
+    def test_normalize_disallowed_alias(self) -> None:
+        self.assertEqual(normalize_error_kind("disallowed"), "registration_disallowed")
+        self.assertEqual(normalize_error_kind("Disallowed"), "registration_disallowed")
+
 
 if __name__ == "__main__":
     raise SystemExit(unittest.main())
