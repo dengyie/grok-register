@@ -582,9 +582,15 @@ def test_register_cli_summary_json_surface() -> None:
     assert '"event": "register_cli_summary"' in src or '"event":"register_cli_summary"' in src
     assert "mint_method_pkce" in src
     assert "mint_method_browser" in src
+    assert "mint_method_protocol_device" in src
+    assert "cpa_allow_device_flow_fallback" in src
     assert "product_ok" in src
     # mint path counters bumped on success
     assert '_inc("mint_method_pkce")' in src or "_inc('mint_method_pkce')" in src
+    assert (
+        '_inc("mint_method_protocol_device")' in src
+        or "_inc('mint_method_protocol_device')" in src
+    )
     print("PASS register_cli SUMMARY_JSON surface")
 
 
@@ -596,6 +602,8 @@ def test_mint_writes_mint_method_extra() -> None:
     )
     assert "extra=extra_auth" in src
     assert 'updates["mint_method"]' in src
+    assert 'tokens["mint_method"] = "protocol_device"' in src
+    assert "def _should_stamp_protocol_error" in src
     print("PASS mint mint_method disk path")
 
 
@@ -837,18 +845,22 @@ def test_pkce_non_retryable_residual_classifier() -> None:
     """Empty SPA / action-id extract failures are non-retryable residuals (source + unit)."""
     import ast
 
+    from cpa_xai.pkce_mint import PKCEMintError
+
     src = (ROOT / "cpa_xai" / "mint.py").read_text(encoding="utf-8")
     assert "def _is_pkce_non_retryable" in src
     assert "mint best-effort residual → device flow" in src
     assert "allow_device_flow_fallback: bool = True" in src
     assert "empty consent SPA shell" in src or "best-effort" in src
+    assert "protocol_device" in src
     tree = ast.parse(src)
     fn = next(
         n
         for n in tree.body
         if isinstance(n, ast.FunctionDef) and n.name == "_is_pkce_non_retryable"
     )
-    ns: dict = {}
+    # Inject PKCEMintError into exec ns so isinstance checks work when present.
+    ns: dict = {"PKCEMintError": PKCEMintError}
     mod = ast.Module(body=[fn], type_ignores=[])
     ast.fix_missing_locations(mod)
     exec(compile(mod, "<mint_pkce_nr>", "exec"), ns)
@@ -860,6 +872,11 @@ def test_pkce_non_retryable_residual_classifier() -> None:
     assert is_nr("connection reset by peer") is False
     assert is_nr("") is False
     assert is_nr(None) is False
+    # Structured error preferred over message needles.
+    assert is_nr(PKCEMintError("any", code="consent_action_missing", retryable=False)) is True
+    assert is_nr(PKCEMintError("network blip", code="token_exchange", retryable=True)) is False
+    # retryable=False short-circuits regardless of code.
+    assert is_nr(PKCEMintError("x", code="token_exchange", retryable=False)) is True
     print("PASS pkce non-retryable residual classifier")
 
 

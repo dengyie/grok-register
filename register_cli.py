@@ -181,6 +181,7 @@ _stats = {
     # mint path counters (observability; not product gates)
     "mint_method_pkce": 0,
     "mint_method_protocol": 0,
+    "mint_method_protocol_device": 0,
     "mint_method_browser": 0,
     "mint_method_other": 0,
 }
@@ -926,10 +927,13 @@ def _run_mint_job(worker_id: int | str, job: dict[str, Any], config: dict) -> di
         if result.get("ok"):
             log(worker_id, f"+ CPA auth: {result.get('path')}")
             _inc("mint_success")
-            # Observability: which mint path produced tokens (pkce/protocol/browser).
+            # Observability: which mint path produced tokens.
+            # pkce | protocol (primary device) | protocol_device (PKCE residual) | browser
             mm = str(result.get("mint_method") or "").strip().lower()
             if mm in ("pkce",):
                 _inc("mint_method_pkce")
+            elif mm in ("protocol_device", "device_residual"):
+                _inc("mint_method_protocol_device")
             elif mm in ("protocol", "device"):
                 _inc("mint_method_protocol")
             elif mm in ("browser", "browser_device", "device_browser"):
@@ -1480,6 +1484,7 @@ def main() -> int:
             "remote_live_fail": int(s.get("remote_live_fail", 0) or 0),
             "mint_method_pkce": int(s.get("mint_method_pkce", 0) or 0),
             "mint_method_protocol": int(s.get("mint_method_protocol", 0) or 0),
+            "mint_method_protocol_device": int(s.get("mint_method_protocol_device", 0) or 0),
             "mint_method_browser": int(s.get("mint_method_browser", 0) or 0),
             "mint_method_other": int(s.get("mint_method_other", 0) or 0),
             "proxy_rotate_mode": str(cfg_exit.get("proxy_rotate_mode") or "off"),
@@ -1488,6 +1493,9 @@ def main() -> int:
             ),
             "cpa_probe_via": str(cfg_exit.get("cpa_probe_via") or "hybrid"),
             "cpa_protocol_flow": str(cfg_exit.get("cpa_protocol_flow") or "pkce"),
+            "cpa_allow_device_flow_fallback": bool(
+                cfg_exit.get("cpa_allow_device_flow_fallback", True)
+            ),
             "fatal": bool(_fatal_stop.is_set()),
             "fatal_reason": fatal_stop_reason() if _fatal_stop.is_set() else "",
             "product_ok": bool(exit_code == 0),

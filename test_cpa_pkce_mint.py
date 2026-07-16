@@ -168,6 +168,8 @@ def test_code_from_url_state_mismatch_and_success() -> None:
         )
     except pkce.PKCEMintError as e:
         raised = "state mismatch" in str(e).lower()
+        assert e.code == "state_mismatch"
+        assert e.retryable is True
     assert raised, "state mismatch should raise PKCEMintError"
 
     # missing code -> PKCEMintError
@@ -176,8 +178,27 @@ def test_code_from_url_state_mismatch_and_success() -> None:
         pkce._code_from_url("http://127.0.0.1:56121/callback?state=ST", "ST")
     except pkce.PKCEMintError as e:
         raised = "missing code" in str(e).lower()
+        assert e.code == "missing_code"
+        assert e.retryable is True
     assert raised, "missing code should raise PKCEMintError"
     print("PASS code_from_url_state_mismatch_and_success")
+
+
+def test_pkce_mint_error_structured_fields() -> None:
+    pkce = _load("cpa_xai.pkce_mint", ROOT / "cpa_xai" / "pkce_mint.py")
+    e = pkce.PKCEMintError(
+        "consent HTML missing submitOAuth2Consent action id",
+        code="consent_action_missing",
+        retryable=False,
+    )
+    assert e.code == "consent_action_missing"
+    assert e.retryable is False
+    assert "consent" in str(e).lower()
+    # defaults
+    e2 = pkce.PKCEMintError("generic")
+    assert e2.code == "pkce_error"
+    assert e2.retryable is True
+    print("PASS pkce_mint_error_structured_fields")
 
 
 if __name__ == "__main__":
@@ -186,4 +207,5 @@ if __name__ == "__main__":
     test_authorization_url_params()
     test_submit_consent_action_id_extraction()
     test_code_from_url_state_mismatch_and_success()
+    test_pkce_mint_error_structured_fields()
     print("\nALL PKCE UNIT TESTS PASSED")

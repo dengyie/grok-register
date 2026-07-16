@@ -26,7 +26,26 @@ LogFn = Callable[[str], None]
 
 
 class PKCEMintError(RuntimeError):
-    """PKCE protocol path failed; caller may fall back to other mint methods."""
+    """PKCE protocol path failed; caller may fall back to other mint methods.
+
+    Structured fields (preferred over message substring matching):
+      - ``code``: stable machine token (e.g. consent_action_missing, cancelled)
+      - ``retryable``: False when remint/spin will not heal (empty SPA / missing
+        action id / cancelled / missing dependency). Callers still may residual
+        to device/browser per product flags; retryable only classifies the PKCE
+        failure itself.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "pkce_error",
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code or "pkce_error").strip() or "pkce_error"
+        self.retryable = bool(retryable)
 
 
 def _noop_log(_: str) -> None:
@@ -49,7 +68,11 @@ def _session(proxy: str | None):
     try:
         from curl_cffi import requests as cf_requests
     except ImportError as e:
-        raise PKCEMintError("curl_cffi not installed; cannot run PKCE mint") from e
+        raise PKCEMintError(
+            "curl_cffi not installed; cannot run PKCE mint",
+            code="dependency",
+            retryable=False,
+        ) from e
 
     kwargs: dict[str, Any] = {"impersonate": "chrome131"}
     resolved = resolve_proxy(proxy)
@@ -61,7 +84,7 @@ def _session(proxy: str | None):
 def _set_sso_cookie(session: Any, sso_cookie: str) -> None:
     sso_cookie = (sso_cookie or "").strip()
     if not sso_cookie:
-        raise PKCEMintError("empty sso cookie")
+        raise PKCEMintError("empty sso cookie", code="empty_sso", retryable=False)
     for domain in ("accounts.x.ai", ".accounts.x.ai", ".x.ai", "auth.x.ai"):
         try:
             session.cookies.set("sso", sso_cookie, domain=domain, path="/")
@@ -146,10 +169,18 @@ def _build_authorization_url(
 def _code_from_url(url: str, state: str) -> str:
     qs = parse_qs(urlparse(url).query)
     if (qs.get("state") or [""])[0] != state:
-        raise PKCEMintError("authorization failed: state mismatch")
+        raise PKCEMintError(
+            "authorization failed: state mismatch",
+            code="state_mismatch",
+            retryable=True,
+        )
     code = (qs.get("code") or [""])[0]
     if not code:
-        raise PKCEMintError(f"authorization failed: missing code in {url[:200]}")
+        raise PKCEMintError(
+            f"authorization failed: missing code in {url[:200]}",
+            code="missing_code",
+            retryable=True,
+        )
     return code
 
 
@@ -226,7 +257,11 @@ def _create_cookie_setter_link(session: Any, success_url: str) -> str:
     urls = _extract_urls_from_fields(fields)
     cookie_setter = next((u for u in urls if "set-cookie" in u), None) or (urls[0] if urls else "")
     if grpc_status not in (None, 0) or not cookie_setter:
-        raise PKCEMintError(grpc_msg or "CreateCookieSetterLink failed")
+        raise PKCEMintError(
+            grpc_msg or "CreateCookieSetterLink failed",
+            code="cookie_setter",
+            retryable=True,
+        )
     return cookie_setter
 
 
@@ -342,14 +377,22 @@ def _submit_consent(
             raise PKCEMintError(
                 "submitOAuth2Consent failed HTTP 404: Server action not found "
                 "(consent HTML missing submitOAuth2Consent action id; "
-                "stale hardcoded fallback rejected by Next.js)"
+                "stale hardcoded fallback rejected by Next.js)",
+                code="consent_action_missing",
+                retryable=False,
             )
         raise PKCEMintError(
             f"submitOAuth2Consent failed HTTP {resp.status_code}: {text[:300]} "
-            f"(action_id={action_id[:12]}… extracted from page)"
+            f"(action_id={action_id[:12]}… extracted from page)",
+            code="consent_action_rejected",
+            retryable=False,
         )
 
-    raise PKCEMintError(f"submitOAuth2Consent failed HTTP {resp.status_code}: {text[:300]}")
+    raise PKCEMintError(
+        f"submitOAuth2Consent failed HTTP {resp.status_code}: {text[:300]}",
+        code="consent_submit",
+        retryable=True,
+    )
 
 
 def _exchange_code_for_token(
@@ -373,7 +416,11 @@ def _exchange_code_for_token(
         timeout=45,
     )
     if resp.status_code != 200:
-        raise PKCEMintError(f"token exchange failed HTTP {resp.status_code}: {resp.text[:300]}")
+        raise PKCEMintError(
+            f"token exchange failed HTTP {resp.status_code}: {resp.text[:300]}",
+            code="token_exchange",
+            retryable=True,
+        )
     token = resp.json()
     if "expires_in" in token and "expires_at" not in token:
         try:
@@ -381,7 +428,11 @@ def _exchange_code_for_token(
         except Exception:
             pass
     if not token.get("access_token") or not token.get("refresh_token"):
-        raise PKCEMintError("token exchange response missing access_token/refresh_token")
+        raise PKCEMintError(
+            "token exchange response missing access_token/refresh_token",
+            code="token_exchange",
+            retryable=True,
+        )
     return token
 
 
@@ -433,7 +484,7 @@ def mint_with_sso_pkce(
     )
 
     if cancel and cancel():
-        raise PKCEMintError("cancelled")
+        raise PKCEMintError("cancelled", code="cancelled", retryable=False)
     session.get(auth_url, allow_redirects=False, timeout=timeout)
     setter = _create_cookie_setter_link(session, consent_url)
     log("pkce cookie-setter link ok")
@@ -441,7 +492,7 @@ def mint_with_sso_pkce(
     current = setter
     for _ in range(6):
         if cancel and cancel():
-            raise PKCEMintError("cancelled")
+            raise PKCEMintError("cancelled", code="cancelled", retryable=False)
         if "code=" in current and (current.startswith(redirect_uri) or "127.0.0.1" in current):
             code = _code_from_url(current, state)
             break
@@ -458,7 +509,11 @@ def mint_with_sso_pkce(
 
     if "code" not in locals():
         if "consent" not in current:
-            raise PKCEMintError(f"cookie-setter did not reach consent/code: {current[:180]}")
+            raise PKCEMintError(
+                f"cookie-setter did not reach consent/code: {current[:180]}",
+                code="cookie_setter_path",
+                retryable=True,
+            )
         page = session.get(current, allow_redirects=False, timeout=timeout)
         loc = page.headers.get("location") or page.headers.get("Location") or ""
         if loc and "code=" in loc:

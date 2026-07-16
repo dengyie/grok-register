@@ -27,13 +27,29 @@ def _noop(_: str) -> None:
     return None
 
 
-def _is_pkce_non_retryable(err: str | None) -> bool:
+def _is_pkce_non_retryable(err: str | Exception | None) -> bool:
     """True when PKCE failed on consent HTML/action-id extract (empty SPA shell).
 
-    These are best-effort protocol residuals — remint/spin will not heal them;
-    fall through to device/browser per flags. Distinct from transient network.
+    Prefer structured ``PKCEMintError.retryable`` / ``code``; fall back to
+    message needles for legacy string errors. These residuals are not healed by
+    remint/spin — fall through to device/browser per flags. Distinct from
+    transient network.
     """
-    s = (err or "").lower()
+    if isinstance(err, PKCEMintError):
+        if err.retryable is False:
+            return True
+        code = str(getattr(err, "code", "") or "").strip().lower()
+        if code in {
+            "consent_action_missing",
+            "consent_action_rejected",
+            "dependency",
+            "empty_sso",
+            "cancelled",
+        }:
+            return True
+        # Structured True/unknown → use message needles below for residual classes
+        err = str(err)
+    s = (str(err) if err is not None else "").lower()
     if not s:
         return False
     needles = (
@@ -46,6 +62,16 @@ def _is_pkce_non_retryable(err: str | None) -> bool:
         "empty spa",
     )
     return any(n in s for n in needles)
+
+
+def _should_stamp_protocol_error(mint_method: str) -> bool:
+    """Stamp prior PKCE/device failure reason when residual path produced tokens.
+
+    Pure pkce/protocol primary success should not carry a protocol_error.
+    Residuals (protocol_device, browser after protocol fail) should.
+    """
+    mm = (mint_method or "").strip().lower()
+    return mm not in ("pkce", "protocol")
 
 
 def mint_and_export(
@@ -80,16 +106,26 @@ def mint_and_export(
     log: LogFn | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Full pipeline: (protocol PKCE | device-flow |) browser device-auth → write CPA → probe.
+    """Full pipeline: (protocol PKCE | device residual | browser) → write CPA → probe.
 
     Protocol path (curl_cffi + sso cookie) is tried first when prefer_protocol
     and an sso cookie is available. ``protocol_flow`` selects the HTTP grant:
-    ``pkce`` (default, authorization-code — produces chat-usable tokens) or
-    ``device`` (legacy device-code — known to yield /models-ok-but-chat-403).
+    ``pkce`` (default, authorization-code) or ``device`` (legacy device-code —
+    known to yield /models-ok-but-chat-403).
     ``allow_device_flow_fallback`` (product default True) lets failed PKCE fall
     through to device flow for local disk residual; device tokens are often
     chat-denied — inject still requires chat_ok / entitlement hard gate.
     On protocol failure, falls back to browser mint unless protocol_only=True.
+
+    ``mint_method`` taxonomy (disk + SUMMARY observability):
+      - ``pkce`` — SSO HTTP authorization-code success
+      - ``protocol`` — primary device flow (``protocol_flow=device``)
+      - ``protocol_device`` — PKCE failed then device residual succeeded
+      - ``browser`` — browser device-auth residual
+
+    Dual stamp path: auth is written at create with ``mint_method`` /
+    ``protocol_error`` via ``extra=``; after probe, ``stamp_auth_chat_fields``
+    re-merges the same observability fields so probe patches never drop them.
 
     priority: CPA auth-file routing weight (CLIProxyAPI). Default 1000.
 
@@ -102,7 +138,7 @@ def mint_and_export(
 
     Returns dict with keys: ok, path, email, probe_*, error?, mint_method?,
     entitlement_denied?, chat_retryable?, chat_ok?, probe_gate_via?,
-    probe_via_cpa_ok?, probe_policy_reason?.
+    probe_via_cpa_ok?, probe_policy_reason?, protocol_error?.
 
     Product rule: when probe_chat=True, models-only success is not enough —
     free Build chat must pass /v1/responses. 403 permission-denied is
@@ -153,10 +189,12 @@ def mint_and_export(
                 log("mint protocol PKCE SUCCESS")
             except PKCEMintError as e:
                 protocol_err = str(e)
-                non_retry = _is_pkce_non_retryable(protocol_err)
+                non_retry = _is_pkce_non_retryable(e)
+                code = str(getattr(e, "code", "") or "").strip()
                 log(
                     f"mint protocol PKCE failed"
                     f"{' (non-retryable consent/action extract)' if non_retry else ''}"
+                    f"{f' code={code}' if code else ''}"
                     f": {e}"
                 )
                 if allow_device_flow_fallback:
@@ -174,6 +212,8 @@ def mint_and_export(
                             "email": email,
                             "error": f"pkce protocol failed: {protocol_err}",
                             "mint_method": "pkce",
+                            "pkce_error_code": code or None,
+                            "pkce_retryable": bool(e.retryable),
                         }
             except Exception as e:  # noqa: BLE001
                 protocol_err = str(e)
@@ -190,6 +230,7 @@ def mint_and_export(
                         }
 
         if tokens is None and (flow == "device" or allow_device_flow_fallback):
+            pkce_attempted = flow == "pkce" and bool(protocol_err)
             if flow == "device":
                 log("mint try protocol (SSO HTTP device flow)")
             try:
@@ -201,7 +242,14 @@ def mint_and_export(
                     log=log,
                     cancel=cancel,
                 )
-                log("mint protocol device-flow SUCCESS")
+                # Taxonomy: primary device vs PKCE residual device.
+                if pkce_attempted:
+                    tokens["mint_method"] = "protocol_device"
+                    tokens["protocol_error"] = str(protocol_err)[:500]
+                    log("mint protocol device residual SUCCESS (mint_method=protocol_device)")
+                else:
+                    tokens["mint_method"] = "protocol"
+                    log("mint protocol device-flow SUCCESS")
             except ProtocolMintError as e:
                 device_err = str(e)
                 log(f"mint protocol device-flow failed: {e}")
@@ -286,9 +334,13 @@ def mint_and_export(
         pri = 1000
     mint_method = str(tokens.get("mint_method") or "browser").strip() or "browser"
     extra_auth: dict[str, Any] = {"mint_method": mint_method}
-    if protocol_err and mint_method not in ("protocol", "pkce"):
-        # protocol path failed then fell back (device/browser) — keep short reason on disk
+    # Stamp prior protocol failure reason on residual success paths only
+    # (protocol_device / browser after protocol fail). Pure pkce/protocol keep clean.
+    if protocol_err and _should_stamp_protocol_error(mint_method):
         extra_auth["protocol_error"] = str(protocol_err)[:500]
+    # Device residual may already carry protocol_error on tokens dict.
+    if tokens.get("protocol_error") and "protocol_error" not in extra_auth:
+        extra_auth["protocol_error"] = str(tokens.get("protocol_error"))[:500]
     payload = build_cpa_xai_auth(
         email=email,
         access_token=tokens["access_token"],
@@ -312,8 +364,10 @@ def mint_and_export(
         "mint_method": mint_method,
         "priority": pri,
     }
-    if protocol_err and result["mint_method"] not in ("protocol", "pkce"):
+    if protocol_err and _should_stamp_protocol_error(mint_method):
         result["protocol_error"] = str(protocol_err)[:500]
+    elif tokens.get("protocol_error"):
+        result["protocol_error"] = str(tokens.get("protocol_error"))[:500]
 
     # Resolve product gate vs optional CPA observational smoke.
     # Auth write always uses upstream base_url (cli-chat-proxy), never CPA public host.
@@ -428,9 +482,9 @@ def mint_and_export(
             result["probe_cpa_smoke_error"] = str(e)
             log(f"cpa smoke failed: {e}")
 
-    # Stamp local auth so remint/ops can skip denied and re-probe transient.
-    # Also re-stamps mint_method/protocol_error (from result) so mid-run probe
-    # updates never drop the mint path observability written at auth create.
+    # Dual stamp: create-time write already put mint_method/protocol_error via
+    # extra_auth. Re-stamp after probe so chat fields never drop mint observability
+    # (stamp_auth_chat_fields merges result + updates; both carry mint_method).
     if result.get("path"):
         try:
             updates = {

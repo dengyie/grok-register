@@ -250,6 +250,9 @@ def build_chat_stamp_from_result(result: dict[str, Any] | None) -> dict[str, Any
         stamp["chat_error_code"] = chat_error_code
 
     # Mint path observability (not product gates): which grant produced tokens.
+    # Dual stamp contract: mint.py writes mint_method/protocol_error at create
+    # (build_cpa_xai_auth extra=) and again after probe via stamp_auth_chat_fields
+    # so chat patches never drop residual-path labels (protocol_device, etc.).
     mint_method = str(r.get("mint_method") or "").strip()
     if mint_method:
         stamp["mint_method"] = mint_method
