@@ -195,8 +195,8 @@ def evaluate_remote_inject_gate(
             pass
 
     require_chat = _config_bool(cfg.get("cpa_remote_inject_require_chat_ok"), default=True)
-    probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=True)
-    # Free Build product rule: live/inventory inject always requires chat_ok.
+    # Free Build product rule: live/inventory inject always requires chat_ok is True.
+    # Independent of cpa_probe_chat — turning probes off must not unlock inject.
     # cpa_remote_inject_require_chat_ok=false is a dangerous misconfig — refuse
     # inject instead of soft-allowing chat_gate_disabled (no live bypass).
     if not require_chat:
@@ -228,7 +228,7 @@ def evaluate_remote_inject_gate(
             "entitlement_denied": False,
             "usable": False,
         }
-    if probe_chat and r.get("chat_ok") is not True:
+    if r.get("chat_ok") is not True:
         reason = str(r.get("fail_reason") or r.get("import_gate") or "chat_not_ok")
         if reason in ("", "None"):
             reason = "chat_not_ok"
@@ -747,15 +747,16 @@ def finalize_probe_and_gate(
 
     Table (probe_chat default on, probe_chat_required default on):
       entitlement_denied     → ok=False, non_retryable, skip inject (caller)
-      chat transient/other   → ok=False when required; keep chat_retryable
+      chat transient/other   → ok=False; keep chat_retryable when transient
       chat fail + !required  → still hard-fail product ok (no soft-pass free Build)
-      models miss + !chat    → legacy soft-pass when cpa_probe_required=false
+      models miss            → stays ok=False (no models-only soft-pass; file may exist)
     """
     log = log_callback or (lambda _m: None)
     cfg = cfg or {}
     probe_chat = _config_bool(cfg.get("cpa_probe_chat"), default=True)
     probe_chat_required = _config_bool(cfg.get("cpa_probe_chat_required"), default=True)
-    probe_required = _config_bool(cfg.get("cpa_probe_required"), default=False)
+    # cpa_probe_required retained for config compatibility; never re-opens soft-pass.
+    _ = _config_bool(cfg.get("cpa_probe_required"), default=False)
 
     err_s = str(result.get("error") or "")
     is_models_only_miss = err_s.startswith("token ok but grok-4.5 not listed")
@@ -798,18 +799,19 @@ def finalize_probe_and_gate(
         )
         return result
 
-    # Models-only soft-pass (legacy): only when chat probe is off.
-    if (
-        not result.get("ok")
-        and result.get("path")
-        and is_models_only_miss
-        and not is_chat_fail
-        and not probe_chat
-        and not probe_required
-    ):
-        result["ok"] = True
-        result["probe_warning"] = result.pop("error", "probe failed")
-        log(f"[cpa] probe warning ignored (file already written): {result.get('probe_warning')}")
+    # Fail-close: models-only miss never soft-passes product ok (even if file written
+    # and cpa_probe_required=false / probe_chat=false). Local auth may remain for ops;
+    # inject + product_batch_success still require chat_ok.
+    if not result.get("ok") and result.get("path") and is_models_only_miss:
+        result["ok"] = False
+        result["chat_ok"] = False
+        result["usable"] = False
+        result["skip_remote_inject"] = True
+        result.setdefault("fail_reason", "models_missing_grok_45")
+        log(
+            f"[cpa] models miss hard-fail for {email or result.get('email')}: "
+            f"{result.get('error')} (no soft-pass; file kept, inject skipped)"
+        )
         return result
 
     if not result.get("ok") and is_chat_fail and probe_chat:

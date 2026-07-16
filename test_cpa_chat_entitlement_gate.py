@@ -435,6 +435,31 @@ def test_finalize_probe_and_gate_behavior() -> None:
     assert out3.get("chat_ok") is False
     assert "probe_chat_warning" not in out3
 
+    # models-only miss never soft-passes, even when probe_chat/probe_required off
+    r_models = {
+        "ok": False,
+        "path": "/tmp/x-models.json",
+        "email": "m@e.com",
+        "token_ok": True,
+        "error": "token ok but grok-4.5 not listed",
+        "fail_reason": "models_missing_grok_45",
+        "chat_ok": False,
+    }
+    out_models = exp.finalize_probe_and_gate(
+        r_models,
+        {
+            "cpa_probe_chat": False,
+            "cpa_probe_required": False,
+            "cpa_probe_chat_required": False,
+        },
+        email="m@e.com",
+    )
+    assert out_models["ok"] is False
+    assert out_models.get("skip_remote_inject") is True
+    assert out_models.get("chat_ok") is False
+    assert out_models.get("fail_reason") == "models_missing_grok_45"
+    assert "probe_warning" not in out_models
+
     # apply_multi_remote_inject no-ops when ok false
     r4 = {
         "ok": False,
@@ -1239,6 +1264,121 @@ def test_inject_ignores_probe_via_cpa_ok_without_chat_ok() -> None:
     print("PASS inject ignores probe_via_cpa_ok without chat_ok")
 
 
+def test_mint_token_ok_honesty() -> None:
+    """token_ok after write; product ok only after probes (or probes off)."""
+    from cpa_xai import mint as mint_mod
+    from cpa_xai.probe import classify_chat_probe
+
+    orig = {
+        "pkce": mint_mod.mint_with_sso_pkce,
+        "models": mint_mod.probe_models,
+        "chat": mint_mod.probe_chat_with_retries,
+    }
+
+    def fake_pkce(**_kw):  # noqa: ANN001
+        return {
+            "access_token": "at-honesty",
+            "refresh_token": "rt-honesty",
+            "id_token": "id-honesty",
+            "expires_in": 3600,
+            "mint_method": "pkce",
+        }
+
+    def fake_models_ok(_token, **_kw):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": 200,
+            "has_grok_45": True,
+            "model_ids": ["grok-4.5"],
+            "transport_mode": "direct",
+        }
+
+    def fake_models_miss(_token, **_kw):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": 200,
+            "has_grok_45": False,
+            "model_ids": ["grok-3"],
+            "transport_mode": "direct",
+        }
+
+    def fake_chat_ok(_token, **_kw):  # noqa: ANN001
+        out = {
+            "ok": True,
+            "status": 200,
+            "text": "MINT_OK",
+            "model": "grok-4.5",
+            "error_code": "",
+        }
+        out.update(classify_chat_probe(out))
+        return out
+
+    mint_mod.mint_with_sso_pkce = fake_pkce  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            # probes off: token write alone → product ok + token_ok
+            mint_mod.probe_models = fake_models_ok  # type: ignore[assignment]
+            mint_mod.probe_chat_with_retries = fake_chat_ok  # type: ignore[assignment]
+            r_off = mint_mod.mint_and_export(
+                email="off@ex.com",
+                password="pw",
+                auth_dir=td,
+                sso="sso-off",
+                prefer_protocol=True,
+                protocol_flow="pkce",
+                allow_device_flow_fallback=False,
+                probe=False,
+                probe_chat=False,
+                log=lambda _m: None,
+            )
+            assert r_off.get("token_ok") is True, r_off
+            assert r_off.get("ok") is True, r_off
+            assert r_off.get("path")
+
+            # models miss, chat off → token_ok True, product ok False
+            mint_mod.probe_models = fake_models_miss  # type: ignore[assignment]
+            r_miss = mint_mod.mint_and_export(
+                email="miss@ex.com",
+                password="pw",
+                auth_dir=td,
+                sso="sso-miss",
+                prefer_protocol=True,
+                protocol_flow="pkce",
+                allow_device_flow_fallback=False,
+                probe=True,
+                probe_chat=False,
+                log=lambda _m: None,
+            )
+            assert r_miss.get("token_ok") is True, r_miss
+            assert r_miss.get("ok") is False, r_miss
+            assert "grok-4.5 not listed" in str(r_miss.get("error") or "")
+
+            # chat ok path → token_ok + product ok
+            mint_mod.probe_models = fake_models_ok  # type: ignore[assignment]
+            mint_mod.probe_chat_with_retries = fake_chat_ok  # type: ignore[assignment]
+            r_ok = mint_mod.mint_and_export(
+                email="ok@ex.com",
+                password="pw",
+                auth_dir=td,
+                sso="sso-ok",
+                prefer_protocol=True,
+                protocol_flow="pkce",
+                allow_device_flow_fallback=False,
+                probe=True,
+                probe_chat=True,
+                probe_via="direct",
+                log=lambda _m: None,
+            )
+            assert r_ok.get("token_ok") is True, r_ok
+            assert r_ok.get("ok") is True, r_ok
+            assert r_ok.get("chat_ok") is True, r_ok
+    finally:
+        mint_mod.mint_with_sso_pkce = orig["pkce"]  # type: ignore[assignment]
+        mint_mod.probe_models = orig["models"]  # type: ignore[assignment]
+        mint_mod.probe_chat_with_retries = orig["chat"]  # type: ignore[assignment]
+    print("PASS mint token_ok honesty")
+
+
 def main() -> int:
     test_classify_chat_probe()
     test_probe_mini_response_attaches_classification()
@@ -1269,6 +1409,7 @@ def main() -> int:
     test_mint_cancel_short_circuits_residual()
     test_mint_protocol_only_fail_labels_protocol_device()
     test_inject_ignores_probe_via_cpa_ok_without_chat_ok()
+    test_mint_token_ok_honesty()
     print("\nALL PASS (cpa chat entitlement gate)")
     return 0
 

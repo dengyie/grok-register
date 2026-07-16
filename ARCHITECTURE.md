@@ -158,7 +158,8 @@ New products: implement adapter → register factory → optional verifier → d
 | Contract | Enforcement |
 |----------|-------------|
 | API key shape | `register_core.util.secrets` — single source; adapter/verify/inject/redact must agree |
-| Grok product-ready | this-run **SSO** required (`ok=False` if email-only / pending) |
+| Grok product-ready | this-run **SSO** required (`ok=False` if email-only / pending); free Build inject/product exit requires **`chat_ok is True`** (models-only / token write alone never soft-pass inject) |
+| Mint honesty | `token_ok=True` after OIDC write; product `ok` only after required probes resolve (or all probes off) |
 | MiMo product-ready | this-run **secret** via RESULT_JSON or file delta (never historical tail) |
 | CPA OpenAI inject | no default prod path; `--config`/`CPA_CONFIG` + prod requires `--i-understand-production` |
 | Deploy path | `GROK_CODE_ROOT` or first existing `/personal/{ai-register-machine,register-machine,grok-register}` |

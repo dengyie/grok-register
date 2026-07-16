@@ -96,6 +96,44 @@ def test_inject_gate_refuses_require_chat_false() -> None:
     print("PASS inject gate refuses require_chat=false")
 
 
+def test_inject_gate_requires_chat_ok_even_when_probe_chat_off() -> None:
+    """cpa_probe_chat=false must not unlock inject without chat_ok."""
+    mod = _load_cpa_export()
+    denied = mod.evaluate_remote_inject_gate(
+        {
+            "path": "/tmp/x.json",
+            "ok": True,
+            "token_ok": True,
+            "chat_ok": False,
+            "usable": False,
+            "fail_reason": "models_missing_grok_45",
+        },
+        {
+            "cpa_remote_inject_require_chat_ok": True,
+            "cpa_probe_chat": False,
+        },
+    )
+    assert denied.get("allow") is False
+    assert denied.get("chat_ok") is not True
+    assert denied.get("reason") not in ("chat_ok", None, "")
+
+    allowed = mod.evaluate_remote_inject_gate(
+        {
+            "path": "/tmp/x.json",
+            "chat_ok": True,
+            "usable": True,
+            "entitlement_denied": False,
+        },
+        {
+            "cpa_remote_inject_require_chat_ok": True,
+            "cpa_probe_chat": False,
+        },
+    )
+    assert allowed.get("allow") is True
+    assert allowed.get("reason") == "chat_ok"
+    print("PASS inject gate requires chat_ok even when probe_chat off")
+
+
 def test_config_example_ssh_and_soft_flags() -> None:
     src = (ROOT / "config.example.json").read_text(encoding="utf-8")
     assert '"cpa_remote_ssh_identity"' in src
@@ -113,6 +151,7 @@ def main() -> int:
     test_cli_remote_stats()
     test_ssh_hardening_markers()
     test_inject_gate_refuses_require_chat_false()
+    test_inject_gate_requires_chat_ok_even_when_probe_chat_off()
     test_config_example_ssh_and_soft_flags()
     print("\nALL PASS")
     return 0

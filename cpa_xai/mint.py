@@ -174,9 +174,14 @@ def mint_and_export(
       - Auth file ``base_url`` remains upstream cli-chat-proxy (argument ``base_url``),
         never the public CPA OpenAI base.
 
-    Returns dict with keys: ok, path, email, probe_*, error?, mint_method?,
-    entitlement_denied?, chat_retryable?, chat_ok?, probe_gate_via?,
-    probe_via_cpa_ok?, probe_policy_reason?, protocol_error?.
+    Returns dict with keys: ok, token_ok?, path, email, probe_*, error?,
+    mint_method?, entitlement_denied?, chat_retryable?, chat_ok?,
+    probe_gate_via?, probe_via_cpa_ok?, probe_policy_reason?, protocol_error?.
+
+    Honesty: ``token_ok=True`` means OIDC tokens were written. Product ``ok``
+    is True only after required probes succeed (or when all probes are off,
+    where token write alone is the success criterion). Never claim product
+    ok before probe resolution when probes are enabled.
 
     Product rule: when probe_chat=True, models-only success is not enough —
     free Build chat must pass /v1/responses. 403 permission-denied is
@@ -471,8 +476,14 @@ def mint_and_export(
     path = write_cpa_xai_auth(auth_dir, payload)
     log(f"wrote {path} priority={pri} mint_method={mint_method}")
 
+    # Chat gate implies models probe (need has_grok_45 before /responses).
+    run_models = bool(probe or probe_chat)
+    # Honesty: token write is always token_ok. Product ok is True only when
+    # probes are disabled (token write alone is the success criterion) or after
+    # the probe path sets ok. Never claim product ok before probe resolution.
     result: dict[str, Any] = {
-        "ok": True,
+        "ok": not run_models,
+        "token_ok": True,
         "email": email,
         "path": str(path),
         "user_code": tokens.get("user_code"),
@@ -517,8 +528,6 @@ def mint_and_export(
         pin_header=probe_pin_header or "X-CPA-Credential",
     )
 
-    # Chat gate implies models probe (need has_grok_45 before /responses).
-    run_models = bool(probe or probe_chat)
     if run_models:
         pr = probe_models(
             tokens["access_token"],
@@ -546,8 +555,8 @@ def mint_and_export(
                 result["error"] = "token ok but grok-4.5 not listed"
                 result["chat_ok"] = False
                 result["usable"] = False
-
-        if probe_chat and pr.get("has_grok_45"):
+                result["fail_reason"] = "models_missing_grok_45"
+        elif probe_chat:
             ch = probe_chat_with_retries(
                 tokens["access_token"],
                 base_url=base_url,
@@ -561,6 +570,9 @@ def mint_and_export(
                 log(
                     "FAIL-FAST: chat entitlement_denied — skip remint/retry for this account"
                 )
+        else:
+            # models-only probe path (chat off): product ok only when grok-4.5 listed
+            result["ok"] = True
 
     # Observational CPA mid-tier smoke: never replaces chat_ok for inject.
     if (

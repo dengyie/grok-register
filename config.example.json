@@ -233,7 +233,7 @@
   "cpa_mint_required": false,
   "// cpa_probe_after_write": "写出后探测 /v1/models 是否含 grok-4.5",
   "cpa_probe_after_write": true,
-  "// cpa_probe_required": "true=探测不到 grok-4.5 时把导出视为失败；false=文件已写出则只记录警告（chat 探针开启时 models-only 软通过无效）",
+  "// cpa_probe_required": "兼容字段。models 未列出 grok-4.5 时产品 ok 恒失败（无 soft-pass）；文件可保留但 inject/product_batch 仍要求 chat_ok。不再用 false 软通过 free Build。",
   "cpa_probe_required": false,
   "// cpa_probe_chat": "写出后再打一发最小 /v1/responses；默认开——models 200 但 chat 403 不算可用 free Build",
   "cpa_probe_chat": true,
