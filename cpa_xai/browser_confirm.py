@@ -336,14 +336,15 @@ def create_standalone_page(
     proxy: str | None = None,
     headless: bool = False,
     log: LogFn | None = None,
-    max_attempts: int = 3,
+    max_attempts: int = 4,
 ) -> tuple[Any, Any]:
     """Start a mint Chromium with process-wide start lock + retries.
 
     Aligns reliability with register ``start_browser`` (4 retries): concurrent
     auto_port races and leftover PPID=1 Drission processes cause
     ``The browser connection fails``; we serialize boot and clean orphans
-    between attempts.
+    between attempts. Default max_attempts=4 matches start_browser first-start
+    flake recovery (smoke 2026-07-16: start fail 1/4 then success).
     """
     log = log or _noop_log
     try:
@@ -362,7 +363,7 @@ def create_standalone_page(
         def chromium_start_lock():  # type: ignore
             return _fallback_start_lock
 
-    attempts = max(1, min(6, int(max_attempts or 3)))
+    attempts = max(1, min(6, int(max_attempts or 4)))
     last_exc: BaseException | None = None
     for attempt in range(1, attempts + 1):
         bridge = None

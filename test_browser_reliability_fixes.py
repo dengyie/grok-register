@@ -50,6 +50,9 @@ def test_create_standalone_retries_and_lock() -> None:
     src = (ROOT / "cpa_xai" / "browser_confirm.py").read_text(encoding="utf-8")
     assert "chromium_start_lock" in src
     assert "max_attempts" in src
+    # Default max_attempts must match start_browser (4) — first-start flake recovery.
+    assert "max_attempts: int = 4" in src
+    assert "max_attempts or 4" in src or "int(max_attempts or 4)" in src
     assert "cleanup_orphan_drission_chromes" in src
     assert "SIGKILL" in src or "signal.SIGKILL" in src
     assert "standalone chromium start failed" in src
