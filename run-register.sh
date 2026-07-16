@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Usage: bash run-register.sh [count] [threads]
 # Env: GROK_NODE, GROK_CONFIG, HEADLESS_FLAG=--headless|--no-headless
+#      SKIP_CLASH_PREFLIGHT=1  skip leaf health probe (debug only)
 # Exit code: register_cli.py product exit (0 product-ok free Build; 1 product-fail; 2 fatal).
 # Do not mask with `| tee` alone — use PIPESTATUS[0] for the python/xvfb side.
+#
+# Grok production egress (pxed): Clash mixed-port :7897 after preflight-clash-nodes.sh.
+# Monorepo nodes.json list|auto is a separate backend — see ARCHITECTURE.md.
 set -u
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
@@ -10,13 +14,16 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
 export NO_PROXY=127.0.0.1,localhost
 export no_proxy=127.0.0.1,localhost
 
-# start clash (mac-merged default on pxed)
+# Preflight: probe all Clash leaves, strip dead from register groups, restart mihomo.
+# Skip with SKIP_CLASH_PREFLIGHT=1 (e.g. dry local debug / non-Clash host).
 export GROK_NODE="${GROK_NODE:-GVPS-AnyTLS-googlevps}"
-if [[ -x "$ROOT/start-clash-for-grok.sh" ]]; then
+if [[ "${SKIP_CLASH_PREFLIGHT:-0}" != "1" && -x "$ROOT/preflight-clash-nodes.sh" ]]; then
+  bash "$ROOT/preflight-clash-nodes.sh" || exit 1
+elif [[ -x "$ROOT/start-clash-for-grok.sh" ]]; then
   bash "$ROOT/start-clash-for-grok.sh" || exit 1
 fi
 
-# load .env line-safe when present
+# load .env line-safe when present (never `source` whole file — secrets/export side effects)
 if [[ -f "$ROOT/.env" ]]; then
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in

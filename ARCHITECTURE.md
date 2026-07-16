@@ -132,9 +132,24 @@ Dead nodes are quarantined after `REGISTER_NODES_MAX_FAIL`. VLESS/SS/… need `e
 | Concern | Authority path |
 |---------|----------------|
 | Grok signup + mint + chat gate | `./register.sh grok` → `register_cli.py` / `grok_register_ttk.py` + `cpa_xai/` |
+| **Grok production egress (pxed)** | **Clash mixed-port `127.0.0.1:7897`** via `run-register.sh` → `preflight-clash-nodes.sh` → `scripts/probe_clash_nodes.py` → `start-clash-for-grok.sh` |
+| Grok catalog egress (list\|auto) | monorepo `nodes.json` + `preflight_nodes_for_register` (separate backend; not the pxed Grok default) |
 | MiMo API key | `./register.sh mimo` → `providers/mimo/run-register.sh` |
 | Layered orchestration only | `./register.sh core` → `python -m register_core` |
 | CPA OpenAI inject (MiMo) | `providers/mimo/inject_cpa_openai.py` (local; never silent prod write) |
+
+### Dual egress backends (do not confuse)
+
+Two leaf-health preflights exist; both strip dead nodes before batch work, **backends differ**:
+
+| Backend | When | Entry | Probe | Healthy gate |
+|---------|------|-------|-------|--------------|
+| **Clash mixed-port (pxed Grok production)** | `bash run-register.sh` on host with mihomo | `preflight-clash-nodes.sh` | mihomo controller delay API (`scripts/probe_clash_nodes.py`) | rewrites register groups (`🎯Grok注册` …) to healthy-only, pins `GROK_NODE`, restarts mihomo on `:7897` |
+| **nodes.json list\|auto** | `REGISTER_EGRESS=list\|auto` / ChatGPT / self-controlled `PROXY_LIST` path | `util/proxy.preflight_nodes_for_register` | HTTP probe of catalog URLs | healthy-only pool into rotation; zero healthy → FailFastError |
+
+- `SKIP_CLASH_PREFLIGHT=1` skips the Clash path (local debug / non-Clash host only).
+- Operator `PROXY_LIST` owns the pool and skips catalog probe unless `force_nodes_preflight=1` (see product contract above).
+- Never treat Clash group rewrite as `nodes.json` authority, or vice versa.
 
 Root-level Grok modules (`register_cli.py`, `grok_register_ttk.py`, `cpa_xai/`, `proxy_*`) remain **runtime-valid** until a dedicated migrate milestone. `providers/grok/` documents the target package shape without breaking imports.
 

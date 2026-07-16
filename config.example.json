@@ -266,7 +266,7 @@
   "cpa_protocol_poll_timeout_sec": 90,
   "// cpa_protocol_flow": "协议路径 OAuth grant：pkce（authorization-code，best-effort；consent SPA 空壳/action-id 缺失时非可重试 residual→device/browser）| device（device-code，已知 /models ok 但 chat 403）",
   "cpa_protocol_flow": "pkce",
-  "// cpa_allow_device_flow_fallback": "PKCE 失败时是否回退 device flow 完成本地落盘（产品默认 true，与 mint.py 一致）。device token 常 chat 403；仅落盘不注入。entitlement_denied=硬门闩：不 remint 空转、不 soft-inject live/tebi。chat 403 属账号 entitlement（Manual-required），非代码可解。",
+  "// cpa_allow_device_flow_fallback": "仅控制「HTTP device residual」：protocol/PKCE 失败后是否走 oauth device-code HTTP 完成本地落盘（产品默认 true，与 mint.py 一致）。false=跳过 HTTP device residual，仍可走 browser residual（cpa_protocol_only=false 时）。不关闭 browser。device token 常 chat 403；仅落盘不注入。entitlement_denied=硬门闩：不 remint 空转、不 soft-inject live/tebi。chat 403 属账号 entitlement（Manual-required），非代码可解。",
   "cpa_allow_device_flow_fallback": true,
   "// cpa_mint_cookie_inject": "注册成功后把浏览器 cookie 注入 mint 浏览器，尽量跳过二次登录（失败仍回退邮箱密码）",
   "cpa_mint_cookie_inject": true,

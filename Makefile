@@ -22,6 +22,9 @@ test-unit:
 
 syntax:
 	bash -n register.sh
+	bash -n run-register.sh
+	bash -n preflight-clash-nodes.sh
+	bash -n start-clash-for-grok.sh
 	bash -n providers/mimo/run-register.sh
 	bash -n providers/mimo/smoke.sh
 	bash -n providers/_template/run-register.sh
@@ -30,7 +33,8 @@ syntax:
 	$(PY) -m py_compile register_cli.py register_core/cli.py register_core/pipeline.py \
 	  register_core/providers/registry.py register_core/util/secrets.py \
 	  register_core/util/process.py register_core/verify/mimo_tts.py \
-	  register_core/verify/grok_chat.py providers/mimo/inject_cpa_openai.py
+	  register_core/verify/grok_chat.py providers/mimo/inject_cpa_openai.py \
+	  scripts/probe_clash_nodes.py
 
 doctor:
 	bash scripts/doctor_secrets.sh || test $$? -eq 2

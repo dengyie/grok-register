@@ -125,7 +125,9 @@ register.sh Makefile ARCHITECTURE.md
 
 详见 [ARCHITECTURE.md](ARCHITECTURE.md) · [docs/ADDING_PROVIDER.md](docs/ADDING_PROVIDER.md) · [register_core/README.md](register_core/README.md)。
 
-部署布局示例（pxed）：代码仓 `/personal/grok-register`（或 `ai-register-machine`）+ Node runtime `/personal/mimo-register` + clash `:7897`。
+部署布局示例（pxed）：代码仓 `/personal/grok-register`（或 `ai-register-machine`）+ Node runtime `/personal/mimo-register` + **Clash/mihomo mixed-port `:7897`（Grok 生产权威出口）**。
+
+**Grok 生产出口（pxed）≠ monorepo `nodes.json`：** 批前 leaf 健康探测走 `bash run-register.sh` → `preflight-clash-nodes.sh` → `scripts/probe_clash_nodes.py`（mihomo delay API，重写 `🎯Grok注册` 等组，钉 `GROK_NODE`，重启 mihomo）。`nodes.json` / `list|auto` / `PROXY_LIST` 是另一套 catalog 预检后端，见 [ARCHITECTURE.md · Dual egress](ARCHITECTURE.md#dual-egress-backends-do-not-confuse)。调试可 `SKIP_CLASH_PREFLIGHT=1`。
 
 **Python：** 需要 **3.13**（`pyproject.toml` → `requires-python`）。请用 [uv](https://docs.astral.sh/uv/)：`uv python install 3.13 && uv sync`。系统自带 3.11/3.12 不够。
 
