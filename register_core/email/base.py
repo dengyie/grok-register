@@ -1,4 +1,10 @@
-"""Email source protocol: allocate mailbox + poll OTP."""
+"""Email source protocol: allocate mailbox + poll OTP.
+
+Convention (optional, not part of Protocol signature):
+  After ``poll_otp`` succeeds or raises ``MailMissError``, implementations may
+  set ``self.last_wait_diagnostics`` to an ``OtpWaitDiagnostics`` instance so
+  adapters can attach ``artifacts["otp_wait"]`` without changing call sites.
+"""
 
 from __future__ import annotations
 

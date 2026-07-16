@@ -6,6 +6,28 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+ALLOWED_ERROR_KINDS: frozenset[str] = frozenset(
+    {
+        "mail_miss",
+        "registration_disallowed",
+        "captcha",
+        "proxy",
+        "network",
+        "provider",
+        "verify",
+        "fatal",
+        "other",
+    }
+)
+
+
+def normalize_error_kind(kind: str | None) -> str:
+    """Map provider-reported kind into the public taxonomy; unknown → provider."""
+    k = (kind or "").strip().lower()
+    if k in ALLOWED_ERROR_KINDS:
+        return k
+    return "provider"
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -48,6 +70,26 @@ class OtpCode:
 
 
 @dataclass(slots=True)
+class OtpWaitDiagnostics:
+    """Observability for one OTP poll window (no raw MIME/token)."""
+
+    poll_count: int = 0
+    message_scan_count: int = 0
+    empty_rounds: int = 0
+    elapsed_seconds: float = 0.0
+    timeout_s: float = 0.0
+    first_message_seen_at: float | None = None
+    matched_at: float | None = None
+    first_seen_after_seconds: float | None = None
+    matched_after_seconds: float | None = None
+    abort_reason: str = ""
+    failure_class: str = ""  # no_mail | parse_fail | stale_code | imap_error | aborted | ""
+    provider: str = ""
+    sender_hint: str = ""
+    notes: str = ""
+
+
+@dataclass(slots=True)
 class RegisterJob:
     """Input to one pipeline run."""
 
@@ -70,7 +112,7 @@ class RegisterResult:
     secret: str = ""  # API key / SSO cookie / token — never log full in public
     secret_kind: str = ""  # api_key | sso | refresh_token | none | pending
     error: str = ""
-    error_kind: str = ""  # mail_miss | captcha | provider | verify | fatal | other
+    error_kind: str = ""  # mail_miss | registration_disallowed | captcha | proxy | network | provider | verify | fatal | other
     artifacts: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=_utcnow)
 
@@ -130,6 +172,14 @@ def _public_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:
         "email_source",
         "has_id_token",
         "steps",
+        "otp_wait",
+        "mail_proxy",
+        "register_proxy",
+        "proxy",
+        "proxy_mode",
+        "proxy_label",
+        "mailbox_provider",
+        "device_id",
     }
     out: dict[str, Any] = {}
     for k, v in artifacts.items():

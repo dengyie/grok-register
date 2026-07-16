@@ -22,6 +22,15 @@ class FailFastError(RegisterCoreError):
 class MailMissError(RegisterCoreError):
     """OTP not received for the allocated mailbox (bounded retry OK)."""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        diagnostics: object | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
 
 class CaptchaError(RegisterCoreError):
     """Captcha challenge failed for this attempt."""
