@@ -885,6 +885,26 @@ def create_browser_options(
             options.set_argument("--window-size=1280,900")
         except Exception:
             pass
+    else:
+        # Headed without X display on Linux always fails Chromium connect;
+        # refuse early so callers fail-fast instead of 4× "browser connection fails".
+        try:
+            from tab_pool import display_available
+        except Exception:
+            display_available = None  # type: ignore
+        ok_display = True
+        if display_available is not None:
+            try:
+                ok_display = bool(display_available())
+            except Exception:
+                ok_display = True
+        elif not (sys.platform == "darwin" or sys.platform.startswith("win")):
+            ok_display = bool((os.environ.get("DISPLAY") or "").strip())
+        if not ok_display:
+            raise RuntimeError(
+                "headed 需要 DISPLAY/xvfb-run（当前 Linux DISPLAY 为空；"
+                "请用默认 --no-headless + xvfb-run，或 HEADLESS_FLAG 不要用 bare --headless）"
+            )
     if os.path.exists(EXTENSION_PATH):
         # 传统 headless 不支持扩展；headless=new 下尽量加载 turnstilePatch
         try:
@@ -3417,6 +3437,7 @@ def start_browser(log_callback=None, use_proxy: bool = True):
             return TabPool.get_browser(), page
         except Exception as exc:
             last_exc = exc
+            msg = str(exc)
             if bridge is not None:
                 try:
                     bridge.stop()
@@ -3435,6 +3456,13 @@ def start_browser(log_callback=None, use_proxy: bool = True):
                 TabPool.cleanup_orphans(log_callback=log_callback, only_ppid_init=True)
             except Exception:
                 pass
+            # Headed without DISPLAY is not retryable — spinning 4× wastes time.
+            if "headed 需要 DISPLAY" in msg or (
+                "DISPLAY" in msg and "xvfb" in msg.lower()
+            ):
+                raise Exception(
+                    f"浏览器启动失败（headed 需要 DISPLAY/xvfb-run）: {last_exc}"
+                ) from exc
             human_sleep(min(1.5 * attempt, 4))
     raise Exception(f"浏览器启动失败，已重试4次: {last_exc}")
 

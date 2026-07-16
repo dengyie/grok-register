@@ -231,6 +231,22 @@ def is_turnstile_headless_upgradeable(msg: str) -> bool:
     return "pre-submit retries exhausted" in text or "retries exhausted" in text
 
 
+def headed_display_ready() -> bool:
+    """True when switching to headed Chromium will not fail on missing X display.
+
+    Prefer shared ``tab_pool.display_available`` so register + mint agree.
+    Fallback: macOS/Windows always ok; Linux requires non-empty DISPLAY.
+    """
+    try:
+        from tab_pool import display_available
+
+        return bool(display_available())
+    except Exception:
+        if sys.platform == "darwin" or sys.platform.startswith("win"):
+            return True
+        return bool((os.environ.get("DISPLAY") or "").strip())
+
+
 def is_fatal_register_error(msg: str) -> bool:
     """Hard blockers that must stop the job (no retry / no empty loop)."""
     text = str(msg or "")
@@ -258,6 +274,9 @@ def is_fatal_register_error(msg: str) -> bool:
         # Xvfb/datacenter 上 Turnstile 恒 0 时，整批空转无意义；单号失败后停止本批
         # (after optional one-shot headless→headed upgrade)
         "Turnstile 卡住 fail-fast",
+        # Bare --headless on Linux without DISPLAY: refuse headed upgrade and stop batch
+        "Turnstile headless 失败且无可用 DISPLAY",
+        "headed 需要 DISPLAY/xvfb-run",
     )
     return any(m in text for m in markers)
 
@@ -541,7 +560,20 @@ def register_one(
         try:
             _ensure_browser(worker_id, force_recycle=False)
         except Exception as exc:
+            msg = str(exc)
             log(worker_id, f"! 浏览器启动失败: {exc}")
+            # Missing DISPLAY / headed config is not a flaky boot — stop batch.
+            if is_fatal_register_error(msg) or (
+                "headed 需要 DISPLAY" in msg
+                or ("DISPLAY" in msg and "xvfb" in msg.lower())
+            ):
+                fatal_msg = (
+                    f"浏览器启动致命失败（headed 需要 DISPLAY/xvfb-run）: {msg}"
+                )
+                log(worker_id, f"! 致命错误，停止整批（不空转）: {fatal_msg}")
+                _inc("reg_fail")
+                request_fatal_stop(fatal_msg)
+                raise FatalRegisterError(fatal_msg) from exc
             return {"ok": False, "error": f"browser start: {exc}", "idx": idx}
 
         mail_ok = False
@@ -630,6 +662,7 @@ def register_one(
             except Exception as profile_exc:
                 msg = str(profile_exc)
                 # headless Turnstile token_len=0 → one-shot upgrade to headed, then retry slot
+                # ONLY when DISPLAY/Xvfb is ready; otherwise fail-fast (no browser_boot spin).
                 if (
                     is_turnstile_headless_upgradeable(msg)
                     and bool((getattr(reg, "config", {}) or {}).get("browser_headless", False))
@@ -639,6 +672,17 @@ def register_one(
                         )
                     )
                 ):
+                    if not headed_display_ready():
+                        fatal_msg = (
+                            "Turnstile headless 失败且无可用 DISPLAY/"
+                            "xvfb-run（headed 升级会必挂 browser_boot）。"
+                            "请用默认 --no-headless + xvfb-run，或不要设 HEADLESS_FLAG=--headless。"
+                            f" 原错误: {msg[:160]}"
+                        )
+                        log(worker_id, f"! 致命错误，停止整批（不空转）: {fatal_msg}")
+                        _inc("reg_fail")
+                        request_fatal_stop(fatal_msg)
+                        raise FatalRegisterError(fatal_msg) from profile_exc
                     global _turnstile_headed_upgrade_done
                     do_upgrade = False
                     with _turnstile_headed_upgrade_lock:
@@ -648,7 +692,8 @@ def register_one(
                     if do_upgrade:
                         log(
                             worker_id,
-                            "[!] Turnstile headless 失败，自动切 headed 重试一次（不空转）",
+                            "[!] Turnstile headless 失败，自动切 headed 重试一次（不空转）"
+                            f" DISPLAY={os.environ.get('DISPLAY', '')!r}",
                         )
                         reg.config["browser_headless"] = False
                         try:

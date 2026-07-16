@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Any, Callable
@@ -37,6 +38,19 @@ _chromium_start_lock = threading.Lock()
 def chromium_start_lock() -> threading.Lock:
     """Process-wide lock held only while constructing Chromium(...)."""
     return _chromium_start_lock
+
+
+def display_available() -> bool:
+    """True if headed Chromium is likely to connect without Xvfb missing.
+
+    macOS/Windows: always True (no X11 DISPLAY required).
+    Linux/other: require non-empty ``DISPLAY`` (e.g. real desktop or ``xvfb-run``).
+    Bare ``--headless`` on servers leaves DISPLAY empty; auto headless→headed
+    upgrades must refuse rather than spin on "The browser connection fails".
+    """
+    if sys.platform == "darwin" or sys.platform.startswith("win"):
+        return True
+    return bool((os.environ.get("DISPLAY") or "").strip())
 
 
 def is_drission_chrome_cmdline(cmd: str) -> bool:

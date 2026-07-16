@@ -235,12 +235,24 @@ def _build_standalone_options(
             opts.headless(False)
         except Exception:
             pass
-        # Headed mint on servers needs Xvfb; surface missing DISPLAY early in logs.
-        display = os.environ.get("DISPLAY", "")
-        if not display:
-            log("WARNING headed mint DISPLAY is empty — expect Chromium boot failure")
-        else:
-            log(f"headed browser DISPLAY={display!r}")
+        # Headed mint on servers needs Xvfb; refuse empty DISPLAY rather than
+        # spinning 3× "The browser connection fails".
+        try:
+            from tab_pool import display_available  # type: ignore
+
+            ok_display = bool(display_available())
+        except Exception:
+            if sys.platform == "darwin" or sys.platform.startswith("win"):
+                ok_display = True
+            else:
+                ok_display = bool((os.environ.get("DISPLAY") or "").strip())
+        display = (os.environ.get("DISPLAY") or "").strip()
+        if not ok_display:
+            raise BrowserConfirmError(
+                "headed mint 需要 DISPLAY/xvfb-run（当前 DISPLAY 为空；"
+                "register.sh 默认 --no-headless 会走 xvfb-run）"
+            )
+        log(f"headed browser DISPLAY={display!r}")
 
     for cand in (
         "/usr/bin/chromium",
@@ -389,6 +401,15 @@ def create_standalone_page(
                     _hard_kill_browser_pid(browser, log=log)
             # Always try orphan cleanup after a failed boot (connection fail or not).
             _cleanup_orphans_best_effort(log)
+            msg = str(e)
+            # Missing DISPLAY is configuration, not flaky boot — do not retry spin.
+            if (
+                isinstance(e, BrowserConfirmError)
+                and ("DISPLAY" in msg or "xvfb" in msg.lower())
+            ) or ("headed mint 需要 DISPLAY" in msg):
+                raise BrowserConfirmError(
+                    f"standalone chromium start failed (no DISPLAY/xvfb): {e}"
+                ) from e
             if attempt < attempts:
                 _sleep(min(1.0 * attempt, 3.0))
                 continue
