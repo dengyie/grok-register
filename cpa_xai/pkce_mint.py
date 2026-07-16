@@ -153,6 +153,57 @@ def _code_from_url(url: str, state: str) -> str:
     return code
 
 
+def _extract_action_id_from_html(page_html: str | None) -> str | None:
+    """Parse Next.js server-action id for submitOAuth2Consent from consent HTML/RSC.
+
+    Returns None for empty/SPA shells so callers do not silently POST a stale
+    hardcoded action id (live symptom: HTTP 404 "Server action not found").
+    """
+    if not page_html or not isinstance(page_html, str):
+        return None
+    text = page_html
+    if len(text) < 40 and "createServerReference" not in text and "submitOAuth2Consent" not in text:
+        return None
+
+    # 1) createServerReference)("id", ... "submitOAuth2Consent"
+    m = re.search(
+        r'createServerReference\)\("([a-f0-9]{40,44})"[^)]*submitOAuth2Consent',
+        text,
+    )
+    if m:
+        return m.group(1)
+
+    # 2) name-before-id / flight payload near submitOAuth2Consent
+    #    e.g. submitOAuth2Consent",{id:"…"}  or  {"id":"…","bound":null},"submitOAuth2Consent"
+    near = re.search(
+        r'submitOAuth2Consent["\']?\s*[,}][\s\S]{0,200}?"([a-f0-9]{40,44})"'
+        r'|'
+        r'"([a-f0-9]{40,44})"[\s\S]{0,200}?submitOAuth2Consent'
+        r'|'
+        r'submitOAuth2Consent["\']?\s*,\s*\{[^}]*?id["\']?\s*:\s*["\']([a-f0-9]{40,44})',
+        text,
+    )
+    if near:
+        for g in near.groups():
+            if g:
+                return g
+
+    # 3) next-action header value embedded in HTML
+    m = re.search(
+        r'(?:next-action|nextAction)["\']?\s*[:=]\s*["\']([a-f0-9]{40,44})',
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1)
+
+    # 4) last-resort: single anonymous createServerReference id on page
+    refs = re.findall(r'createServerReference\)\("([a-f0-9]{40,44})"', text)
+    if len(refs) == 1:
+        return refs[0]
+    return None
+
+
 def _create_cookie_setter_link(session: Any, success_url: str) -> str:
     msg = grpcweb.encode_string(1, success_url) + grpcweb.encode_string(2, f"{ACCOUNTS_ORIGIN}/sign-in")
     resp = session.post(
@@ -191,12 +242,9 @@ def _submit_consent(
     code_challenge: str,
     nonce: str,
 ) -> str:
-    action_id = SUBMIT_OAUTH2_CONSENT_ACTION
-    match = re.search(r'createServerReference\)\("([a-f0-9]{40,44})"[^)]*submitOAuth2Consent', page_html)
-    if not match:
-        match = re.search(r'createServerReference\)\("([a-f0-9]{40,44})"', page_html)
-    if match:
-        action_id = match.group(1)
+    extracted = _extract_action_id_from_html(page_html)
+    used_hardcoded = extracted is None
+    action_id = extracted or SUBMIT_OAUTH2_CONSENT_ACTION
 
     router_tree = (
         '["",{"children":["(app)",{"children":["(auth)",{"children":["oauth2",'
@@ -218,34 +266,89 @@ def _submit_consent(
             "referrer": "",
         }
     ]
-    headers = {
-        "accept": "text/x-component",
-        "content-type": "text/plain;charset=UTF-8",
-        "next-action": action_id,
-        "next-router-state-tree": quote(router_tree, safe=""),
-        "origin": ACCOUNTS_ORIGIN,
-        "referer": page_url,
-        "sec-fetch-site": "same-origin",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-dest": "empty",
-    }
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    post_url = page_url.split("?")[0] if "consent" in page_url else page_url
-    resp = session.post(post_url, headers=headers, data=body, timeout=45)
-    text = resp.text or ""
-    if resp.status_code >= 400 or ("error" in text[:200].lower() and "code" not in text):
-        resp = session.post(page_url, headers=headers, data=body, timeout=45)
-        text = resp.text or ""
 
-    match = re.search(r'"code"\s*:\s*"([^"]+)"', text)
-    if match:
-        return match.group(1)
-    match = re.search(r"code=([A-Za-z0-9._~\-]+)", text)
-    if match and "error" not in match.group(0):
-        return match.group(1)
-    loc = resp.headers.get("location") or resp.headers.get("Location") or ""
-    if "code=" in loc:
-        return _code_from_url(urljoin(page_url, loc), state)
+    def _post(url: str, aid: str):
+        headers = {
+            "accept": "text/x-component",
+            "content-type": "text/plain;charset=UTF-8",
+            "next-action": aid,
+            "next-router-state-tree": quote(router_tree, safe=""),
+            "origin": ACCOUNTS_ORIGIN,
+            "referer": page_url,
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-dest": "empty",
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return session.post(url, headers=headers, data=body, timeout=45)
+
+    def _code_from_resp(resp: Any) -> str | None:
+        text = resp.text or ""
+        match = re.search(r'"code"\s*:\s*"([^"]+)"', text)
+        if match:
+            return match.group(1)
+        match = re.search(r"code=([A-Za-z0-9._~\-]+)", text)
+        if match and "error" not in match.group(0):
+            return match.group(1)
+        loc = resp.headers.get("location") or resp.headers.get("Location") or ""
+        if "code=" in loc:
+            return _code_from_url(urljoin(page_url, loc), state)
+        return None
+
+    post_url = page_url.split("?")[0] if "consent" in page_url else page_url
+    resp = _post(post_url, action_id)
+    text = resp.text or ""
+    code = _code_from_resp(resp)
+    if code:
+        return code
+
+    # Retry full page_url if strip-query POST failed
+    if resp.status_code >= 400 or ("error" in text[:200].lower() and "code" not in text):
+        resp = _post(page_url, action_id)
+        text = resp.text or ""
+        code = _code_from_resp(resp)
+        if code:
+            return code
+
+    # 404 "Server action not found": re-fetch consent HTML, re-extract action id, retry once.
+    # Root cause of smoke: empty/JS shell → stale hardcoded action id.
+    not_found = resp.status_code == 404 or "server action not found" in text.lower()
+    if not_found:
+        try:
+            refresh = session.get(page_url, allow_redirects=True, timeout=45)
+            refreshed_html = refresh.text or ""
+            refresh_url = str(getattr(refresh, "url", None) or page_url)
+            new_aid = _extract_action_id_from_html(refreshed_html)
+            if new_aid and new_aid != action_id:
+                action_id = new_aid
+                used_hardcoded = False
+                page_url = refresh_url
+                post_url = page_url.split("?")[0] if "consent" in page_url else page_url
+                resp = _post(post_url, action_id)
+                text = resp.text or ""
+                code = _code_from_resp(resp)
+                if code:
+                    return code
+                if resp.status_code >= 400:
+                    resp = _post(page_url, action_id)
+                    text = resp.text or ""
+                    code = _code_from_resp(resp)
+                    if code:
+                        return code
+        except Exception:
+            pass
+
+        if used_hardcoded:
+            raise PKCEMintError(
+                "submitOAuth2Consent failed HTTP 404: Server action not found "
+                "(consent HTML missing submitOAuth2Consent action id; "
+                "stale hardcoded fallback rejected by Next.js)"
+            )
+        raise PKCEMintError(
+            f"submitOAuth2Consent failed HTTP {resp.status_code}: {text[:300]} "
+            f"(action_id={action_id[:12]}… extracted from page)"
+        )
+
     raise PKCEMintError(f"submitOAuth2Consent failed HTTP {resp.status_code}: {text[:300]}")
 
 
@@ -361,17 +464,38 @@ def mint_with_sso_pkce(
         if loc and "code=" in loc:
             code = _code_from_url(urljoin(current, loc), state)
         else:
-            code = _submit_consent(
-                session,
-                page_url=current,
-                page_html=page.text or "",
-                client_id=client_id,
-                redirect_uri=redirect_uri,
-                scope=scope,
-                state=state,
-                code_challenge=challenge,
-                nonce=nonce,
-            )
+            page_html = page.text or ""
+            page_url = current
+            # Follow non-code redirect, or re-fetch with redirects when action id missing
+            # (empty SPA shell after set-cookie 303 is the smoke-era 404 root cause).
+            if loc and "code=" not in loc:
+                page_url = urljoin(current, loc)
+                page = session.get(page_url, allow_redirects=True, timeout=timeout)
+                page_html = page.text or ""
+                page_url = str(getattr(page, "url", None) or page_url)
+                loc2 = page.headers.get("location") or page.headers.get("Location") or ""
+                if loc2 and "code=" in loc2:
+                    code = _code_from_url(urljoin(page_url, loc2), state)
+            if "code" not in locals() or not locals().get("code"):
+                if not _extract_action_id_from_html(page_html):
+                    page = session.get(page_url, allow_redirects=True, timeout=timeout)
+                    page_html = page.text or ""
+                    page_url = str(getattr(page, "url", None) or page_url)
+                    loc3 = page.headers.get("location") or page.headers.get("Location") or ""
+                    if loc3 and "code=" in loc3:
+                        code = _code_from_url(urljoin(page_url, loc3), state)
+            if "code" not in locals() or not locals().get("code"):
+                code = _submit_consent(
+                    session,
+                    page_url=page_url,
+                    page_html=page_html,
+                    client_id=client_id,
+                    redirect_uri=redirect_uri,
+                    scope=scope,
+                    state=state,
+                    code_challenge=challenge,
+                    nonce=nonce,
+                )
     log(f"pkce authorization code ok{f' email={email}' if email else ''}")
 
     token = _exchange_code_for_token(

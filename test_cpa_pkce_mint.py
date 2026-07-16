@@ -103,26 +103,51 @@ def test_authorization_url_params() -> None:
 
 def test_submit_consent_action_id_extraction() -> None:
     pkce = _load("cpa_xai.pkce_mint", ROOT / "cpa_xai" / "pkce_mint.py")
-
-    # 1. explicit submitOAuth2Consent action wins
-    html = (
-        '<script>var x = createServerReference)("4005315a1d7e426de592990bb54bb37471f39dd6d2",'
-        ' "submitOAuth2Consent", ...);</script>'
+    assert hasattr(pkce, "_extract_action_id_from_html"), (
+        "_extract_action_id_from_html must be a first-class helper "
+        "(inline-only extraction silently falls back to stale hardcoded action → live 404)"
     )
-    aid = pkce._extract_action_id_from_html(html) if hasattr(pkce, "_extract_action_id_from_html") else None
-    if aid is None:
-        # the reference impl inlines this regex inside _submit_consent; mirror it here
-        import re
+    extract = pkce._extract_action_id_from_html
 
-        m = re.search(r'createServerReference\)\("([a-f0-9]{40,44})"[^)]*submitOAuth2Consent', html)
-        aid = m.group(1) if m else pkce.SUBMIT_OAUTH2_CONSENT_ACTION
-    assert aid == "4005315a1d7e426de592990bb54bb37471f39dd6d2", aid
-
-    # 2. fallback action id constant
-    assert (
-        pkce.SUBMIT_OAUTH2_CONSENT_ACTION
-        == "4005315a1d7e426de592990bb54bb37471f39dd6d2"
+    # 1. explicit submitOAuth2Consent action wins (even when other actions present)
+    html_named = (
+        '<script>createServerReference)("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+        ' "otherAction");'
+        'createServerReference)("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",'
+        ' "submitOAuth2Consent");</script>'
     )
+    assert extract(html_named) == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    # 2. name before id (alternate bundle order)
+    html_name_first = (
+        'submitOAuth2Consent",{id:"cccccccccccccccccccccccccccccccccccccccccc"}'
+        'createServerReference)("dddddddddddddddddddddddddddddddddddddddddd"'
+    )
+    # prefer explicit next-action / action id near submitOAuth2Consent
+    aid2 = extract(html_name_first)
+    assert aid2 in {
+        "cccccccccccccccccccccccccccccccccccccccccc",
+        "dddddddddddddddddddddddddddddddddddddddddd",
+    }, aid2
+
+    # 3. empty / SPA shell HTML → None (must NOT silently return stale hardcoded id)
+    assert extract("") is None
+    assert extract("<html><body>loading</body></html>") is None
+    assert extract(None) is None  # type: ignore[arg-type]
+
+    # 4. single anonymous createServerReference → that id (last-resort page scrape)
+    html_one = 'createServerReference)("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", void 0)'
+    assert extract(html_one) == "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+    # 5. flight / quoted next-action style
+    html_flight = (
+        r'{"id":"ffffffffffffffffffffffffffffffffffffffffff",'
+        r'"bound":null},"submitOAuth2Consent"'
+    )
+    assert extract(html_flight) == "ffffffffffffffffffffffffffffffffffffffffff"
+
+    # 6. constant still present as last-resort POST fallback only
+    assert len(pkce.SUBMIT_OAUTH2_CONSENT_ACTION) >= 40
     print("PASS submit_consent_action_id_extraction")
 
 
