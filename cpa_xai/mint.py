@@ -28,12 +28,19 @@ def _noop(_: str) -> None:
 
 
 def _is_pkce_non_retryable(err: str | Exception | None) -> bool:
-    """True when PKCE failed on consent HTML/action-id extract (empty SPA shell).
+    """True when this PKCE failure must not remint-spin the same PKCE path.
 
-    Prefer structured ``PKCEMintError.retryable`` / ``code``; fall back to
-    message needles for legacy string errors. These residuals are not healed by
-    remint/spin — fall through to device/browser per flags. Distinct from
-    transient network.
+    Covers more than empty SPA / action-id extract:
+      - structured ``retryable=False`` (any code)
+      - structured codes: consent_action_missing / consent_action_rejected /
+        dependency / empty_sso / cancelled
+      - legacy message needles for consent HTML / Server Action extract
+
+    Residual policy is separate: non-retryable consent shells may still fall
+    through to device/browser when ``allow_device_flow_fallback`` is True.
+    Cancel is non-retryable *and* must short-circuit residual (see
+    ``_is_cancelled_error``) — do not spend device/browser after abort.
+    Distinct from transient network (token_exchange, state_mismatch, etc.).
     """
     if isinstance(err, PKCEMintError):
         if err.retryable is False:
@@ -64,6 +71,15 @@ def _is_pkce_non_retryable(err: str | Exception | None) -> bool:
     return any(n in s for n in needles)
 
 
+def _is_cancelled_error(err: Exception | str | None) -> bool:
+    """True when the failure is an explicit cancel/abort (no residual grant)."""
+    if isinstance(err, PKCEMintError):
+        if str(getattr(err, "code", "") or "").strip().lower() == "cancelled":
+            return True
+    s = (str(err) if err is not None else "").strip().lower()
+    return s == "cancelled" or s.startswith("cancelled")
+
+
 def _should_stamp_protocol_error(mint_method: str) -> bool:
     """Stamp prior PKCE/device failure reason when residual path produced tokens.
 
@@ -72,6 +88,28 @@ def _should_stamp_protocol_error(mint_method: str) -> bool:
     """
     mm = (mint_method or "").strip().lower()
     return mm not in ("pkce", "protocol")
+
+
+def _cancelled_result(
+    email: str,
+    *,
+    mint_method: str,
+    protocol_err: str | None = None,
+    pkce_error_code: str | None = "cancelled",
+) -> dict[str, Any]:
+    """Stable cancelled fail dict — never residual after abort."""
+    out: dict[str, Any] = {
+        "ok": False,
+        "email": email,
+        "error": "cancelled",
+        "mint_method": mint_method,
+        "pkce_retryable": False,
+    }
+    if pkce_error_code:
+        out["pkce_error_code"] = pkce_error_code
+    if protocol_err:
+        out["protocol_error"] = str(protocol_err)[:500]
+    return out
 
 
 def mint_and_export(
@@ -173,6 +211,9 @@ def mint_and_export(
                 "error": f"unsupported cpa_protocol_flow: {protocol_flow}; expected pkce or device",
                 "mint_method": "protocol",
             }
+        # Track whether we already attempted PKCE for residual fail labeling.
+        pkce_attempted = False
+
         if flow == "pkce":
             log(
                 "mint try protocol (SSO HTTP PKCE authorization-code; best-effort — "
@@ -189,19 +230,29 @@ def mint_and_export(
                 log("mint protocol PKCE SUCCESS")
             except PKCEMintError as e:
                 protocol_err = str(e)
+                pkce_attempted = True
                 non_retry = _is_pkce_non_retryable(e)
                 code = str(getattr(e, "code", "") or "").strip()
                 log(
                     f"mint protocol PKCE failed"
-                    f"{' (non-retryable consent/action extract)' if non_retry else ''}"
+                    f"{' (non-retryable)' if non_retry else ''}"
                     f"{f' code={code}' if code else ''}"
                     f": {e}"
                 )
+                # Cancel/abort: never residual to device or browser.
+                if _is_cancelled_error(e) or (cancel and cancel()):
+                    log("mint cancelled after PKCE — skip residual device/browser")
+                    return _cancelled_result(
+                        email,
+                        mint_method="pkce",
+                        protocol_err=protocol_err,
+                        pkce_error_code=code or "cancelled",
+                    )
                 if allow_device_flow_fallback:
                     if non_retry:
                         log(
                             "mint best-effort residual → device flow "
-                            "(PKCE consent shell empty/action id missing; accept device residual)"
+                            "(PKCE non-retryable extract/consent; accept device residual)"
                         )
                     else:
                         log("mint fallback → device flow")
@@ -215,9 +266,21 @@ def mint_and_export(
                             "pkce_error_code": code or None,
                             "pkce_retryable": bool(e.retryable),
                         }
+                    log(
+                        "mint device residual disabled "
+                        "(allow_device_flow_fallback=False) → browser if available"
+                    )
             except Exception as e:  # noqa: BLE001
                 protocol_err = str(e)
+                pkce_attempted = True
                 log(f"mint protocol PKCE exception: {e}")
+                if _is_cancelled_error(e) or (cancel and cancel()):
+                    log("mint cancelled after PKCE exception — skip residual")
+                    return _cancelled_result(
+                        email,
+                        mint_method="pkce",
+                        protocol_err=protocol_err,
+                    )
                 if allow_device_flow_fallback:
                     log("mint fallback → device flow")
                 else:
@@ -228,9 +291,20 @@ def mint_and_export(
                             "error": f"pkce protocol failed: {protocol_err}",
                             "mint_method": "pkce",
                         }
+                    log(
+                        "mint device residual disabled "
+                        "(allow_device_flow_fallback=False) → browser if available"
+                    )
 
         if tokens is None and (flow == "device" or allow_device_flow_fallback):
-            pkce_attempted = flow == "pkce" and bool(protocol_err)
+            # Re-check cancel before spending a device-code grant.
+            if cancel and cancel():
+                log("mint cancelled before device residual — skip")
+                return _cancelled_result(
+                    email,
+                    mint_method="protocol_device" if pkce_attempted else "protocol",
+                    protocol_err=protocol_err,
+                )
             if flow == "device":
                 log("mint try protocol (SSO HTTP device flow)")
             try:
@@ -256,12 +330,21 @@ def mint_and_export(
                 protocol_err = (
                     f"pkce: {protocol_err}; device: {device_err}" if protocol_err else device_err
                 )
+                fail_mm = "protocol_device" if pkce_attempted else "protocol"
+                if _is_cancelled_error(e) or (cancel and cancel()):
+                    log("mint cancelled during device residual — skip browser")
+                    return _cancelled_result(
+                        email,
+                        mint_method=fail_mm,
+                        protocol_err=protocol_err,
+                    )
                 if protocol_only:
                     return {
                         "ok": False,
                         "email": email,
                         "error": f"protocol_only: {protocol_err}",
-                        "mint_method": "protocol",
+                        "mint_method": fail_mm,
+                        "protocol_error": str(protocol_err)[:500],
                     }
                 log("mint fallback → browser")
             except Exception as e:  # noqa: BLE001
@@ -270,12 +353,21 @@ def mint_and_export(
                 protocol_err = (
                     f"pkce: {protocol_err}; device: {device_err}" if protocol_err else device_err
                 )
+                fail_mm = "protocol_device" if pkce_attempted else "protocol"
+                if _is_cancelled_error(e) or (cancel and cancel()):
+                    log("mint cancelled during device residual exception — skip browser")
+                    return _cancelled_result(
+                        email,
+                        mint_method=fail_mm,
+                        protocol_err=protocol_err,
+                    )
                 if protocol_only:
                     return {
                         "ok": False,
                         "email": email,
                         "error": f"protocol_only: {protocol_err}",
-                        "mint_method": "protocol",
+                        "mint_method": fail_mm,
+                        "protocol_error": str(protocol_err)[:500],
                     }
                 log("mint fallback → browser")
     elif prefer_protocol and not sso_val:
@@ -291,12 +383,30 @@ def mint_and_export(
         log("mint protocol disabled → browser")
 
     if tokens is None:
+        # Abort must not open a browser residual grant.
+        if cancel and cancel():
+            log("mint cancelled before browser residual — skip")
+            return _cancelled_result(
+                email,
+                mint_method="browser",
+                protocol_err=protocol_err,
+            )
+        if protocol_err and _is_cancelled_error(protocol_err):
+            log("mint cancelled (protocol_err) — skip browser residual")
+            return _cancelled_result(
+                email,
+                mint_method="pkce",
+                protocol_err=protocol_err,
+            )
         if not password:
             return {
                 "ok": False,
                 "email": email,
                 "error": protocol_err or "protocol failed and no password for browser fallback",
                 "protocol_error": protocol_err,
+                "mint_method": "protocol_device"
+                if (prefer_protocol and sso_val and (protocol_flow or "pkce").strip().lower() == "pkce" and protocol_err)
+                else ("protocol" if protocol_err else "browser"),
             }
         try:
             tokens = mint_with_browser(
@@ -318,6 +428,12 @@ def mint_and_export(
                 tokens["protocol_error"] = protocol_err
         except Exception as e:  # noqa: BLE001
             log(f"mint failed: {e}")
+            if _is_cancelled_error(e) or (cancel and cancel()):
+                return _cancelled_result(
+                    email,
+                    mint_method="browser",
+                    protocol_err=protocol_err or str(e),
+                )
             err = str(e)
             if protocol_err:
                 err = f"{err} (protocol: {protocol_err})"
@@ -326,6 +442,7 @@ def mint_and_export(
                 "email": email,
                 "error": err,
                 "protocol_error": protocol_err,
+                "mint_method": "browser",
             }
 
     try:

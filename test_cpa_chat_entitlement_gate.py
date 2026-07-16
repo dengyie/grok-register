@@ -853,6 +853,13 @@ def test_pkce_non_retryable_residual_classifier() -> None:
     assert "allow_device_flow_fallback: bool = True" in src
     assert "empty consent SPA shell" in src or "best-effort" in src
     assert "protocol_device" in src
+    assert "def _is_cancelled_error" in src
+    assert "def _cancelled_result" in src
+    assert "skip residual device/browser" in src or "skip residual" in src
+    assert "skip browser residual" in src or "before browser residual" in src
+    # Doc covers cancel short-circuit + broader non-retryable set.
+    assert "short-circuit residual" in src or "must short-circuit residual" in src
+    assert '"cancelled"' in src
     tree = ast.parse(src)
     fn = next(
         n
@@ -877,7 +884,336 @@ def test_pkce_non_retryable_residual_classifier() -> None:
     assert is_nr(PKCEMintError("network blip", code="token_exchange", retryable=True)) is False
     # retryable=False short-circuits regardless of code.
     assert is_nr(PKCEMintError("x", code="token_exchange", retryable=False)) is True
+    # cancelled is non-retryable (and residual short-circuits separately).
+    assert is_nr(PKCEMintError("cancelled", code="cancelled", retryable=False)) is True
     print("PASS pkce non-retryable residual classifier")
+
+
+def test_cancelled_helpers_and_fail_taxonomy_surface() -> None:
+    """Cancel helpers + residual fail mint_method taxonomy (unit + source)."""
+    from cpa_xai import mint as mint_mod
+    from cpa_xai.pkce_mint import PKCEMintError
+
+    assert mint_mod._is_cancelled_error(
+        PKCEMintError("cancelled by operator", code="cancelled", retryable=False)
+    )
+    assert mint_mod._is_cancelled_error("cancelled")
+    assert mint_mod._is_cancelled_error("cancelled by user")
+    assert not mint_mod._is_cancelled_error(
+        PKCEMintError("consent HTML missing", code="consent_action_missing", retryable=False)
+    )
+    assert not mint_mod._is_cancelled_error("connection reset")
+
+    cr = mint_mod._cancelled_result(
+        "a@ex.com",
+        mint_method="pkce",
+        protocol_err="cancelled",
+        pkce_error_code="cancelled",
+    )
+    assert cr["ok"] is False
+    assert cr["error"] == "cancelled"
+    assert cr["mint_method"] == "pkce"
+    assert cr["pkce_retryable"] is False
+    assert cr["pkce_error_code"] == "cancelled"
+    assert cr["protocol_error"] == "cancelled"
+    assert mint_mod._should_stamp_protocol_error("protocol_device") is True
+    assert mint_mod._should_stamp_protocol_error("browser") is True
+    assert mint_mod._should_stamp_protocol_error("pkce") is False
+    assert mint_mod._should_stamp_protocol_error("protocol") is False
+    print("PASS cancelled helpers + fail taxonomy surface")
+
+
+def test_mint_pkce_fail_device_residual_e2e() -> None:
+    """Mocked integration: PKCE non-retryable → device residual → protocol_device dual stamp."""
+    from cpa_xai import mint as mint_mod
+    from cpa_xai.pkce_mint import PKCEMintError
+
+    calls = {"pkce": 0, "device": 0, "browser": 0, "models": 0, "chat": 0}
+    orig = {
+        "pkce": mint_mod.mint_with_sso_pkce,
+        "device": mint_mod.mint_with_sso_protocol,
+        "browser": mint_mod.mint_with_browser,
+        "models": mint_mod.probe_models,
+        "chat": mint_mod.probe_chat_with_retries,
+    }
+
+    def fake_pkce(**_kw):  # noqa: ANN001
+        calls["pkce"] += 1
+        raise PKCEMintError(
+            "consent HTML missing submitOAuth2Consent action id",
+            code="consent_action_missing",
+            retryable=False,
+        )
+
+    def fake_device(**_kw):  # noqa: ANN001
+        calls["device"] += 1
+        return {
+            "access_token": "at-device-residual",
+            "refresh_token": "rt-device-residual",
+            "id_token": "id-device",
+            "expires_in": 3600,
+            "mint_method": "protocol",  # overridden by residual taxonomy
+        }
+
+    def fake_browser(**_kw):  # noqa: ANN001
+        calls["browser"] += 1
+        raise AssertionError("browser must not run when device residual succeeds")
+
+    def fake_models(_token, **_kw):  # noqa: ANN001
+        calls["models"] += 1
+        return {
+            "ok": True,
+            "status": 200,
+            "has_grok_45": True,
+            "model_ids": ["grok-4.5"],
+            "transport_mode": "direct",
+        }
+
+    def fake_chat(_token, **_kw):  # noqa: ANN001
+        calls["chat"] += 1
+        # Keep residual labeling independent of entitlement Manual-required.
+        from cpa_xai.probe import classify_chat_probe
+
+        out = {
+            "ok": True,
+            "status": 200,
+            "text": "MINT_OK",
+            "model": "grok-4.5",
+            "error_code": "",
+        }
+        out.update(classify_chat_probe(out))
+        return out
+
+    mint_mod.mint_with_sso_pkce = fake_pkce  # type: ignore[assignment]
+    mint_mod.mint_with_sso_protocol = fake_device  # type: ignore[assignment]
+    mint_mod.mint_with_browser = fake_browser  # type: ignore[assignment]
+    mint_mod.probe_models = fake_models  # type: ignore[assignment]
+    mint_mod.probe_chat_with_retries = fake_chat  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            result = mint_mod.mint_and_export(
+                email="residual@ex.com",
+                password="",
+                auth_dir=td,
+                sso="sso-token-residual",
+                prefer_protocol=True,
+                protocol_flow="pkce",
+                allow_device_flow_fallback=True,
+                protocol_only=False,
+                probe=True,
+                probe_chat=True,
+                probe_via="direct",
+                log=lambda _m: None,
+            )
+            assert result.get("ok") is True, result
+            assert result.get("mint_method") == "protocol_device", result
+            assert "consent" in str(result.get("protocol_error") or "").lower(), result
+            assert calls["pkce"] == 1
+            assert calls["device"] == 1
+            assert calls["browser"] == 0
+            assert calls["models"] >= 1
+            path = Path(str(result["path"]))
+            disk = json.loads(path.read_text(encoding="utf-8"))
+            assert disk.get("mint_method") == "protocol_device", disk
+            assert "consent" in str(disk.get("protocol_error") or "").lower(), disk
+            # Dual stamp: probe fields present without dropping residual labels.
+            assert "chat_ok" in disk
+            assert disk.get("mint_method") == "protocol_device"
+    finally:
+        mint_mod.mint_with_sso_pkce = orig["pkce"]  # type: ignore[assignment]
+        mint_mod.mint_with_sso_protocol = orig["device"]  # type: ignore[assignment]
+        mint_mod.mint_with_browser = orig["browser"]  # type: ignore[assignment]
+        mint_mod.probe_models = orig["models"]  # type: ignore[assignment]
+        mint_mod.probe_chat_with_retries = orig["chat"]  # type: ignore[assignment]
+    print("PASS mint pkce→device residual e2e protocol_device dual stamp")
+
+
+def test_mint_cancel_short_circuits_residual() -> None:
+    """Cancelled PKCE / cancel callback must not spend device or browser residual."""
+    from cpa_xai import mint as mint_mod
+    from cpa_xai.pkce_mint import PKCEMintError
+    from cpa_xai.protocol_mint import ProtocolMintError
+
+    calls = {"pkce": 0, "device": 0, "browser": 0}
+    orig = {
+        "pkce": mint_mod.mint_with_sso_pkce,
+        "device": mint_mod.mint_with_sso_protocol,
+        "browser": mint_mod.mint_with_browser,
+    }
+
+    def fake_pkce_cancelled(**_kw):  # noqa: ANN001
+        calls["pkce"] += 1
+        raise PKCEMintError("cancelled", code="cancelled", retryable=False)
+
+    def fake_device(**_kw):  # noqa: ANN001
+        calls["device"] += 1
+        raise AssertionError("device residual must not run after cancel")
+
+    def fake_browser(**_kw):  # noqa: ANN001
+        calls["browser"] += 1
+        raise AssertionError("browser residual must not run after cancel")
+
+    mint_mod.mint_with_sso_pkce = fake_pkce_cancelled  # type: ignore[assignment]
+    mint_mod.mint_with_sso_protocol = fake_device  # type: ignore[assignment]
+    mint_mod.mint_with_browser = fake_browser  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            r1 = mint_mod.mint_and_export(
+                email="cancel1@ex.com",
+                password="pw",
+                auth_dir=td,
+                sso="sso-cancel",
+                prefer_protocol=True,
+                protocol_flow="pkce",
+                allow_device_flow_fallback=True,
+                probe=False,
+                probe_chat=False,
+                log=lambda _m: None,
+            )
+            assert r1.get("ok") is False
+            assert r1.get("error") == "cancelled"
+            assert r1.get("mint_method") == "pkce"
+            assert r1.get("pkce_retryable") is False
+            assert calls["pkce"] == 1
+            assert calls["device"] == 0
+            assert calls["browser"] == 0
+
+            # Cancel callback before residual even when PKCE is retryable-looking.
+            def fake_pkce_retryable(**_kw):  # noqa: ANN001
+                calls["pkce"] += 1
+                raise PKCEMintError("token exchange timeout", code="token_exchange", retryable=True)
+
+            mint_mod.mint_with_sso_pkce = fake_pkce_retryable  # type: ignore[assignment]
+            r2 = mint_mod.mint_and_export(
+                email="cancel2@ex.com",
+                password="pw",
+                auth_dir=td,
+                sso="sso-cancel2",
+                prefer_protocol=True,
+                protocol_flow="pkce",
+                allow_device_flow_fallback=True,
+                probe=False,
+                probe_chat=False,
+                cancel=lambda: True,
+                log=lambda _m: None,
+            )
+            assert r2.get("ok") is False
+            assert r2.get("error") == "cancelled"
+            assert r2.get("mint_method") == "pkce"
+            assert calls["device"] == 0
+            assert calls["browser"] == 0
+
+            # Device residual cancelled → no browser; fail mint_method protocol_device.
+            def fake_pkce_consent(**_kw):  # noqa: ANN001
+                calls["pkce"] += 1
+                raise PKCEMintError(
+                    "consent HTML missing",
+                    code="consent_action_missing",
+                    retryable=False,
+                )
+
+            def fake_device_cancel(**_kw):  # noqa: ANN001
+                calls["device"] += 1
+                raise ProtocolMintError("cancelled")
+
+            mint_mod.mint_with_sso_pkce = fake_pkce_consent  # type: ignore[assignment]
+            mint_mod.mint_with_sso_protocol = fake_device_cancel  # type: ignore[assignment]
+            r3 = mint_mod.mint_and_export(
+                email="cancel3@ex.com",
+                password="pw",
+                auth_dir=td,
+                sso="sso-cancel3",
+                prefer_protocol=True,
+                protocol_flow="pkce",
+                allow_device_flow_fallback=True,
+                protocol_only=False,
+                probe=False,
+                probe_chat=False,
+                log=lambda _m: None,
+            )
+            assert r3.get("ok") is False
+            assert r3.get("error") == "cancelled"
+            assert r3.get("mint_method") == "protocol_device", r3
+            assert calls["browser"] == 0
+    finally:
+        mint_mod.mint_with_sso_pkce = orig["pkce"]  # type: ignore[assignment]
+        mint_mod.mint_with_sso_protocol = orig["device"]  # type: ignore[assignment]
+        mint_mod.mint_with_browser = orig["browser"]  # type: ignore[assignment]
+    print("PASS mint cancel short-circuits residual")
+
+
+def test_mint_protocol_only_fail_labels_protocol_device() -> None:
+    """protocol_only after PKCE+device fail uses residual fail taxonomy mint_method."""
+    from cpa_xai import mint as mint_mod
+    from cpa_xai.pkce_mint import PKCEMintError
+    from cpa_xai.protocol_mint import ProtocolMintError
+
+    orig = {
+        "pkce": mint_mod.mint_with_sso_pkce,
+        "device": mint_mod.mint_with_sso_protocol,
+        "browser": mint_mod.mint_with_browser,
+    }
+
+    def fake_pkce(**_kw):  # noqa: ANN001
+        raise PKCEMintError(
+            "consent HTML missing",
+            code="consent_action_missing",
+            retryable=False,
+        )
+
+    def fake_device(**_kw):  # noqa: ANN001
+        raise ProtocolMintError("device poll timeout")
+
+    def fake_browser(**_kw):  # noqa: ANN001
+        raise AssertionError("browser must not run under protocol_only")
+
+    mint_mod.mint_with_sso_pkce = fake_pkce  # type: ignore[assignment]
+    mint_mod.mint_with_sso_protocol = fake_device  # type: ignore[assignment]
+    mint_mod.mint_with_browser = fake_browser  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            r = mint_mod.mint_and_export(
+                email="po@ex.com",
+                password="pw",
+                auth_dir=td,
+                sso="sso-po",
+                prefer_protocol=True,
+                protocol_flow="pkce",
+                allow_device_flow_fallback=True,
+                protocol_only=True,
+                probe=False,
+                probe_chat=False,
+                log=lambda _m: None,
+            )
+            assert r.get("ok") is False
+            assert r.get("mint_method") == "protocol_device", r
+            assert "protocol_error" in r
+            assert "device" in str(r.get("error") or "").lower() or "device" in str(
+                r.get("protocol_error") or ""
+            ).lower()
+
+            # Primary device path (no PKCE attempt) stays mint_method=protocol on fail.
+            mint_mod.mint_with_sso_protocol = fake_device  # type: ignore[assignment]
+            r2 = mint_mod.mint_and_export(
+                email="po2@ex.com",
+                password="pw",
+                auth_dir=td,
+                sso="sso-po2",
+                prefer_protocol=True,
+                protocol_flow="device",
+                allow_device_flow_fallback=True,
+                protocol_only=True,
+                probe=False,
+                probe_chat=False,
+                log=lambda _m: None,
+            )
+            assert r2.get("ok") is False
+            assert r2.get("mint_method") == "protocol", r2
+    finally:
+        mint_mod.mint_with_sso_pkce = orig["pkce"]  # type: ignore[assignment]
+        mint_mod.mint_with_sso_protocol = orig["device"]  # type: ignore[assignment]
+        mint_mod.mint_with_browser = orig["browser"]  # type: ignore[assignment]
+    print("PASS mint protocol_only fail labels protocol_device")
 
 
 def test_inject_ignores_probe_via_cpa_ok_without_chat_ok() -> None:
@@ -928,6 +1264,10 @@ def main() -> int:
     test_mint_passes_transport_kwargs_signature()
     test_export_resolves_env_api_key()
     test_pkce_non_retryable_residual_classifier()
+    test_cancelled_helpers_and_fail_taxonomy_surface()
+    test_mint_pkce_fail_device_residual_e2e()
+    test_mint_cancel_short_circuits_residual()
+    test_mint_protocol_only_fail_labels_protocol_device()
     test_inject_ignores_probe_via_cpa_ok_without_chat_ok()
     print("\nALL PASS (cpa chat entitlement gate)")
     return 0
