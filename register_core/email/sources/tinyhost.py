@@ -69,6 +69,7 @@ class TinyhostSource:
         self.base_url = (base_url or DEFAULT_BASE).rstrip("/")
         self.proxy = proxy or ""
         self.forced_domain = domain
+        self.last_wait_diagnostics = None
 
     def _opener(self):
         if self.proxy:
@@ -134,27 +135,43 @@ class TinyhostSource:
         newer_than_epoch: float | None = None,
         sender_hint: str | None = None,
     ) -> OtpCode:
+        from register_core.contracts import OtpWaitDiagnostics
+
         used = used_codes or set()
         local = mailbox.meta.get("local") or mailbox.address.split("@", 1)[0]
         domain = mailbox.meta.get("domain") or mailbox.address.split("@", 1)[-1]
         url = f"{self.base_url}/api/email/{domain}/{local}/?page=1&limit=100"
-        deadline = time.time() + max(5.0, timeout_s)
-        since = (newer_than_epoch if newer_than_epoch is not None else time.time()) - 15
+        started = time.time()
+        deadline = started + max(5.0, timeout_s)
+        since = (newer_than_epoch if newer_than_epoch is not None else started) - 15
         hint = (sender_hint or "").lower().strip()
+        diag = OtpWaitDiagnostics(
+            timeout_s=float(timeout_s),
+            provider=self.name,
+            sender_hint=(sender_hint or ""),
+        )
+        self.last_wait_diagnostics = diag
 
         while time.time() < deadline:
+            diag.poll_count += 1
             try:
                 data = self._get_json(url, timeout=20)
             except MailMissError:
+                diag.empty_rounds += 1
                 time.sleep(poll_interval_s)
                 continue
             emails = data.get("emails") if isinstance(data, dict) else None
-            if not isinstance(emails, list):
+            if not isinstance(emails, list) or not emails:
+                diag.empty_rounds += 1
                 time.sleep(poll_interval_s)
                 continue
+            if diag.first_message_seen_at is None:
+                diag.first_message_seen_at = time.time()
+                diag.first_seen_after_seconds = diag.first_message_seen_at - started
             for mail in emails:
                 if not isinstance(mail, dict):
                     continue
+                diag.message_scan_count += 1
                 ts = _parse_mail_ts(mail.get("date"))
                 if ts and ts < since:
                     continue
@@ -172,13 +189,23 @@ class TinyhostSource:
                 code = m.group(1)
                 if code in used:
                     continue
+                diag.matched_at = time.time()
+                diag.matched_after_seconds = diag.matched_at - started
+                diag.elapsed_seconds = diag.matched_after_seconds
+                self.last_wait_diagnostics = diag
                 return OtpCode(
                     code=code,
                     source=self.name,
                     raw_subject=str(mail.get("subject") or "")[:200],
                 )
             time.sleep(poll_interval_s)
-        raise MailMissError(f"tinyhost OTP timeout for {mailbox.address}")
+        diag.elapsed_seconds = time.time() - started
+        diag.failure_class = "no_mail" if diag.message_scan_count == 0 else "parse_fail"
+        self.last_wait_diagnostics = diag
+        raise MailMissError(
+            f"tinyhost OTP timeout for {mailbox.address}",
+            diagnostics=diag,
+        )
 
     def release(self, mailbox: Mailbox, *, success: bool) -> None:
         return

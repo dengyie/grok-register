@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -22,6 +23,8 @@ class Node:
     last_error: str = ""
     last_checked_at: float | None = None
     fail_count: int = 0
+    cooldown_until: float | None = None  # epoch seconds; soft cool, not quarantine
+    cooldown_reason: str = ""
 
     def __post_init__(self) -> None:
         self.url = str(self.url or "").strip()
@@ -31,6 +34,11 @@ class Node:
             self.label = _safe_label(self.url)
 
     def to_public_dict(self) -> dict[str, Any]:
+        cooling = False
+        try:
+            cooling = self.cooldown_until is not None and float(self.cooldown_until) > time.time()
+        except (TypeError, ValueError):
+            cooling = False
         return {
             "id": self.id,
             "label": self.label or _safe_label(self.url),
@@ -41,6 +49,8 @@ class Node:
             "last_ms": self.last_ms,
             "last_error": (self.last_error or "")[:160],
             "fail_count": int(self.fail_count or 0),
+            "cooling": cooling,
+            "cooldown_reason": self.cooldown_reason or "",
         }
 
     def to_store_dict(self) -> dict[str, Any]:
@@ -63,6 +73,13 @@ class Node:
             d["last_error"] = self.last_error[:200]
         if self.fail_count:
             d["fail_count"] = int(self.fail_count)
+        if self.cooldown_until is not None:
+            try:
+                d["cooldown_until"] = float(self.cooldown_until)
+            except (TypeError, ValueError):
+                pass
+        if self.cooldown_reason:
+            d["cooldown_reason"] = str(self.cooldown_reason)[:80]
         return d
 
 
@@ -85,6 +102,14 @@ def node_from_dict(raw: Any) -> Node | None:
     enabled = raw.get("enabled", True)
     if isinstance(enabled, str):
         enabled = enabled.strip().lower() not in {"0", "false", "no", "off"}
+    cool_until = raw.get("cooldown_until")
+    if cool_until is not None and cool_until != "":
+        try:
+            cool_until = float(cool_until)
+        except (TypeError, ValueError):
+            cool_until = None
+    else:
+        cool_until = None
     return Node(
         url=url,
         id=str(raw.get("id") or "").strip(),
@@ -96,6 +121,8 @@ def node_from_dict(raw: Any) -> Node | None:
         last_ms=raw.get("last_ms"),
         last_error=str(raw.get("last_error") or ""),
         fail_count=int(raw.get("fail_count") or 0),
+        cooldown_until=cool_until,
+        cooldown_reason=str(raw.get("cooldown_reason") or ""),
     )
 
 

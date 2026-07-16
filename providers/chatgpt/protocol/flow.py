@@ -430,7 +430,7 @@ class PlatformRegistrar:
                 body or error or ""
             ):
                 # Risk engine block (IP / domain / device reputation) — not a protocol bug.
-                kind = "provider"
+                kind = "registration_disallowed"
             raise ChatGPTRegisterError(
                 f"create_account_http_{status}:{code or error or body}",
                 kind=kind,
@@ -664,6 +664,7 @@ def register_one(
         steps["register_user"] = {"status": reg.get("status")}
         otp_send = registrar.send_otp()
         steps["send_otp"] = {"status": otp_send.get("status")}
+        steps["otp_sent_at"] = time.time()
         log("waiting for email OTP…")
         code = ""
         last_otp_err = ""

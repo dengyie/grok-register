@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -394,6 +395,38 @@ class TestManager(unittest.TestCase):
         self.assertTrue(all("alive" in p for p in seen))
         self.assertFalse(any("dead" in p for p in seen))
         self.assertEqual(stats.nodes_preflight.get("healthy"), 1)
+
+    def test_cooldown_skips_pick_until_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes(
+                [
+                    Node(url="http://cool:1", id="c"),
+                    Node(url="http://hot:2", id="h"),
+                ],
+                path,
+            )
+            mgr = NodeManager(path)
+            n = mgr.cooldown("http://cool:1", seconds=600, reason="registration_disallowed")
+            self.assertIsNotNone(n)
+            assert n is not None
+            self.assertTrue(mgr.is_cooling(n))
+            picked = {mgr.pick().url for _ in range(4)}  # type: ignore[union-attr]
+            self.assertEqual(picked, {"http://hot:2"})
+            # force expire
+            for node in mgr.nodes:
+                if node.url == "http://cool:1":
+                    node.cooldown_until = time.time() - 1
+            urls = {n.url for n in mgr.enabled_nodes()}
+            self.assertIn("http://cool:1", urls)
+
+    def test_mail_miss_mark_does_not_require_cooldown_api(self) -> None:
+        # structural: is_cooling false by default
+        n = Node(url="http://x:1")
+        mgr = NodeManager.__new__(NodeManager)
+        mgr._skip_failed = True
+        mgr._max_fail = 3
+        self.assertFalse(NodeManager.is_cooling(mgr, n))
 
 
 if __name__ == "__main__":

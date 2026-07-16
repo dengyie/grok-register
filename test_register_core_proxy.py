@@ -235,5 +235,73 @@ class TestRotationConfig(unittest.TestCase):
         self.assertIn("http://ok:1", cfg.get("proxy_list") or "")
 
 
+class TestReportAttemptSoftCool(unittest.TestCase):
+    def setUp(self) -> None:
+        core_proxy.reset_rotation_for_tests()
+
+    def tearDown(self) -> None:
+        core_proxy.reset_rotation_for_tests()
+
+    def test_registration_disallowed_soft_cools_not_quarantine(self) -> None:
+        from register_core.nodes.catalog import save_nodes
+        from register_core.nodes.manager import NodeManager, reset_manager_for_tests
+        from register_core.nodes.models import Node
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes([Node(url="http://risk:9", id="r")], path)
+            reset_manager_for_tests()
+            env = {
+                "REGISTER_NODES_FILE": str(path),
+                "REGISTER_NODES": "1",
+                "REGISTER_NODES_COOLDOWN_RISK": "600",
+                "REGISTER_NODES_COOLDOWN_NETWORK": "120",
+                "REGISTER_NODES_COOLDOWN_PER_USE": "0",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                reset_manager_for_tests()
+                info = core_proxy.report_attempt_proxy_result(
+                    {"proxy": "http://risk:9"},
+                    ok=False,
+                    error="create_account registration_disallowed",
+                    error_kind="registration_disallowed",
+                )
+                self.assertEqual(info.get("action"), "risk_cooldown")
+                self.assertFalse(info.get("quarantined"))
+                mgr = NodeManager(path)
+                n = mgr.find_by_url("http://risk:9")
+                assert n is not None
+                self.assertTrue(mgr.is_cooling(n))
+                self.assertEqual(n.cooldown_reason, "registration_disallowed")
+                # not hard-quarantined
+                self.assertFalse(mgr.is_quarantined(n))
+            reset_manager_for_tests()
+
+    def test_mail_miss_no_cool_no_quarantine(self) -> None:
+        from register_core.nodes.catalog import save_nodes
+        from register_core.nodes.manager import NodeManager, reset_manager_for_tests
+        from register_core.nodes.models import Node
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes([Node(url="http://m:1", id="m")], path)
+            env = {"REGISTER_NODES_FILE": str(path), "REGISTER_NODES": "1"}
+            with patch.dict(os.environ, env, clear=False):
+                reset_manager_for_tests()
+                info = core_proxy.report_attempt_proxy_result(
+                    {"proxy": "http://m:1"},
+                    ok=False,
+                    error="otp_wait",
+                    error_kind="mail_miss",
+                )
+                self.assertEqual(info.get("reason"), "non_proxy_failure")
+                mgr = NodeManager(path)
+                n = mgr.find_by_url("http://m:1")
+                assert n is not None
+                self.assertFalse(mgr.is_cooling(n))
+                self.assertEqual(int(n.fail_count or 0), 0)
+            reset_manager_for_tests()
+
+
 if __name__ == "__main__":
     unittest.main()

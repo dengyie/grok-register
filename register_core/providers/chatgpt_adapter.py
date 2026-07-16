@@ -6,10 +6,11 @@ import json
 import os
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from register_core.contracts import RegisterResult
+from register_core.contracts import RegisterResult, normalize_error_kind
 from register_core.email.base import EmailSource
 from register_core.email.registry import get_email_source
 from register_core.errors import FailFastError, MailMissError, ProviderError
@@ -20,6 +21,32 @@ if str(ROOT) not in sys.path:
 
 PROTOCOL_DIR = ROOT / "providers" / "chatgpt"
 OUTPUT_DIR = PROTOCOL_DIR / "output"
+
+
+def resolve_mail_proxy(extra: dict[str, Any] | None = None) -> str:
+    """Mail HTTP path proxy. Never falls back to register egress proxy."""
+    extra = extra if isinstance(extra, dict) else {}
+    for key in ("mail_proxy", "email_proxy"):
+        v = str(extra.get(key) or "").strip()
+        if v:
+            return v
+    for env in ("CHATGPT_MAIL_PROXY", "EMAIL_PROXY", "MAIL_PROXY"):
+        v = str(os.environ.get(env) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def _redact_proxy(url: str) -> str:
+    s = (url or "").strip()
+    if not s:
+        return "(none)"
+    try:
+        if "@" in s:
+            return s.split("@", 1)[-1]
+    except Exception:
+        pass
+    return s[:80]
 
 
 class ChatGPTProvider:
@@ -90,13 +117,19 @@ class ChatGPTProvider:
             except Exception:
                 pass
         proxy = str(extra.get("proxy") or self.proxy or "").strip()
+        mail_proxy = resolve_mail_proxy(extra)
         otp_timeout = float(extra.get("otp_timeout_s") or self.otp_timeout_s)
         domain = str(extra.get("email_domain") or self.email_domain or "").strip() or None
 
         source = email_source
         if source is None:
             try:
-                kw: dict[str, Any] = {"proxy": proxy or None}
+                kw: dict[str, Any] = {}
+                if mail_proxy:
+                    kw["proxy"] = mail_proxy
+                else:
+                    # Explicit direct — do NOT pass register egress proxy into mail path.
+                    kw["proxy"] = None
                 if domain and self.email_source_name in ("tinyhost", "auto"):
                     kw["domain"] = domain
                 source = get_email_source(self.email_source_name, **kw)
@@ -140,11 +173,28 @@ class ChatGPTProvider:
             "runtime": str(PROTOCOL_DIR),
             "email_source": getattr(source, "name", self.email_source_name),
             "mailbox_provider": mailbox.provider,
-            "proxy": proxy or "(none)",
+            "proxy": _redact_proxy(proxy),
+            "register_proxy": _redact_proxy(proxy),
+            "mail_proxy": _redact_proxy(mail_proxy) if mail_proxy else "(direct)",
             "proxy_mode": str(rot_meta.get("mode") or "fixed"),
             "proxy_label": str(rot_meta.get("label") or proxy or "(none)"),
             "note": "in-process openai platform oauth; no cpa inject; egress self-controlled",
         }
+
+        def _attach_otp_wait(exc: BaseException | None = None) -> None:
+            diag = None
+            if isinstance(exc, MailMissError) and getattr(exc, "diagnostics", None) is not None:
+                diag = exc.diagnostics
+            elif getattr(source, "last_wait_diagnostics", None) is not None:
+                diag = getattr(source, "last_wait_diagnostics")
+            if diag is None:
+                return
+            try:
+                arts["otp_wait"] = (
+                    asdict(diag) if hasattr(diag, "__dataclass_fields__") else dict(diag)  # type: ignore[arg-type]
+                )
+            except Exception:
+                arts["otp_wait"] = {"notes": "diagnostics_serialize_failed"}
 
         try:
             result = register_one(
@@ -155,7 +205,7 @@ class ChatGPTProvider:
                 log=log,
             )
         except ChatGPTRegisterError as exc:
-            kind = getattr(exc, "kind", "provider") or "provider"
+            kind = normalize_error_kind(getattr(exc, "kind", "provider"))
             try:
                 source.release(mailbox, success=False)
             except Exception:
@@ -164,13 +214,15 @@ class ChatGPTProvider:
                 raise FailFastError(str(exc)) from exc
             # Keep email/password/artifacts on mail_miss (do not raise bare MailMissError
             # which would strip identity in pipeline exception path).
+            if kind == "mail_miss":
+                _attach_otp_wait()
             return RegisterResult(
                 ok=False,
                 provider=self.name,
                 email=email,
                 password=password,
                 error=str(exc),
-                error_kind=kind if kind in ("mail_miss", "provider", "captcha", "other") else "provider",
+                error_kind=kind,
                 secret_kind="none",
                 artifacts={**arts, "tail": "\n".join(logs)[-1500:]},
             )
@@ -179,6 +231,7 @@ class ChatGPTProvider:
                 source.release(mailbox, success=False)
             except Exception:
                 pass
+            _attach_otp_wait(exc)
             return RegisterResult(
                 ok=False,
                 provider=self.name,
@@ -211,7 +264,7 @@ class ChatGPTProvider:
                 email=result.email or email,
                 password=password,
                 error=result.error or "register_failed",
-                error_kind=result.error_kind or "provider",
+                error_kind=normalize_error_kind(result.error_kind or "provider"),
                 secret_kind="none",
                 artifacts=arts,
             )

@@ -671,11 +671,56 @@ def report_attempt_proxy_result(
         info["reason"] = "not_in_catalog"
         return info
 
+    def _cool_seconds(env_name: str, default: float) -> float:
+        raw = _env_first(env_name, default=str(default))
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return float(default)
+
+    kind = (error_kind or "").strip().lower()
     network_fail = is_proxy_network_failure(ok=ok, error=error, error_kind=error_kind)
+
     if ok:
         mgr.mark_result(proxy, ok=True, error="", persist=True)
         info["marked"] = True
         info["action"] = "success_clear"
+        # Clear soft cool on success so the node re-enters rotation immediately.
+        try:
+            if node.cooldown_until is not None:
+                node.cooldown_until = None
+                node.cooldown_reason = ""
+                try:
+                    from register_core.nodes.catalog import save_nodes
+
+                    save_nodes(mgr.nodes, mgr.path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        per_use = _cool_seconds("REGISTER_NODES_COOLDOWN_PER_USE", 0.0)
+        if per_use > 0:
+            mgr.cooldown(proxy, per_use, reason="per_use", persist=True)
+            info["cooldown_s"] = per_use
+            info["action"] = "success_clear_per_use_cool"
+        return info
+
+    # Business failures: never quarantine; risk gets soft cool only.
+    if kind in {"mail_miss", "captcha", "verify", "fatal"}:
+        info["reason"] = "non_proxy_failure"
+        return info
+
+    if kind in {"registration_disallowed", "disallowed"} or (
+        "registration_disallowed" in (error or "").lower()
+    ):
+        risk_s = _cool_seconds("REGISTER_NODES_COOLDOWN_RISK", 600.0)
+        if risk_s > 0:
+            mgr.cooldown(proxy, risk_s, reason="registration_disallowed", persist=True)
+            info["action"] = "risk_cooldown"
+            info["cooldown_s"] = risk_s
+        else:
+            info["action"] = "risk_no_cooldown"
+        info["quarantined"] = False
         return info
 
     if not network_fail:
@@ -685,6 +730,11 @@ def report_attempt_proxy_result(
     marked = mgr.mark_result(proxy, ok=False, error=error or error_kind or "proxy_fail", persist=True)
     info["marked"] = marked is not None
     info["action"] = "fail_mark"
+    net_s = _cool_seconds("REGISTER_NODES_COOLDOWN_NETWORK", 120.0)
+    if net_s > 0:
+        mgr.cooldown(proxy, net_s, reason="network", persist=True)
+        info["cooldown_s"] = net_s
+        info["action"] = "fail_mark_network_cool"
     if marked is not None:
         info["fail_count"] = int(marked.fail_count or 0)
         info["quarantined"] = mgr.is_quarantined(marked)

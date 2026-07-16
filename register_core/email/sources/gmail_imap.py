@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import time as _time
 from typing import Any
 
-from register_core.contracts import Mailbox, OtpCode
+from register_core.contracts import Mailbox, OtpCode, OtpWaitDiagnostics
 from register_core.errors import FailFastError, MailMissError, ProviderError
 
 
@@ -13,6 +14,7 @@ class GmailImapSource:
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
+        self.last_wait_diagnostics = None
 
     def _reg(self):
         try:
@@ -45,11 +47,21 @@ class GmailImapSource:
         newer_than_epoch: float | None = None,
         sender_hint: str | None = None,
     ) -> OtpCode:
+        started = _time.time()
+        diag = OtpWaitDiagnostics(
+            timeout_s=float(timeout_s),
+            provider=self.name,
+            sender_hint=(sender_hint or ""),
+            notes="wraps grok_register_ttk.get_oai_code",
+        )
+        self.last_wait_diagnostics = diag
         reg = self._reg()
         prev = None
+        code = None
         try:
             prev = reg.config.get("email_provider")
             reg.config["email_provider"] = "gmail"
+            diag.poll_count = 1
             code = reg.get_oai_code(
                 mailbox.token,
                 mailbox.address,
@@ -57,14 +69,34 @@ class GmailImapSource:
                 poll_interval=int(poll_interval_s),
             )
         except Exception as exc:
-            raise MailMissError(f"gmail OTP failed: {exc}") from exc
+            msg = str(exc)
+            low = msg.lower()
+            if "auth" in low or "credential" in low or "authenticationfailed" in low:
+                diag.failure_class = "imap_error"
+            else:
+                diag.failure_class = "imap_error"
+            diag.elapsed_seconds = _time.time() - started
+            self.last_wait_diagnostics = diag
+            raise MailMissError(f"gmail OTP failed: {exc}", diagnostics=diag) from exc
         finally:
             if prev is not None:
                 reg.config["email_provider"] = prev
+        diag.elapsed_seconds = _time.time() - started
         if not code:
-            raise MailMissError(f"gmail empty OTP for {mailbox.address}")
+            diag.failure_class = "no_mail"
+            self.last_wait_diagnostics = diag
+            raise MailMissError(
+                f"gmail empty OTP for {mailbox.address}",
+                diagnostics=diag,
+            )
         if used_codes and code in used_codes:
-            raise MailMissError(f"gmail OTP already used: {code}")
+            diag.failure_class = "stale_code"
+            self.last_wait_diagnostics = diag
+            raise MailMissError(f"gmail OTP already used: {code}", diagnostics=diag)
+        diag.matched_at = _time.time()
+        diag.matched_after_seconds = diag.matched_at - started
+        diag.message_scan_count = 1
+        self.last_wait_diagnostics = diag
         return OtpCode(code=str(code), source=self.name)
 
     def release(self, mailbox: Mailbox, *, success: bool) -> None:

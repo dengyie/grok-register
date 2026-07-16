@@ -59,11 +59,52 @@ class NodeManager:
     def _is_quarantined(self, n: Node) -> bool:
         return self.is_quarantined(n)
 
+    def is_cooling(self, n: Node) -> bool:
+        """Soft cooldown — temporary skip without hard quarantine."""
+        until = n.cooldown_until
+        if until is None:
+            return False
+        try:
+            return float(until) > time.time()
+        except (TypeError, ValueError):
+            return False
+
+    def cooldown(
+        self,
+        url: str,
+        seconds: float,
+        reason: str = "",
+        *,
+        persist: bool = True,
+    ) -> Node | None:
+        """Put a catalog node into soft cooldown for ``seconds``."""
+        url = (url or "").strip()
+        if not url or seconds <= 0:
+            return None
+        self.ensure_loaded()
+        with self._lock:
+            node = None
+            for n in self.nodes:
+                if n.url == url:
+                    node = n
+                    break
+            if node is None:
+                return None
+            node.cooldown_until = time.time() + float(seconds)
+            node.cooldown_reason = (reason or "")[:80]
+            if persist:
+                try:
+                    save_nodes(self.nodes, self.path)
+                except Exception:
+                    pass
+            return node
+
     def enabled_nodes(self, *, healthy_only: bool = False) -> list[Node]:
         """Enabled dialable nodes.
 
         ``healthy_only=True`` → only ``last_ok is True`` (post-probe pool for register).
         Always excludes quarantined hard-fails when ``REGISTER_NODES_SKIP_FAILED``.
+        Also skips soft-cooling nodes until ``cooldown_until`` expires.
         """
         self.ensure_loaded()
         with self._lock:
@@ -74,6 +115,8 @@ class NodeManager:
                 if not n.url:
                     continue
                 if self._is_quarantined(n):
+                    continue
+                if self.is_cooling(n):
                     continue
                 if healthy_only:
                     if n.last_ok is not True:
@@ -325,6 +368,7 @@ class NodeManager:
                 for n in enabled
                 if n.last_ok is False and int(n.fail_count or 0) >= self._max_fail
             ]
+            cooling = [n for n in enabled if self.is_cooling(n)]
             return {
                 "path": str(self.path),
                 "exists": self.path.is_file(),
@@ -332,6 +376,7 @@ class NodeManager:
                 "enabled": len(enabled),
                 "healthy": len(healthy),
                 "quarantined": len(quarantined),
+                "cooling": len(cooling),
                 "max_fail": self._max_fail,
                 "skip_failed": self._skip_failed,
                 "index": self._index,
