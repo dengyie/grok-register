@@ -176,6 +176,7 @@ def test_clash_mode_rotate_and_restore() -> None:
     rot.configure(
         {
             "proxy_rotate_mode": "clash",
+            "proxy_rotate_every": 1,
             "clash_api": "unix:///tmp/fake.sock",
             "clash_proxy_group": "GROK-REG",
             "clash_donor_group": "宝可梦",
@@ -189,13 +190,21 @@ def test_clash_mode_rotate_and_restore() -> None:
 
     def fake_list_nodes(api, group, **k):
         calls["list"] += 1
-        return ["NODE_A", "NODE_B", "NODE_C"], "NODE_A", {}
+        # after switch, "now" follows last switch for realism
+        now = calls["switch"][-1][1] if calls["switch"] else "NODE_A"
+        return ["NODE_A", "NODE_B", "NODE_C"], now, {}
 
     def fake_switch(api, group, node, **k):
         calls["switch"].append((group, node))
 
     with patch.object(pr, "clash_list_nodes", side_effect=fake_list_nodes):
         with patch.object(pr, "clash_switch_node", side_effect=fake_switch):
+            # on_start claims current; does not steal pin
+            r0 = rot.maybe_rotate(log=None)
+            assert r0.get("rotated") is False
+            assert r0.get("node") == "NODE_A"
+            assert calls["switch"] == []
+            # every=1 → next account advances
             r = rot.maybe_rotate(log=None)
             assert r["rotated"] is True
             assert r["node"] == "NODE_B"
@@ -238,6 +247,87 @@ def test_off_mode() -> None:
     print("PASS off mode")
 
 
+def test_clash_on_start_keeps_current_node() -> None:
+    """Smoke bug: on_start must not steal pre-pinned GROK_NODE (TUIC→AnyTLS).
+
+    First due rotate (rotate_on_start) claims current node; advance only after
+    accounts_on_current >= every (symmetric to list mode using pool[0] first).
+    """
+    rot = pr.ProxyRotator()
+    rot.configure(
+        {
+            "proxy_rotate_mode": "clash",
+            "proxy_rotate_every": 1,
+            "proxy_rotate_on_start": True,
+            "clash_api": "unix:///tmp/fake.sock",
+            "clash_proxy_group": "🎯Grok注册",
+            "clash_donor_group": "宝可梦",
+            "clash_restore_on_exit": True,
+        }
+    )
+    rot.clash_setup_done = True
+    calls: list[tuple[str, str]] = []
+
+    def fake_list_nodes(api, group, **k):
+        # current pinned by start-clash-for-grok.sh
+        return ["GVPS-TUIC-googlevps", "GVPS-AnyTLS-googlevps"], "GVPS-TUIC-googlevps", {}
+
+    def fake_switch(api, group, node, **k):
+        calls.append((group, node))
+
+    with patch.object(pr, "clash_list_nodes", side_effect=fake_list_nodes):
+        with patch.object(pr, "clash_switch_node", side_effect=fake_switch):
+            r0 = rot.maybe_rotate(log=None)
+            assert r0.get("node") == "GVPS-TUIC-googlevps" or r0.get("label") == "GVPS-TUIC-googlevps"
+            assert r0.get("rotated") is False or r0.get("reason") in {
+                "on_start_keep_current",
+                "pin_current_on_start",
+                "single_or_same_node",
+            }, r0
+            assert calls == [], f"on_start must not switch away from pin: {calls}"
+
+            # every=1 → 2nd account advances
+            r1 = rot.maybe_rotate(log=None)
+            assert r1.get("rotated") is True
+            assert r1.get("node") == "GVPS-AnyTLS-googlevps"
+            assert calls[-1][1] == "GVPS-AnyTLS-googlevps"
+    print("PASS clash on_start keeps current node")
+
+
+def test_clash_pin_node_from_config_on_start() -> None:
+    """If clash_pin_node / GROK_NODE set and not current, on_start switches TO pin (not next)."""
+    rot = pr.ProxyRotator()
+    rot.configure(
+        {
+            "proxy_rotate_mode": "clash",
+            "proxy_rotate_every": 1,
+            "proxy_rotate_on_start": True,
+            "clash_api": "unix:///tmp/fake.sock",
+            "clash_proxy_group": "🎯Grok注册",
+            "clash_donor_group": "宝可梦",
+            "clash_pin_node": "GVPS-TUIC-googlevps",
+            "clash_restore_on_exit": True,
+        }
+    )
+    assert rot.clash_pin_node == "GVPS-TUIC-googlevps"
+    rot.clash_setup_done = True
+    calls: list[str] = []
+
+    def fake_list_nodes(api, group, **k):
+        return ["GVPS-AnyTLS-googlevps", "GVPS-TUIC-googlevps"], "GVPS-AnyTLS-googlevps", {}
+
+    def fake_switch(api, group, node, **k):
+        calls.append(node)
+
+    with patch.object(pr, "clash_list_nodes", side_effect=fake_list_nodes):
+        with patch.object(pr, "clash_switch_node", side_effect=fake_switch):
+            r0 = rot.maybe_rotate(log=None)
+            assert r0.get("rotated") is True
+            assert r0.get("node") == "GVPS-TUIC-googlevps"
+            assert calls == ["GVPS-TUIC-googlevps"]
+    print("PASS clash pin_node on_start")
+
+
 def main() -> int:
     test_parse_proxy_list()
     test_parse_domain_list()
@@ -248,6 +338,8 @@ def main() -> int:
     test_clash_mode_rotate_and_restore()
     test_clash_mode_refuses_main_group_at_runtime()
     test_off_mode()
+    test_clash_on_start_keeps_current_node()
+    test_clash_pin_node_from_config_on_start()
     print("\nALL PASS (proxy_rotate)")
     return 0
 

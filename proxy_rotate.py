@@ -628,6 +628,7 @@ class ProxyRotator:
         self.clash_include = ""
         self.clash_flush = True
         self.clash_restore_on_exit = True
+        self.clash_pin_node = ""
         self.clash_setup_done = False
         self.update_cpa_proxy = True
         self._original_clash_node: str = ""
@@ -712,6 +713,11 @@ class ProxyRotator:
             self.clash_include = str(cfg.get("clash_node_include") or "").strip()
             self.clash_flush = _truthy(cfg.get("clash_flush_connections"), True)
             self.clash_restore_on_exit = _truthy(cfg.get("clash_restore_on_exit"), True)
+            # Prefer config pin; fall back to GROK_NODE env (start-clash-for-grok.sh).
+            pin = str(
+                cfg.get("clash_pin_node") or cfg.get("grok_node") or os.environ.get("GROK_NODE") or ""
+            ).strip()
+            self.clash_pin_node = pin
 
             self.accounts_on_current = 0
             self._original_clash_node = ""
@@ -838,6 +844,56 @@ class ProxyRotator:
             raise RuntimeError(f"clash group {self.clash_group!r} 无可用节点")
         if not self._original_clash_node:
             self._original_clash_node = now
+
+        # First due rotate (rotate_on_start): claim current / pin — do NOT advance off
+        # pre-pinned GROK_NODE (smoke bug: TUIC → AnyTLS on worker start).
+        if not self._started:
+            pin = self.clash_pin_node
+            if pin and pin in nodes and pin != now:
+                clash_switch_node(
+                    self.clash_api,
+                    self.clash_group,
+                    pin,
+                    secret=self.clash_secret,
+                    flush=self.clash_flush,
+                )
+                self._clash_dirty = True
+                self.current_label = pin
+                return {
+                    "rotated": True,
+                    "mode": "clash",
+                    "label": pin,
+                    "node": pin,
+                    "prev": now,
+                    "reason": "pin_current_on_start",
+                    "group": self.clash_group,
+                    "pool_size": len(nodes),
+                    "domains": list(self.clash_domains),
+                    "proxy": proxy_log_label(self.current_proxy) or self.current_proxy,
+                    "scope": "domain_rules_only",
+                    "will_restore": self.clash_restore_on_exit,
+                    "original": self._original_clash_node,
+                }
+            # Keep current node (symmetric to list mode using pool[0] first).
+            claim = pin if pin and pin == now else now
+            if claim not in nodes:
+                claim = now if now in nodes else nodes[0]
+            self.current_label = claim
+            return {
+                "rotated": False,
+                "mode": "clash",
+                "label": claim,
+                "node": claim,
+                "reason": "on_start_keep_current",
+                "group": self.clash_group,
+                "pool_size": len(nodes),
+                "domains": list(self.clash_domains),
+                "proxy": proxy_log_label(self.current_proxy) or self.current_proxy,
+                "scope": "domain_rules_only",
+                "will_restore": self.clash_restore_on_exit,
+                "original": self._original_clash_node,
+            }
+
         try:
             idx = nodes.index(now)
             nxt = nodes[(idx + 1) % len(nodes)]
