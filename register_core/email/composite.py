@@ -35,11 +35,41 @@ class CompositeEmailSource:
         else:
             self.name = f"{mname}+{dname}"
         self.last_wait_diagnostics = None
-        # Optional attrs some adapters poke (tinyhost domain / proxy).
-        if hasattr(mailbox, "proxy"):
-            self.proxy = getattr(mailbox, "proxy")
-        if hasattr(mailbox, "forced_domain"):
-            self.forced_domain = getattr(mailbox, "forced_domain")
+        # Snapshot-only attrs silently freeze mailbox.proxy at construction time.
+        # Adapters that set mailbox.proxy after wrap (or set composite.proxy) must
+        # forward live; use properties that prefer override, then live mailbox.
+        self._proxy_override: str | None = None
+        self._forced_domain_override: str | None = None
+
+    @property
+    def proxy(self) -> str:
+        if self._proxy_override is not None:
+            return self._proxy_override
+        return str(getattr(self.mailbox, "proxy", "") or "")
+
+    @proxy.setter
+    def proxy(self, value: str) -> None:
+        self._proxy_override = str(value or "")
+        if hasattr(self.mailbox, "proxy"):
+            try:
+                self.mailbox.proxy = self._proxy_override
+            except Exception:
+                pass
+
+    @property
+    def forced_domain(self) -> str | None:
+        if self._forced_domain_override is not None:
+            return self._forced_domain_override
+        return getattr(self.mailbox, "forced_domain", None)
+
+    @forced_domain.setter
+    def forced_domain(self, value: str | None) -> None:
+        self._forced_domain_override = value
+        if hasattr(self.mailbox, "forced_domain"):
+            try:
+                self.mailbox.forced_domain = value
+            except Exception:
+                pass
 
     def allocate(self) -> Mailbox:
         return self.mailbox.allocate()

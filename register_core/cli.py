@@ -117,10 +117,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 2
+        # --count default is None so profile.count is not clobbered by argparse=1.
+        cli_count = args.count if getattr(args, "count", None) is not None else None
         job, sink_path = apply_cli_overrides(
             profile,
-            count=args.count if args.count and args.count != 1 else profile.count,
-            # if user passed -n explicitly we still use args.count (argparse default 1)
+            count=cli_count,
             no_verify=bool(args.no_verify),
             no_fail_fast=bool(args.no_fail_fast),
             egress=str(getattr(args, "egress", "") or ""),
@@ -131,10 +132,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             threads=args.threads,
             headless=headless,
         )
-        # Prefer explicit CLI count always when provided via -n (default 1 may override profile).
-        # If profile has count>1 and user did not intend override, use profile: detect via
-        # only overriding when args.count was set differently — keep simple: CLI -n wins.
-        job.count = int(args.count or profile.count)
+        # Explicit -n wins; otherwise keep profile / apply_cli_overrides result.
+        if cli_count is not None:
+            job.count = int(cli_count)
         sink = JsonlSink(sink_path) if sink_path else None
         try:
             pipe = Pipeline.from_profile(profile, sink=sink, overrides={
@@ -195,7 +195,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         job = RegisterJob(
             provider=args.provider,
-            count=args.count,
+            # Non-profile path: default 1 when -n omitted (profile path keeps profile.count).
+            count=int(args.count) if args.count is not None else 1,
             email_source=args.email_source,
             verify=not args.no_verify,
             fail_fast=not args.no_fail_fast,
@@ -259,7 +260,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="grok | mimo | chatgpt (required unless --profile)",
     )
-    pr.add_argument("--count", "-n", type=int, default=1)
+    pr.add_argument(
+        "--count",
+        "-n",
+        type=int,
+        default=None,
+        help="override profile count (omit to keep profile.count; default was clobbering)",
+    )
     pr.add_argument(
         "--email-source",
         default="provider",

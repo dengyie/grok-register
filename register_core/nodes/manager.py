@@ -341,18 +341,23 @@ class NodeManager:
             # Dual-pass pool: only layered ok (L1∧L2). Do not fall back to last_ok-only.
             # Prefer probe-ok order (smart_order); skip quarantine/cooling.
             self.ensure_loaded()
+            # Index by id; if ids ever collide, keep ALL urls under that id so
+            # L2 seed does not silently drop last-write-wins victims.
             with self._lock:
-                id_to_node = {str(n.id or ""): n for n in self.nodes}
+                id_to_nodes: dict[str, list] = {}
+                for n in self.nodes:
+                    id_to_nodes.setdefault(str(n.id or ""), []).append(n)
             ordered: list[str] = []
             seen: set[str] = set()
             for r in ok:
-                n = id_to_node.get(str(r.get("id") or ""))
-                if n is None or not n.url or n.url in seen:
-                    continue
-                if not n.enabled or self._is_quarantined(n) or self.is_cooling(n):
-                    continue
-                ordered.append(n.url)
-                seen.add(n.url)
+                nodes = id_to_nodes.get(str(r.get("id") or "")) or []
+                for n in nodes:
+                    if n is None or not n.url or n.url in seen:
+                        continue
+                    if not n.enabled or self._is_quarantined(n) or self.is_cooling(n):
+                        continue
+                    ordered.append(n.url)
+                    seen.add(n.url)
             healthy_urls = ordered
         else:
             healthy_urls = self.urls(healthy_only=True)

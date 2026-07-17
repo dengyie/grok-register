@@ -127,10 +127,16 @@ def node_from_dict(raw: Any) -> Node | None:
 
 
 def _default_id(url: str) -> str:
+    """Stable unique id. Label is redacted (no creds) so host:port alone collides
+    when two nodes share endpoint with different auth — append short URL digest.
+    """
+    import hashlib
+
     label = _safe_label(url)
-    # stable short id from label
     safe = "".join(c if c.isalnum() or c in "-._" else "-" for c in label)
-    return safe[:64] or "node"
+    safe = (safe[:48] or "node").rstrip("-")
+    digest = hashlib.sha1(str(url or "").encode("utf-8")).hexdigest()[:8]
+    return f"{safe}-{digest}"
 
 
 def _safe_label(url: str) -> str:

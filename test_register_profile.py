@@ -139,6 +139,59 @@ class TestComposite(unittest.TestCase):
         c = CompositeEmailSource(mb, dec)
         self.assertEqual(c.name, "local+gmail_imap")
 
+    def test_proxy_forwards_live_mailbox_and_setter(self):
+        """Composite must not freeze mailbox.proxy at construction."""
+        mb = MagicMock()
+        mb.name = "tinyhost"
+        mb.proxy = "http://mail-proxy:1"
+        dec = MagicMock()
+        dec.name = "tinyhost"
+        c = CompositeEmailSource(mb, dec)
+        self.assertEqual(c.proxy, "http://mail-proxy:1")
+        # live mailbox mutation must surface
+        mb.proxy = "http://mail-proxy:2"
+        self.assertEqual(c.proxy, "http://mail-proxy:2")
+        # setter writes through
+        c.proxy = "http://mail-proxy:3"
+        self.assertEqual(c.proxy, "http://mail-proxy:3")
+        self.assertEqual(mb.proxy, "http://mail-proxy:3")
+
+
+class TestCliCountDoesNotClobberProfile(unittest.TestCase):
+    def test_apply_cli_overrides_none_keeps_profile_count(self):
+        from register_core.config.loader import apply_cli_overrides, parse_profile_dict
+
+        raw = {
+            "apiVersion": "register.v1",
+            "spec": {
+                "provider": {"name": "chatgpt"},
+                "mailbox": {"type": "tinyhost"},
+                "decode": {"type": "tinyhost"},
+                "count": 7,
+            },
+        }
+        profile = parse_profile_dict(raw)
+        self.assertEqual(profile.count, 7)
+        job, _ = apply_cli_overrides(profile, count=None)
+        self.assertEqual(job.count, 7)
+        job2, _ = apply_cli_overrides(profile, count=3)
+        self.assertEqual(job2.count, 3)
+
+
+class TestMimoProxyDefault(unittest.TestCase):
+    def test_no_hardcoded_7897_without_env(self):
+        from register_core.providers.mimo_adapter import MimoProvider
+        import os
+        from unittest.mock import patch
+
+        env = {k: v for k, v in os.environ.items() if k not in {
+            "MIMO_PROXY", "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"
+        }}
+        with patch.dict(os.environ, env, clear=True):
+            p = MimoProvider()
+        self.assertNotEqual(p.proxy, "http://127.0.0.1:7897")
+        self.assertEqual(p.proxy, "")
+
 
 class TestPipelineFromProfile(unittest.TestCase):
     def test_from_profile_chatgpt_tinyhost_offline(self):

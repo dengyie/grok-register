@@ -168,6 +168,41 @@ proxies:
             self.assertEqual(packed.merge.added, 1)
             self.assertEqual(packed.merge.kept, 1)
 
+    def test_merge_preserves_cooldown(self):
+        """Re-import must not drop soft-cool on existing URL."""
+        from register_core.nodes.convert.pipeline import merge_dialable
+        from register_core.nodes.models import Node
+
+        old = Node(
+            url="http://u:p@1.1.1.1:80",
+            id="keep",
+            label="old",
+            cooldown_until=9_999_999_999.0,
+            cooldown_reason="registration_disallowed",
+            fail_count=3,
+        )
+        incoming = Node(url="http://u:p@1.1.1.1:80", id="new", label="fresh")
+        merged, plan = merge_dialable([old], [incoming], replace=False)
+        self.assertEqual(plan.updated, 1)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].cooldown_until, 9_999_999_999.0)
+        self.assertEqual(merged[0].cooldown_reason, "registration_disallowed")
+        self.assertEqual(merged[0].fail_count, 3)
+
+    def test_default_id_unique_for_same_host_different_auth(self):
+        from register_core.nodes.models import Node, _default_id
+
+        a = "http://userA:pwA@10.0.0.1:8080"
+        b = "http://userB:pwB@10.0.0.1:8080"
+        id_a = _default_id(a)
+        id_b = _default_id(b)
+        self.assertNotEqual(id_a, id_b)
+        self.assertEqual(_default_id(a), id_a)  # stable
+        na, nb = Node(url=a), Node(url=b)
+        self.assertNotEqual(na.id, nb.id)
+        # redacted label alone would collide; digest disambiguates
+        self.assertIn("10.0.0.1", na.id)
+
     def test_replace_drops_existing(self):
         from register_core.nodes.catalog import load_nodes, save_nodes
         from register_core.nodes.models import Node

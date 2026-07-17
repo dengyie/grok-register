@@ -194,6 +194,9 @@ def merge_dialable(
                 last_error=old.last_error,
                 last_checked_at=old.last_checked_at,
                 fail_count=int(old.fail_count or 0),
+                # Preserve soft-cool so re-import does not re-arm burned egress.
+                cooldown_until=old.cooldown_until,
+                cooldown_reason=old.cooldown_reason,
             )
             by_url[n.url] = merged
             plan.updated += 1

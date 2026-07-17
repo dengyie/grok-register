@@ -32,7 +32,15 @@ class MimoProvider:
         **_: Any,
     ) -> None:
         self.runtime = runtime or os.environ.get("MIMO_RUNTIME") or ""
-        self.proxy = proxy or os.environ.get("MIMO_PROXY") or "http://127.0.0.1:7897"
+        # Do NOT hardcode Clash :7897 — external VPN is optional. Prefer explicit
+        # ctor/env; pipeline inject_attempt_proxy still fills extra["proxy"] per try.
+        self.proxy = (
+            proxy
+            or os.environ.get("MIMO_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("HTTPS_PROXY")
+            or ""
+        )
         self.headless = headless
 
     def register_one(
