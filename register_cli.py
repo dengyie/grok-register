@@ -425,6 +425,11 @@ def _ensure_browser(worker_id: int, force_recycle: bool = False):
     new account attempt uses the rotated egress. List mode rewrites
     reg.config["proxy"]; clash mode only switches the dedicated GROK-REG
     selector (main profile group untouched).
+
+    List-mode rotate + soft browser reuse is a known footgun: Chromium binds
+    ``--proxy-server`` only at process start. When rotate rewrites config.proxy
+    while the process is still alive, subsequent accounts keep the old egress
+    unless we hard-stop the browser so the next start_browser rebinds.
     """
     if force_recycle:
         try:
@@ -432,10 +437,36 @@ def _ensure_browser(worker_id: int, force_recycle: bool = False):
         except Exception:
             pass
     # Rotate egress before (re)creating the browser so --proxy-server picks it up.
+    rotate_result: dict = {}
     try:
-        maybe_rotate_proxy(log=lambda m: log(worker_id, m), config=reg.config)
+        rotate_result = (
+            maybe_rotate_proxy(log=lambda m: log(worker_id, m), config=reg.config)
+            or {}
+        )
     except Exception as exc:
         log(worker_id, f"[!] 代理轮换失败(继续用当前出口): {exc}")
+        rotate_result = {}
+
+    # List rotate rewrote config.proxy: force hard stop so soft-reuse cannot
+    # keep serving the previous --proxy-server. Clash mode is fine under soft
+    # reuse (selector switch is out-of-process).
+    if (
+        not force_recycle
+        and isinstance(rotate_result, dict)
+        and rotate_result.get("rotated")
+        and str(rotate_result.get("mode") or "") == "list"
+        and reg.TabPool.get_browser() is not None
+    ):
+        label = rotate_result.get("label") or rotate_result.get("proxy") or "?"
+        log(
+            worker_id,
+            f"[*] list 代理已轮换 → 硬回收浏览器以绑定新出口: {label}",
+        )
+        try:
+            reg.stop_browser()
+        except Exception:
+            pass
+
     if reg.TabPool.get_browser() is None:
         reg.start_browser(log_callback=lambda m: log(worker_id, m))
 

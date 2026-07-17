@@ -11,6 +11,7 @@ from providers.chatgpt.protocol.flow import (
     ChatGPTRegisterError,
     PlatformRegistrar,
     RegistrationResult,
+    _is_transport_exception,
     _sentinel_soft_enabled,
     register_one,
 )
@@ -108,6 +109,35 @@ class TestSessionHardGate(unittest.TestCase):
                 reg._accounts_headers("https://auth.openai.com/x", "authorize_continue")
         self.assertEqual(cm.exception.kind, "captcha")
         self.assertIn("sentinel", cm.exception.step)
+
+    def test_is_transport_exception_classifies_network(self) -> None:
+        """Transport/proxy/timeout must not be mis-tagged as captcha."""
+        self.assertTrue(_is_transport_exception(TimeoutError("timed out")))
+        self.assertTrue(_is_transport_exception(OSError("connection reset")))
+        self.assertTrue(_is_transport_exception(ConnectionError("proxy refused")))
+        self.assertTrue(_is_transport_exception(RuntimeError("HTTPSConnectionPool timed out")))
+        self.assertTrue(_is_transport_exception(RuntimeError("ProxyError: 407")))
+        # genuine PoW/captcha failures stay non-transport
+        self.assertFalse(_is_transport_exception(RuntimeError("pow_failed")))
+        self.assertFalse(_is_transport_exception(RuntimeError("sentinel challenge")))
+        self.assertFalse(_is_transport_exception(ValueError("bad token")))
+
+    def test_sentinel_transport_fail_is_network_not_captcha(self) -> None:
+        """Proxy/timeout on sentinel must hard-fail as network, not captcha."""
+        reg = PlatformRegistrar(proxy="", log=lambda _m: None)
+        reg.device_id = "dev-test"
+        with (
+            patch.dict("os.environ", {"CHATGPT_SENTINEL_SOFT": "0"}, clear=False),
+            patch.object(
+                reg,
+                "_ensure_sentinel",
+                side_effect=TimeoutError("proxy timed out"),
+            ),
+        ):
+            with self.assertRaises(ChatGPTRegisterError) as cm:
+                reg._accounts_headers("https://auth.openai.com/x", "authorize_continue")
+        self.assertEqual(cm.exception.kind, "network")
+        self.assertIn("sentinel_transport", str(cm.exception))
 
     def test_sentinel_soft_continues(self) -> None:
         reg = PlatformRegistrar(proxy="", log=lambda _m: None)

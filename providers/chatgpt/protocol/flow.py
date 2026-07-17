@@ -97,6 +97,52 @@ def _sentinel_soft_enabled() -> bool:
     return flag in ("1", "true", "yes", "on", "soft")
 
 
+def _is_transport_exception(exc: BaseException) -> bool:
+    """True when a sentinel/req failure is network/transport, NOT PoW/captcha.
+
+    build_sentinel_token POSTs sentinel/req via the session; if the proxy is
+    dead / TLS reset / connect timeout the resulting exception is transport,
+    which must surface as kind=network (need-quarantine path) — NOT kind=captcha
+    (which would retry-captcha an account whose PoW machinery is actually fine).
+    """
+    if isinstance(exc, (OSError, TimeoutError)):
+        return True
+    name = type(exc).__name__
+    if name in {
+        "ProxyError",
+        "ConnectError",
+        "ConnectionError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "Timeout",
+        "SSLError",
+        "RequestsError",
+        "RequestException",
+        "CurlError",
+        "CffiError",
+    }:
+        return True
+    # requests.exceptions.RequestException subclasses live under requests/urllib3.
+    mod = (type(exc).__module__ or "").lower()
+    if mod.startswith("requests.") or mod.startswith("urllib3") or mod.startswith("curl_cffi"):
+        return True
+    msg = str(exc or "").lower()
+    return any(
+        s in msg
+        for s in (
+            "proxy",
+            "connection",
+            "timed out",
+            "timeout",
+            "connectionreset",
+            "remotedisconnected",
+            "tls",
+            "ssl",
+            "max retries",
+        )
+    )
+
+
 def _preview(value: str) -> str:
     s = value or ""
     if not s:
@@ -266,8 +312,16 @@ class PlatformRegistrar:
             if _sentinel_soft_enabled():
                 headers["x-openai-sentinel-error"] = str(exc)[:200]
                 self.log(f"sentinel soft-fail flow={flow}: {exc}")
+            elif _is_transport_exception(exc):
+                # sentinel/req transport death (dead proxy/TLS reset/timeout) is a
+                # network failure, not a captcha/PoW failure — wrong recovery path.
+                raise ChatGPTRegisterError(
+                    f"sentinel_transport:{flow}:{exc}",
+                    kind="network",
+                    step=f"sentinel:{flow}",
+                ) from exc
             else:
-                # Hard gate: PoW failure is captcha class, not silent continue.
+                # Hard gate: genuine PoW failure is captcha class, not silent continue.
                 raise ChatGPTRegisterError(
                     f"sentinel_fail:{flow}:{exc}",
                     kind="captcha",
@@ -355,6 +409,12 @@ class PlatformRegistrar:
             if _sentinel_soft_enabled():
                 headers["x-openai-sentinel-error"] = str(exc)[:200]
                 self.log(f"sentinel soft-fail flow=signup: {exc}")
+            elif _is_transport_exception(exc):
+                raise ChatGPTRegisterError(
+                    f"sentinel_transport:signup:{exc}",
+                    kind="network",
+                    step="session",
+                ) from exc
             else:
                 raise ChatGPTRegisterError(
                     f"sentinel_fail:signup:{exc}",

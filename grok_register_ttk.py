@@ -4332,6 +4332,11 @@ def fill_email_and_submit(timeout=15, log_callback=None, cancel_callback=None):
                 log_callback=log_callback,
                 cancel_callback=cancel_callback,
             )
+        except AccountRetryNeeded:
+            # browser_boot / SPA-stuck slot-retry signal must propagate; the old
+            # bare `except Exception` swallowed it and kept spinning the outer
+            # deadline with identical dead clicks.
+            raise
         except Exception as reclick_exc:
             if log_callback:
                 log_callback(f"[Debug] 二次点击邮箱注册失败: {reclick_exc}")
@@ -5184,6 +5189,9 @@ def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
     last_seen_names = set()
     last_submit_retry = 0.0
     last_cf_retry_at = 0.0
+    final_cf_wait_since = None
+    last_final_cf_token_len = None
+    final_cf_retried = 0
     final_no_submit_state = ""
     final_no_submit_since = None
     try:
@@ -5193,6 +5201,22 @@ def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
     except Exception:
         final_no_submit_timeout = 45.0
     final_no_submit_timeout = max(15.0, final_no_submit_timeout)
+    # Final-page CF stuck gate mirrors the profile-fill wait-cloudflare gate so a
+    # token长度=0 interstitial does not silently spin the full 120s deadline.
+    try:
+        final_cf_stuck_timeout = float(
+            (config.get("turnstile_stuck_timeout") if isinstance(config, dict) else None) or 60
+        )
+    except Exception:
+        final_cf_stuck_timeout = 60.0
+    final_cf_stuck_timeout = max(15.0, min(final_cf_stuck_timeout, 180.0))
+    try:
+        final_cf_retry_limit = int(
+            (config.get("turnstile_retry_limit") if isinstance(config, dict) else None) or 3
+        )
+    except Exception:
+        final_cf_retry_limit = 3
+    final_cf_retry_limit = max(1, min(final_cf_retry_limit, 8))
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -5272,14 +5296,44 @@ return 'final-page-clicked-submit';
                 else:
                     final_no_submit_state = ""
                     final_no_submit_since = None
-                if log_callback and isinstance(retried, str) and retried.startswith("final-page-wait-cf"):
+                if isinstance(retried, str) and retried.startswith("final-page-wait-cf"):
                     token_len = retried.split(":", 1)[1] if ":" in retried else "0"
-                    log_callback(f"[Debug] 最终页状态: final-page-wait-cf, token长度={token_len}")
-                    if now - last_cf_retry_at >= 10:
+                    if final_cf_wait_since is None:
+                        final_cf_wait_since = now
+                    # Throttle token-length logs: only when length changes (or first poll).
+                    if log_callback and token_len != last_final_cf_token_len:
+                        last_final_cf_token_len = token_len
+                        log_callback(
+                            f"[Debug] 最终页状态: final-page-wait-cf, token长度={token_len}"
+                        )
+                    # Stuck gate: mirror profile-fill CF fail-fast so token长度=0
+                    # interstitial cannot silently burn the full wait_for_sso deadline.
+                    if now - final_cf_wait_since >= final_cf_stuck_timeout:
+                        raise AccountRetryNeeded(
+                            f"最终页 Turnstile 卡住 fail-fast: wait "
+                            f"{now - final_cf_wait_since:.0f}s token_len={token_len} "
+                            f"stuck_timeout={final_cf_stuck_timeout}s "
+                            f"retries={final_cf_retried}/{final_cf_retry_limit}"
+                        )
+                    if (
+                        now - final_cf_wait_since >= 12
+                        and now - last_cf_retry_at >= 8
+                    ):
+                        if final_cf_retried >= final_cf_retry_limit:
+                            raise AccountRetryNeeded(
+                                f"最终页 Turnstile retries exhausted token_len={token_len} "
+                                f"retries={final_cf_retried}/{final_cf_retry_limit}"
+                            )
                         if log_callback:
-                            log_callback("[*] 最终页 Cloudflare 卡住，自动二次复用 Turnstile...")
+                            log_callback(
+                                f"[*] 最终页 Cloudflare 卡住，自动二次复用 Turnstile... "
+                                f"({final_cf_retried + 1}/{final_cf_retry_limit})"
+                            )
                         try:
-                            token = getTurnstileToken(log_callback=log_callback, cancel_callback=cancel_callback)
+                            token = getTurnstileToken(
+                                log_callback=log_callback,
+                                cancel_callback=cancel_callback,
+                            )
                             if token:
                                 synced = page.run_js(
                                     """
@@ -5296,11 +5350,20 @@ return String(cfInput.value || '').trim().length;
                                     token,
                                 )
                                 if log_callback:
-                                    log_callback(f"[*] 最终页 Turnstile 二次复用完成，回填长度={synced}")
+                                    log_callback(
+                                        f"[*] 最终页 Turnstile 二次复用完成，回填长度={synced}"
+                                    )
                         except Exception as cf_exc:
                             if log_callback:
-                                log_callback(f"[Debug] 最终页 Turnstile 二次复用失败: {cf_exc}")
+                                log_callback(
+                                    f"[Debug] 最终页 Turnstile 二次复用失败: {cf_exc}"
+                                )
+                        final_cf_retried += 1
                         last_cf_retry_at = now
+                else:
+                    # Left final-page CF wait (clicked submit / left page / no-submit).
+                    final_cf_wait_since = None
+                    last_final_cf_token_len = None
 
             cookies = page.cookies(all_domains=True, all_info=True) or []
             for item in cookies:

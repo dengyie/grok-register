@@ -138,6 +138,44 @@ def test_proxy_bridge_module() -> None:
     print("PASS  proxy_bridge import smoke")
 
 
+def test_list_rotate_hard_recycles_browser() -> None:
+    """list-mode proxy rotate must stop_browser so --proxy-server rebinds."""
+    src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
+    assert "def _ensure_browser" in src
+    assert 'rotate_result.get("rotated")' in src or "rotate_result.get('rotated')" in src
+    assert '== "list"' in src or "== 'list'" in src
+    assert "list 代理已轮换" in src
+    assert "reg.stop_browser()" in src
+    # must sit inside _ensure_browser path (not only elsewhere)
+    idx = src.find("def _ensure_browser")
+    assert idx >= 0
+    chunk = src[idx : idx + 2500]
+    assert "list 代理已轮换" in chunk
+    assert "stop_browser" in chunk
+    print("PASS  list rotate hard-recycles browser in _ensure_browser")
+
+
+def test_final_page_cf_fail_fast_markers() -> None:
+    """final-page Turnstile must fail-fast via AccountRetryNeeded + log throttle."""
+    src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    assert "final_cf_wait_since" in src
+    assert "last_final_cf_token_len" in src
+    assert "final_cf_retried" in src
+    assert "final_cf_stuck_timeout" in src
+    assert "final_cf_retry_limit" in src
+    assert "最终页 Turnstile 卡住 fail-fast" in src
+    assert "最终页 Turnstile retries exhausted" in src
+    assert "raise AccountRetryNeeded" in src
+    # fill_email must re-raise AccountRetryNeeded (SPA-stuck / browser_boot)
+    assert "except AccountRetryNeeded" in src
+    fill_idx = src.find("def fill_email_and_submit")
+    assert fill_idx >= 0
+    fill_chunk = src[fill_idx : fill_idx + 3500]
+    assert "except AccountRetryNeeded" in fill_chunk
+    assert "raise" in fill_chunk[fill_chunk.find("except AccountRetryNeeded") :]
+    print("PASS  final-page CF fail-fast + fill_email re-raise AccountRetryNeeded")
+
+
 def main() -> int:
     test_account_retry_exception_exists()
     test_recycle_mode_in_perf_and_prepare()
@@ -147,6 +185,8 @@ def main() -> int:
     test_resolved_recycle_mode_unit()
     test_account_slot_retry_limit_values()
     test_proxy_bridge_module()
+    test_list_rotate_hard_recycles_browser()
+    test_final_page_cf_fail_fast_markers()
     print("\nALL PASS (recycle/slot)")
     return 0
 
