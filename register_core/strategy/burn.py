@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("register_core.strategy.burn")
 
 
 def _now() -> float:
@@ -51,7 +54,8 @@ class BurnStore:
             return
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as exc:
+            log.warning("burn store load failed path=%s err=%s", self.state_path, exc)
             return
         with self._lock:
             self.ips = self._load_map(data.get("ips"), "ip")
@@ -96,10 +100,10 @@ class BurnStore:
             tmp.replace(p)
             try:
                 p.chmod(0o600)
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as exc:
+                log.debug("burn store chmod skipped path=%s err=%s", self.state_path, exc)
+        except Exception as exc:
+            log.warning("burn store save failed path=%s err=%s", self.state_path, exc)
 
     @staticmethod
     def _dump(r: BurnRecord) -> dict[str, Any]:

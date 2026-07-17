@@ -104,9 +104,9 @@ def prepare_mail_inject(
         except Exception:
             pass
 
-        # Prefer module form so PYTHONPATH=repo root works without copying files.
+        # Prefer path-only OTP token storage (0600 file). Do not put secrets in env.
         env["REGISTER_OTP_SPEC_PATH"] = str(spec_path)
-        env["REGISTER_OTP_SPEC"] = json.dumps(spec, ensure_ascii=False)
+        env.pop("REGISTER_OTP_SPEC", None)
         env["OTP_HELPER_PYTHON"] = sys.executable
         # Node/Grok spawn: python -m register_core.tools.poll_otp <email> [used…]
         # We still set OTP_HELPER to a tiny launcher script for argv compatibility.

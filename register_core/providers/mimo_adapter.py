@@ -74,6 +74,19 @@ class MimoProvider:
         otp_timeout = float(extra.get("otp_timeout_s") or 180)
         mailbox = None
         mail_meta: dict[str, Any] = {}
+        released = False
+        success = False
+
+        def _release() -> None:
+            nonlocal released
+            if released or mailbox is None or email_source is None:
+                return
+            released = True
+            try:
+                email_source.release(mailbox, success=success)
+            except Exception:
+                pass
+
         if email_source is not None:
             from register_core.util.mail_inject import prepare_mail_inject
 
@@ -95,73 +108,62 @@ class MimoProvider:
                 }
 
         try:
-            proc = run_command(
-                ["bash", str(runner), "1"],
-                cwd=str(ROOT),
-                env=env,
-                timeout_s=timeout_s,
-            )
-        except Exception as exc:
-            if mailbox is not None and email_source is not None:
-                try:
-                    email_source.release(mailbox, success=False)
-                except Exception:
-                    pass
-            raise FailFastError(f"mimo spawn failed: {exc}") from exc
-
-        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        if proc.timed_out:
-            if mailbox is not None and email_source is not None:
-                try:
-                    email_source.release(mailbox, success=False)
-                except Exception:
-                    pass
-            raise ProviderError(f"mimo register timeout after {timeout_s}s")
-
-        email, secret, password = self._parse_this_run(
-            stdout=proc.stdout or "",
-            keys_delta=read_appended(keys_path, off_keys),
-            accounts_delta=read_appended(accounts_path, off_acc),
-        )
-        if not email and mailbox is not None:
-            email = mailbox.address
-
-        arts = {
-            "runtime": runtime,
-            "keys_path": str(keys_path),
-            "accounts_path": str(accounts_path),
-            "exit_code": proc.returncode,
-            "tail": redact_log_tail(out, limit=1500),
-            **mail_meta,
-        }
-
-        ok = proc.returncode == 0 and bool(secret)
-        if mailbox is not None and email_source is not None:
             try:
-                email_source.release(mailbox, success=ok)
-            except Exception:
-                pass
+                proc = run_command(
+                    ["bash", str(runner), "1"],
+                    cwd=str(ROOT),
+                    env=env,
+                    timeout_s=timeout_s,
+                )
+            except Exception as exc:
+                raise FailFastError(f"mimo spawn failed: {exc}") from exc
 
-        if not ok:
-            kind = self._classify(out)
+            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            if proc.timed_out:
+                raise ProviderError(f"mimo register timeout after {timeout_s}s")
+
+            email, secret, password = self._parse_this_run(
+                stdout=proc.stdout or "",
+                keys_delta=read_appended(keys_path, off_keys),
+                accounts_delta=read_appended(accounts_path, off_acc),
+            )
+            if not email and mailbox is not None:
+                email = mailbox.address
+
+            arts = {
+                "runtime": runtime,
+                "keys_path": str(keys_path),
+                "accounts_path": str(accounts_path),
+                "exit_code": proc.returncode,
+                "tail": redact_log_tail(out, limit=1500),
+                **mail_meta,
+            }
+
+            ok = proc.returncode == 0 and bool(secret)
+            if not ok:
+                kind = self._classify(out)
+                return RegisterResult(
+                    ok=False,
+                    provider=self.name,
+                    email=email,
+                    error=f"mimo exit={proc.returncode}"
+                    + ("" if secret else " (no this-run secret)"),
+                    error_kind=kind,
+                    artifacts=arts,
+                )
+
+            success = True
             return RegisterResult(
-                ok=False,
+                ok=True,
                 provider=self.name,
                 email=email,
-                error=f"mimo exit={proc.returncode}" + ("" if secret else " (no this-run secret)"),
-                error_kind=kind,
+                password=password,
+                secret=secret,
+                secret_kind="api_key",
                 artifacts=arts,
             )
-
-        return RegisterResult(
-            ok=True,
-            provider=self.name,
-            email=email,
-            password=password,
-            secret=secret,
-            secret_kind="api_key",
-            artifacts=arts,
-        )
+        finally:
+            _release()
 
     @staticmethod
     def _classify(out: str) -> str:

@@ -185,6 +185,7 @@ class TestStrategyEngine(unittest.TestCase):
         eng.store.burn_ip("5.5.5.5", reason="registration_disallowed")
         fb = eng.precheck_egress({"_egress_ip": "5.5.5.5"})
         self.assertTrue(fb.should_stop)
+        self.assertTrue(fb.skip_attempt)
         self.assertIn("ip burned", fb.stop_reason)
 
     def test_precheck_proxy_burned(self) -> None:
@@ -195,7 +196,16 @@ class TestStrategyEngine(unittest.TestCase):
             proxy="http://user:x@10.0.0.1:8080",
         )
         self.assertTrue(fb.should_stop)
+        self.assertTrue(fb.skip_attempt)
         self.assertIn("proxy burned", fb.stop_reason)
+
+    def test_precheck_domain_batch_fatal(self) -> None:
+        eng = StrategyEngine()
+        eng.store.burn_domain("fixed.example", reason="unsupported_email")
+        fb = eng.precheck_domain("fixed.example")
+        self.assertTrue(fb.should_stop)
+        self.assertFalse(fb.skip_attempt)
+        self.assertIn("domain burned", fb.stop_reason)
 
     def test_no_burn_on_unrelated_kind(self) -> None:
         eng = StrategyEngine(
@@ -269,11 +279,72 @@ class TestPipelineStrategyIntegration(unittest.TestCase):
         self.assertIn("registration_disallowed", stats.stopped_reason or "")
         self.assertTrue(eng.store.is_domain_burned("blocked.tld"))
 
-    def test_pipeline_precheck_stops_before_register(self) -> None:
+    def test_pipeline_precheck_skips_burned_ip_and_continues(self) -> None:
+        """Burned egress IP → skip attempt (no register), rotate; do not halt batch."""
         p = FakeProvider()
         eng = StrategyEngine()
         eng.store.burn_ip("6.6.6.6", reason="registration_disallowed")
         pipe = Pipeline(p, fail_fast=True, strategy=eng, verifier=None)
+        ips = iter(["6.6.6.6", "8.8.8.8"])
+
+        def _inject(extra, **kw):
+            return {**(extra or {}), "_egress_ip": next(ips)}
+
+        with (
+            patch(
+                "register_core.util.proxy.preflight_nodes_for_register",
+                side_effect=lambda extra, **kw: {
+                    **(extra or {}),
+                    "_nodes_preflight_done": True,
+                    "_nodes_preflight": {"skipped": True},
+                },
+            ),
+            patch(
+                "register_core.util.proxy.inject_attempt_proxy",
+                side_effect=_inject,
+            ),
+            patch(
+                "register_core.util.proxy.report_attempt_proxy_result",
+                return_value=None,
+            ),
+        ):
+            stats = pipe.run(2, extra={"egress": "direct", "nodes_preflight": False})
+        # attempt1 burned → skip; attempt2 healthy → register once success
+        self.assertEqual(p.calls, 1)
+        self.assertEqual(stats.ok, 1)
+        self.assertEqual(stats.fail, 1)
+        self.assertEqual(stats.stopped_reason, "")
+        skip_arts = [
+            r
+            for r in stats.results
+            if (r.artifacts or {}).get("skip_attempt")
+        ]
+        self.assertEqual(len(skip_arts), 1)
+        self.assertIn("ip burned", skip_arts[0].error or "")
+
+    def test_pipeline_domain_precheck_stops_batch(self) -> None:
+        """Fixed-domain hard-burn is batch-fatal (skip_attempt=False)."""
+
+        class FixedDomainSrc:
+            name = "tinyhost"
+            forced_domain = "burned.example"
+
+            def allocate(self):
+                raise AssertionError("allocate must not run after domain precheck")
+
+            def release(self, mailbox, *, success=False):
+                pass
+
+        p = FakeProvider()
+        eng = StrategyEngine()
+        eng.store.burn_domain("burned.example", reason="unsupported_email")
+        pipe = Pipeline(
+            p,
+            email_source=FixedDomainSrc(),  # type: ignore[arg-type]
+            fail_fast=True,
+            strategy=eng,
+            verifier=None,
+        )
         with (
             patch(
                 "register_core.util.proxy.preflight_nodes_for_register",
@@ -287,14 +358,15 @@ class TestPipelineStrategyIntegration(unittest.TestCase):
                 "register_core.util.proxy.inject_attempt_proxy",
                 side_effect=lambda extra, **kw: {
                     **(extra or {}),
-                    "_egress_ip": "6.6.6.6",
+                    "_egress_ip": "1.1.1.1",
                 },
             ),
         ):
-            stats = pipe.run(1, extra={"egress": "direct", "nodes_preflight": False})
+            stats = pipe.run(2, extra={"egress": "direct", "nodes_preflight": False})
         self.assertEqual(p.calls, 0)
         self.assertEqual(stats.fail, 1)
-        self.assertIn("ip burned", stats.stopped_reason or "")
+        self.assertIn("domain burned", stats.stopped_reason or "")
+        self.assertEqual(stats.results[0].error_kind, "unsupported_email")
 
 
 class TestMailInject(unittest.TestCase):
@@ -330,6 +402,9 @@ class TestMailInject(unittest.TestCase):
             self.assertTrue(Path(env["OTP_HELPER"]).is_file())
             self.assertTrue(env.get("REGISTER_OTP_SPEC_PATH"))
             self.assertTrue(Path(env["REGISTER_OTP_SPEC_PATH"]).is_file())
+            # path-only OTP: never put token JSON in env
+            self.assertNotIn("REGISTER_OTP_SPEC", env)
+            self.assertTrue(env.get("OTP_HELPER_PYTHON"))
 
 
 if __name__ == "__main__":

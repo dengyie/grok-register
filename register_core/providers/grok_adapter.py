@@ -46,7 +46,7 @@ class GrokProvider:
         """Shell out to register_cli for one account.
 
         When email_source is set, allocate FIXED_EMAIL and set EMAIL_PROVIDER=fixed
-        so ttk uses core mailbox; OTP goes through OTP_HELPER / REGISTER_OTP_SPEC.
+        so ttk uses core mailbox; OTP goes through OTP_HELPER / REGISTER_OTP_SPEC_PATH.
         Success requires exit=0 **and** a this-run ledger increment (or
         success log email). secret_kind is sso only when SSO was captured.
         """
@@ -84,6 +84,19 @@ class GrokProvider:
         otp_timeout = float(extra.get("otp_timeout_s") or 180)
         mailbox = None
         mail_meta: dict[str, Any] = {}
+        released = False
+        success = False
+
+        def _release() -> None:
+            nonlocal released
+            if released or mailbox is None or email_source is None:
+                return
+            released = True
+            try:
+                email_source.release(mailbox, success=success)
+            except Exception:
+                pass
+
         if email_source is not None:
             from register_core.util.mail_inject import prepare_mail_inject
 
@@ -106,120 +119,96 @@ class GrokProvider:
                 }
 
         try:
-            proc = run_command(cmd, cwd=str(ROOT), env=env, timeout_s=timeout_s)
-        except Exception as exc:
-            if mailbox is not None and email_source is not None:
-                try:
-                    email_source.release(mailbox, success=False)
-                except Exception:
-                    pass
-            raise FailFastError(f"grok register spawn failed: {exc}") from exc
+            try:
+                proc = run_command(cmd, cwd=str(ROOT), env=env, timeout_s=timeout_s)
+            except Exception as exc:
+                raise FailFastError(f"grok register spawn failed: {exc}") from exc
 
-        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        if proc.timed_out:
-            if mailbox is not None and email_source is not None:
-                try:
-                    email_source.release(mailbox, success=False)
-                except Exception:
-                    pass
-            raise ProviderError(f"grok register timeout after {timeout_s}s")
+            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            if proc.timed_out:
+                raise ProviderError(f"grok register timeout after {timeout_s}s")
 
-        low = out.lower()
-        if proc.returncode != 0:
-            if mailbox is not None and email_source is not None:
-                try:
-                    email_source.release(mailbox, success=False)
-                except Exception:
-                    pass
-            if any(k in low for k in ("alias", "耗尽", "exhausted", "fatal", "fail-fast", "致命")):
-                raise FailFastError(f"grok fatal: exit={proc.returncode}")
-            return RegisterResult(
-                ok=False,
-                provider=self.name,
-                email=(mailbox.address if mailbox else ""),
-                error=f"register_cli exit={proc.returncode}",
-                error_kind="provider",
-                secret_kind="none",
-                artifacts={
-                    "exit_code": proc.returncode,
-                    "ledger": accounts_file,
-                    "tail": redact_log_tail(out),
-                    **mail_meta,
-                },
+            low = out.lower()
+            if proc.returncode != 0:
+                if any(
+                    k in low
+                    for k in ("alias", "耗尽", "exhausted", "fatal", "fail-fast", "致命")
+                ):
+                    raise FailFastError(f"grok fatal: exit={proc.returncode}")
+                return RegisterResult(
+                    ok=False,
+                    provider=self.name,
+                    email=(mailbox.address if mailbox else ""),
+                    error=f"register_cli exit={proc.returncode}",
+                    error_kind="provider",
+                    secret_kind="none",
+                    artifacts={
+                        "exit_code": proc.returncode,
+                        "ledger": accounts_file,
+                        "tail": redact_log_tail(out),
+                        **mail_meta,
+                    },
+                )
+
+            email, password, sso = self._parse_this_run(
+                out=out,
+                ledger_delta=read_appended(accounts_file, off),
             )
+            if not email and mailbox is not None:
+                email = mailbox.address
+            if not email:
+                return RegisterResult(
+                    ok=False,
+                    provider=self.name,
+                    error="register_cli exit=0 but no this-run ledger/email",
+                    error_kind="provider",
+                    secret_kind="none",
+                    artifacts={
+                        "exit_code": 0,
+                        "ledger": accounts_file,
+                        "tail": redact_log_tail(out),
+                        **mail_meta,
+                    },
+                )
 
-        email, password, sso = self._parse_this_run(
-            out=out,
-            ledger_delta=read_appended(accounts_file, off),
-        )
-        if not email and mailbox is not None:
-            email = mailbox.address
-        if not email:
-            if mailbox is not None and email_source is not None:
-                try:
-                    email_source.release(mailbox, success=False)
-                except Exception:
-                    pass
-            return RegisterResult(
-                ok=False,
-                provider=self.name,
-                error="register_cli exit=0 but no this-run ledger/email",
-                error_kind="provider",
-                secret_kind="none",
-                artifacts={
-                    "exit_code": 0,
-                    "ledger": accounts_file,
-                    "tail": redact_log_tail(out),
-                    **mail_meta,
-                },
-            )
+            if not sso:
+                # Email-only ledger row is incomplete for product success (no SSO / mint input).
+                return RegisterResult(
+                    ok=False,
+                    provider=self.name,
+                    email=email,
+                    password=password,
+                    secret="",
+                    secret_kind="pending",
+                    error="this-run email without SSO cookie (pending); not product-ready",
+                    error_kind="provider",
+                    artifacts={
+                        "exit_code": 0,
+                        "ledger": accounts_file,
+                        "note": "require SSO in accounts ledger (email----pw----sso)",
+                        "tail": redact_log_tail(out, limit=800),
+                        **mail_meta,
+                    },
+                )
 
-        if not sso:
-            if mailbox is not None and email_source is not None:
-                try:
-                    email_source.release(mailbox, success=False)
-                except Exception:
-                    pass
-            # Email-only ledger row is incomplete for product success (no SSO / mint input).
+            success = True
             return RegisterResult(
-                ok=False,
+                ok=True,
                 provider=self.name,
                 email=email,
                 password=password,
-                secret="",
-                secret_kind="pending",
-                error="this-run email without SSO cookie (pending); not product-ready",
-                error_kind="provider",
+                secret=sso,
+                secret_kind="sso",
                 artifacts={
                     "exit_code": 0,
                     "ledger": accounts_file,
-                    "note": "require SSO in accounts ledger (email----pw----sso)",
+                    "note": "sso captured; chat entitlement still via cpa_xai.probe",
                     "tail": redact_log_tail(out, limit=800),
                     **mail_meta,
                 },
             )
-
-        if mailbox is not None and email_source is not None:
-            try:
-                email_source.release(mailbox, success=True)
-            except Exception:
-                pass
-
-        return RegisterResult(
-            ok=True,
-            provider=self.name,
-            email=email,
-            password=password,
-            secret=sso,
-            secret_kind="sso",
-            artifacts={
-                "exit_code": 0,
-                "ledger": accounts_file,
-                "note": "sso captured; chat entitlement still via cpa_xai.probe",
-                "tail": redact_log_tail(out, limit=800),
-                **mail_meta,
-            },
-        )
+        finally:
+            _release()
 
     @staticmethod
     def _parse_this_run(*, out: str, ledger_delta: str) -> tuple[str, str, str]:

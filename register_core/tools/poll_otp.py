@@ -48,12 +48,12 @@ def _build_source(spec: dict[str, Any]):
     dtype = str(spec.get("decode_type") or "").strip().lower()
     kwargs = dict(spec.get("source_kwargs") or {})
     if mtype and dtype and mtype != dtype:
-        from register_core.mailbox.registry import get_mailbox
-        from register_core.decode.registry import get_decoder
+        from register_core.mailbox.registry import get_mailbox_provider
+        from register_core.decode.registry import get_otp_decoder
         from register_core.email.composite import CompositeEmailSource
 
-        mb = get_mailbox(mtype, **kwargs)
-        dec = get_decoder(dtype, **kwargs)
+        mb = get_mailbox_provider(mtype, **kwargs)
+        dec = get_otp_decoder(dtype, **kwargs)
         return CompositeEmailSource(mb, dec)
     source = str(spec.get("source") or mtype or dtype or "tinyhost").strip().lower()
     from register_core.email.registry import get_email_source

@@ -219,7 +219,7 @@ class Pipeline:
                 log.warning("proxy rotation skipped: %s", exc)
                 attempt_extra = dict(base_extra)
 
-            # Strategy precheck: burned egress / cooling IP.
+            # Strategy precheck: burned egress / cooling IP → skip attempt & rotate.
             pre = strategy.precheck_egress(attempt_extra)
             if pre.should_stop:
                 result = RegisterResult(
@@ -228,14 +228,50 @@ class Pipeline:
                     error=pre.stop_reason,
                     error_kind="fatal",
                     secret_kind="none",
-                    artifacts={"strategy_precheck": pre.action},
+                    artifacts={
+                        "strategy_precheck": pre.action,
+                        "skip_attempt": bool(pre.skip_attempt),
+                    },
                 )
                 stats.results.append(result)
                 stats.fail += 1
                 self._emit(result)
+                if pre.skip_attempt:
+                    log.warning(
+                        "strategy precheck skip attempt (rotate): %s",
+                        pre.stop_reason,
+                    )
+                    continue
                 stats.stopped_reason = f"strategy: {pre.stop_reason}"
                 log.error("strategy precheck stop: %s", pre.stop_reason)
                 break
+
+            # Domain hard-burn after mailbox allocate is fail-fast for fixed domains.
+            # Adapters allocate inside register_one; precheck uses forced_domain when known.
+            forced_dom = ""
+            if self.email_source is not None:
+                forced_dom = str(
+                    getattr(self.email_source, "forced_domain", None)
+                    or getattr(self.email_source, "domain", None)
+                    or ""
+                ).strip()
+            if forced_dom:
+                dpre = strategy.precheck_domain(forced_dom)
+                if dpre.should_stop:
+                    result = RegisterResult(
+                        ok=False,
+                        provider=self.provider.name,
+                        error=dpre.stop_reason,
+                        error_kind="unsupported_email",
+                        secret_kind="none",
+                        artifacts={"strategy_precheck": dpre.action},
+                    )
+                    stats.results.append(result)
+                    stats.fail += 1
+                    self._emit(result)
+                    stats.stopped_reason = f"strategy: {dpre.stop_reason}"
+                    log.error("strategy domain precheck stop: %s", dpre.stop_reason)
+                    break
 
             try:
                 result = self.provider.register_one(

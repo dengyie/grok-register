@@ -26,6 +26,8 @@ class StrategyFeedback:
     cooled_ip: str = ""
     action: str = ""
     should_stop: bool = False
+    # True = skip this attempt and rotate (ip/proxy); False + should_stop = halt batch
+    skip_attempt: bool = False
     stop_reason: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -163,10 +165,12 @@ class StrategyEngine:
         return False, ""
 
     def precheck_domain(self, email_or_domain: str) -> StrategyFeedback:
+        """Domain hard-burn is batch-fatal for a fixed-domain mailbox profile."""
         fb = StrategyFeedback(action="precheck_domain")
         dom = domain_from_email(email_or_domain) or (email_or_domain or "").strip().lower()
         if dom and self.store.is_domain_burned(dom):
             fb.should_stop = True
+            fb.skip_attempt = False
             fb.stop_reason = f"domain burned: {dom}"
             fb.burned_domain = dom
         return fb
@@ -174,23 +178,27 @@ class StrategyEngine:
     def precheck_egress(
         self, extra: dict[str, Any] | None, *, proxy: str = ""
     ) -> StrategyFeedback:
+        """IP/proxy burn or cool → skip this attempt (rotate), do not halt the batch."""
         fb = StrategyFeedback(action="precheck_egress")
         extra = extra if isinstance(extra, dict) else {}
         ip = extract_egress_ip(extra)
         px = proxy or str(extra.get("proxy") or "").strip()
         if ip and self.store.is_ip_burned(ip):
             fb.should_stop = True
+            fb.skip_attempt = True
             fb.stop_reason = f"ip burned: {ip}"
             fb.burned_ip = ip
             return fb
         if ip and self.store.is_ip_cooling(ip):
             fb.should_stop = True
+            fb.skip_attempt = True
             fb.stop_reason = f"ip cooling: {ip}"
             fb.cooled_ip = ip
             return fb
         key = proxy_host_key(px)
         if key and self.store.is_proxy_burned(key):
             fb.should_stop = True
+            fb.skip_attempt = True
             fb.stop_reason = f"proxy burned: {key}"
             fb.burned_proxy = key
         return fb
