@@ -153,12 +153,18 @@ def remap_cpa_gateway_failure(
     status = int(raw.get("status") or 0)
     err = str(raw.get("error") or "").lower()
     # Clear upstream free-Build denial through CPA still counts as entitlement.
-    if (
-        "permission" in err
-        and "denied" in err
-        and ("console.x.ai" in err or "permission_denied" in err)
+    # Tolerate hyphen / underscore / whitespace forms (permission-denied,
+    # permission_denied, "permission denied") and the console.x.ai marker.
+    if "permission" in err and "denied" in err and (
+        "console.x.ai" in err or _ENTITLEMENT_CODE_RE.search(err) is not None
     ):
         out["upstream_entitlement"] = True
+        # mint hard gate reads entitlement_denied; keep it non-retryable so we
+        # fail-fast (skip remint/retry) instead of falling to ambiguous-retryable.
+        out["entitlement_denied"] = True
+        out["retryable"] = False
+        out["reason"] = "upstream_entitlement"
+        out["error_code"] = str(raw.get("error_code") or "permission_denied")
         return out
     if status == 401 or "api key" in err or "unauthorized" in err or "invalid key" in err:
         out["entitlement_denied"] = False

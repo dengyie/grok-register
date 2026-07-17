@@ -839,6 +839,64 @@ def test_cpa_gateway_401_not_entitlement() -> None:
     print("PASS cpa gateway 401 not entitlement")
 
 
+def test_cpa_gateway_upstream_permission_denied_is_entitlement() -> None:
+    """CPA mid-tier relaying a clear upstream free-Build denial must still
+    stamp entitlement_denied (non-retryable) so mint's hard gate fails fast.
+
+    Covers hyphen / underscore / whitespace / console.x.ai body variants —
+    all previously fell through to ambiguous 403 (retryable) and caused remint spin.
+    """
+    probe = _load("cpa_xai.probe_remap", ROOT / "cpa_xai" / "probe.py")
+    remap = probe.remap_cpa_gateway_failure
+
+    cases = [
+        # hyphen form (console.x.ai free-Build default body variant)
+        "permission-denied: console.x.ai free build access denied",
+        # underscore form (JSON error code)
+        'permission_denied: account lacks free Build grant',
+        # whitespace form ("permission denied")
+        "permission denied: no entitlement for grok-4.5",
+        # bare console.x.ai marker carrying "permission" + "denied"
+        "console.x.ai reports permission was denied for chat",
+    ]
+    for body in cases:
+        raw = {
+            "ok": False,
+            "status": 403,
+            "error": body,
+            "transport_mode": "cpa",
+            "error_code": "",
+        }
+        cls = probe.classify_chat_probe(raw)
+        out = remap(raw, cls)
+        assert out["entitlement_denied"] is True, body
+        assert out["retryable"] is False, body
+        assert out["reason"] == "upstream_entitlement", body
+        # mint hard gate reads error_code; must be non-empty.
+        assert out["error_code"], body
+    print("PASS cpa gateway upstream permission-denied → entitlement (hyphen/underscore/space/console.x.ai)")
+
+
+def test_cpa_gateway_ambiguous_403_without_permission_stays_retryable() -> None:
+    """Ambiguous CPA 403 body (no clear free-Build wording) is NOT entitlement
+    and stays retryable — keeps the existing non-account-gateway classification.
+    """
+    probe = _load("cpa_xai.probe_ambig", ROOT / "cpa_xai" / "probe.py")
+    raw = {
+        "ok": False,
+        "status": 403,
+        "error": "upstream service refused the request",
+        "transport_mode": "cpa",
+        "error_code": "",
+    }
+    cls = probe.classify_chat_probe(raw)
+    out = probe.remap_cpa_gateway_failure(raw, cls)
+    assert out["entitlement_denied"] is False
+    assert out["retryable"] is True
+    assert out["reason"] == "cpa_gateway_error"
+    print("PASS cpa gateway ambiguous 403 (no permission wording) stays retryable")
+
+
 def test_config_example_documents_mid_tier_probe_keys() -> None:
     raw = (ROOT / "config.example.json").read_text(encoding="utf-8")
     assert "cpa_probe_via" in raw
