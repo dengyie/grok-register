@@ -43,21 +43,21 @@ class MimoProvider:
     ) -> RegisterResult:
         """Invoke run-register.sh COUNT=1.
 
-        email_source is intentionally ignored (black-box Node runner owns mail).
+        When email_source is set (profile mailbox/decode), allocate once and
+        inject FIXED_EMAIL (+ OTP_HELPER for non-tinyhost) into the Node runner.
         Results are attributed via RESULT_JSON stdout and/or file *increments*
         only — never the historical tail of shared output files alone.
         """
-        if email_source is not None:
-            # Honest contract: black-box path cannot consume EmailSource.
-            pass
-
+        extra = extra or {}
         runner = MIMO_DIR / "run-register.sh"
         if not runner.is_file():
             raise FailFastError(f"mimo runner missing: {runner}")
 
         env = os.environ.copy()
         env["COUNT"] = "1"
-        env["MIMO_PROXY"] = self.proxy
+        # Prefer attempt proxy from pipeline rotate when present.
+        proxy = str(extra.get("proxy") or self.proxy or "").strip() or self.proxy
+        env["MIMO_PROXY"] = proxy
         env["HEADLESS"] = "true" if self.headless else "false"
         if self.runtime:
             env["MIMO_RUNTIME"] = self.runtime
@@ -70,7 +70,30 @@ class MimoProvider:
         off_keys = file_size(keys_path)
         off_acc = file_size(accounts_path)
 
-        timeout_s = int((extra or {}).get("timeout_s", 1200) or 1200)
+        timeout_s = int(extra.get("timeout_s", 1200) or 1200)
+        otp_timeout = float(extra.get("otp_timeout_s") or 180)
+        mailbox = None
+        mail_meta: dict[str, Any] = {}
+        if email_source is not None:
+            from register_core.util.mail_inject import prepare_mail_inject
+
+            try:
+                mailbox = prepare_mail_inject(
+                    email_source,
+                    env,
+                    timeout_s=otp_timeout,
+                    sender_hint="xiaomi",
+                    work_dir=Path(runtime) / "output" / "otp_bridge",
+                )
+            except Exception as exc:
+                raise FailFastError(f"mimo mail allocate failed: {exc}") from exc
+            if mailbox is not None:
+                mail_meta = {
+                    "fixed_email": mailbox.address,
+                    "email_source": getattr(email_source, "name", ""),
+                    "otp_helper": bool(env.get("OTP_HELPER")),
+                }
+
         try:
             proc = run_command(
                 ["bash", str(runner), "1"],
@@ -79,10 +102,20 @@ class MimoProvider:
                 timeout_s=timeout_s,
             )
         except Exception as exc:
+            if mailbox is not None and email_source is not None:
+                try:
+                    email_source.release(mailbox, success=False)
+                except Exception:
+                    pass
             raise FailFastError(f"mimo spawn failed: {exc}") from exc
 
         out = (proc.stdout or "") + "\n" + (proc.stderr or "")
         if proc.timed_out:
+            if mailbox is not None and email_source is not None:
+                try:
+                    email_source.release(mailbox, success=False)
+                except Exception:
+                    pass
             raise ProviderError(f"mimo register timeout after {timeout_s}s")
 
         email, secret, password = self._parse_this_run(
@@ -90,6 +123,8 @@ class MimoProvider:
             keys_delta=read_appended(keys_path, off_keys),
             accounts_delta=read_appended(accounts_path, off_acc),
         )
+        if not email and mailbox is not None:
+            email = mailbox.address
 
         arts = {
             "runtime": runtime,
@@ -97,9 +132,17 @@ class MimoProvider:
             "accounts_path": str(accounts_path),
             "exit_code": proc.returncode,
             "tail": redact_log_tail(out, limit=1500),
+            **mail_meta,
         }
 
-        if proc.returncode != 0 or not secret:
+        ok = proc.returncode == 0 and bool(secret)
+        if mailbox is not None and email_source is not None:
+            try:
+                email_source.release(mailbox, success=ok)
+            except Exception:
+                pass
+
+        if not ok:
             kind = self._classify(out)
             return RegisterResult(
                 ok=False,

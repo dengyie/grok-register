@@ -45,7 +45,8 @@ class GrokProvider:
     ) -> RegisterResult:
         """Shell out to register_cli for one account.
 
-        email_source is ignored (ttk still owns config email_provider).
+        When email_source is set, allocate FIXED_EMAIL and set EMAIL_PROVIDER=fixed
+        so ttk uses core mailbox; OTP goes through OTP_HELPER / REGISTER_OTP_SPEC.
         Success requires exit=0 **and** a this-run ledger increment (or
         success log email). secret_kind is sso only when SSO was captured.
         """
@@ -80,22 +81,62 @@ class GrokProvider:
 
         env = os.environ.copy()
         timeout_s = int(extra.get("timeout_s", 900) or 900)
+        otp_timeout = float(extra.get("otp_timeout_s") or 180)
+        mailbox = None
+        mail_meta: dict[str, Any] = {}
+        if email_source is not None:
+            from register_core.util.mail_inject import prepare_mail_inject
+
+            try:
+                mailbox = prepare_mail_inject(
+                    email_source,
+                    env,
+                    timeout_s=otp_timeout,
+                    sender_hint="xai",
+                    force_helper=True,
+                    work_dir=ROOT / "logs" / "otp_bridge",
+                )
+            except Exception as exc:
+                raise FailFastError(f"grok mail allocate failed: {exc}") from exc
+            if mailbox is not None:
+                mail_meta = {
+                    "fixed_email": mailbox.address,
+                    "email_source": getattr(email_source, "name", ""),
+                    "otp_helper": bool(env.get("OTP_HELPER")),
+                }
+
         try:
             proc = run_command(cmd, cwd=str(ROOT), env=env, timeout_s=timeout_s)
         except Exception as exc:
+            if mailbox is not None and email_source is not None:
+                try:
+                    email_source.release(mailbox, success=False)
+                except Exception:
+                    pass
             raise FailFastError(f"grok register spawn failed: {exc}") from exc
 
         out = (proc.stdout or "") + "\n" + (proc.stderr or "")
         if proc.timed_out:
+            if mailbox is not None and email_source is not None:
+                try:
+                    email_source.release(mailbox, success=False)
+                except Exception:
+                    pass
             raise ProviderError(f"grok register timeout after {timeout_s}s")
 
         low = out.lower()
         if proc.returncode != 0:
+            if mailbox is not None and email_source is not None:
+                try:
+                    email_source.release(mailbox, success=False)
+                except Exception:
+                    pass
             if any(k in low for k in ("alias", "耗尽", "exhausted", "fatal", "fail-fast", "致命")):
                 raise FailFastError(f"grok fatal: exit={proc.returncode}")
             return RegisterResult(
                 ok=False,
                 provider=self.name,
+                email=(mailbox.address if mailbox else ""),
                 error=f"register_cli exit={proc.returncode}",
                 error_kind="provider",
                 secret_kind="none",
@@ -103,6 +144,7 @@ class GrokProvider:
                     "exit_code": proc.returncode,
                     "ledger": accounts_file,
                     "tail": redact_log_tail(out),
+                    **mail_meta,
                 },
             )
 
@@ -110,7 +152,14 @@ class GrokProvider:
             out=out,
             ledger_delta=read_appended(accounts_file, off),
         )
+        if not email and mailbox is not None:
+            email = mailbox.address
         if not email:
+            if mailbox is not None and email_source is not None:
+                try:
+                    email_source.release(mailbox, success=False)
+                except Exception:
+                    pass
             return RegisterResult(
                 ok=False,
                 provider=self.name,
@@ -121,10 +170,16 @@ class GrokProvider:
                     "exit_code": 0,
                     "ledger": accounts_file,
                     "tail": redact_log_tail(out),
+                    **mail_meta,
                 },
             )
 
         if not sso:
+            if mailbox is not None and email_source is not None:
+                try:
+                    email_source.release(mailbox, success=False)
+                except Exception:
+                    pass
             # Email-only ledger row is incomplete for product success (no SSO / mint input).
             return RegisterResult(
                 ok=False,
@@ -140,8 +195,15 @@ class GrokProvider:
                     "ledger": accounts_file,
                     "note": "require SSO in accounts ledger (email----pw----sso)",
                     "tail": redact_log_tail(out, limit=800),
+                    **mail_meta,
                 },
             )
+
+        if mailbox is not None and email_source is not None:
+            try:
+                email_source.release(mailbox, success=True)
+            except Exception:
+                pass
 
         return RegisterResult(
             ok=True,
@@ -155,6 +217,7 @@ class GrokProvider:
                 "ledger": accounts_file,
                 "note": "sso captured; chat entitlement still via cpa_xai.probe",
                 "tail": redact_log_tail(out, limit=800),
+                **mail_meta,
             },
         )
 

@@ -31,6 +31,18 @@ function isValidTempDomain(domain) {
 }
 
 async function generateTempMailAddress() {
+  // Core inject: FIXED_EMAIL from register_core mailbox allocate (M3).
+  const fixed = String(process.env.FIXED_EMAIL || process.env.MIMO_FIXED_EMAIL || '')
+    .trim()
+    .replace(/\.+$/, '');
+  if (fixed && fixed.includes('@')) {
+    const [user, domain] = fixed.split('@');
+    if (user && domain) {
+      console.log('[mail] fixed email from core', fixed);
+      return `${user}@${domain}`;
+    }
+  }
+
   // MIMO_LIVE_OTP_HARDEN_V2
   const soft = [];
   for (let i = 0; i < 40; i++) {
@@ -88,7 +100,49 @@ function isOnMimoPlatform(url) {
 }
 
 
+async function pollOtpViaCoreHelper(emailAddress, maxRetries = 40, usedCodes = new Set()) {
+  // register_core writes a small Python helper that prints one OTP line to stdout.
+  const helper = String(process.env.OTP_HELPER || process.env.MIMO_OTP_HELPER || '').trim();
+  if (!helper) return null;
+  const { spawnSync } = require('child_process');
+  const timeoutMs = Math.max(30_000, maxRetries * 3000);
+  console.log(`[otp] core helper: ${helper}`);
+  const r = spawnSync(
+    process.env.OTP_HELPER_PYTHON || process.env.PYTHON || 'python3',
+    [helper, emailAddress, ...[...usedCodes]],
+    {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      env: process.env,
+    },
+  );
+  if (r.error) {
+    console.log(`[otp] helper error: ${r.error.message || r.error}`);
+    return null;
+  }
+  const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+  const m = out.match(/\b(\d{6})\b/);
+  if (m && m[1] && !usedCodes.has(m[1])) {
+    console.log('[otp] helper returned code');
+    return m[1];
+  }
+  if (r.status !== 0) {
+    console.log(`[otp] helper exit=${r.status} tail=${out.slice(-400)}`);
+  }
+  return null;
+}
+
 async function pollTempMailOTP(emailAddress, maxRetries = 40, newerThan = new Date(), usedCodes = new Set()) {
+  // Prefer core OTP helper when FIXED_EMAIL was injected (non-tinyhost decode).
+  if (process.env.OTP_HELPER || process.env.MIMO_OTP_HELPER) {
+    const via = await pollOtpViaCoreHelper(emailAddress, maxRetries, usedCodes);
+    if (via) return via;
+    // If helper is set, do not silently fall through to tinyhost for CF/Gmail mailboxes.
+    if (String(process.env.OTP_HELPER_STRICT || '1') !== '0') {
+      throw new Error(`OTP helper failed for ${emailAddress}`);
+    }
+  }
+
   const [user, domain] = emailAddress.split('@');
   if (!user || !domain) throw new Error(`Invalid temp mail address: ${emailAddress}`);
   const url = `${TEMP_MAIL_BASE}/api/email/${encodeURIComponent(domain)}/${encodeURIComponent(user)}/?page=1&limit=100`;

@@ -412,7 +412,7 @@ def profile_to_job(
         if "otp_timeout_s" in profile.decode.options:
             extra["otp_timeout_s"] = profile.decode.options["otp_timeout_s"]
 
-    # strategy metadata (M2 burn will consume)
+    # strategy metadata consumed by StrategyEngine (burn/cool + fail_fast_kinds)
     extra["_strategy"] = {
         "fail_fast_kinds": list(profile.strategy.fail_fast_kinds),
         "burn": {

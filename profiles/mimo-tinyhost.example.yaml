@@ -1,0 +1,50 @@
+# Example: MiMo + tinyhost paired mailbox/decode (M3 FIXED_EMAIL inject)
+#   python -m register_core run --profile profiles/mimo-tinyhost.example.yaml -n 1
+#
+# Requires: providers/mimo runtime (Node register-one.js), PROXY_LIST / nodes for egress.
+# OTP: FIXED_EMAIL + optional OTP_HELPER when decode is non-tinyhost.
+
+apiVersion: register.v1
+kind: RegisterProfile
+metadata:
+  name: mimo-tinyhost
+
+spec:
+  provider:
+    name: mimo
+
+  count: 1
+
+  mailbox:
+    type: tinyhost
+    domain: publicvm.com
+
+  decode:
+    type: tinyhost
+    options:
+      timeout_s: 180
+
+  strategy:
+    fail_fast: true
+    fail_fast_kinds:
+      - registration_disallowed
+      - unsupported_email
+      - fatal
+      - verify
+    egress:
+      mode: auto
+    mail_proxy: direct
+    burn:
+      enabled: true
+      track: [ip, domain]
+      on_kinds: [registration_disallowed, unsupported_email]
+      state_path: providers/mimo/output/burn_state.json
+
+  verify:
+    enabled: true
+
+  sink:
+    path: providers/mimo/output/pipeline.jsonl
+
+  secrets:
+    mode: prod

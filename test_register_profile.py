@@ -223,7 +223,8 @@ class TestPipelineFromProfile(unittest.TestCase):
         self.assertTrue(stats.results[0].ok)
         self.assertTrue(str(stats.results[0].secret).startswith("rt.1."))
 
-    def test_blackbox_profile_fails_fast(self):
+    def test_mimo_profile_accepts_composite_email(self):
+        """M3: mimo profile builds CompositeEmailSource (FIXED_EMAIL inject path)."""
         from register_core.pipeline import Pipeline
 
         raw = {
@@ -232,12 +233,46 @@ class TestPipelineFromProfile(unittest.TestCase):
                 "provider": {"name": "mimo"},
                 "mailbox": {"type": "tinyhost"},
                 "decode": {"type": "tinyhost"},
+                "strategy": {
+                    "fail_fast": True,
+                    "burn": {
+                        "enabled": True,
+                        "track": ["ip", "domain"],
+                        "on_kinds": ["registration_disallowed"],
+                    },
+                },
                 "secrets": {"mode": "dev"},
             },
         }
         profile = parse_profile_dict(raw)
-        with self.assertRaises(ValueError):
-            Pipeline.from_profile(profile)
+        pipe = Pipeline.from_profile(profile)
+        self.assertIsInstance(pipe.email_source, CompositeEmailSource)
+        self.assertIsNotNone(pipe.strategy)
+        self.assertIn("domain", pipe.strategy.burn_track)
+
+    def test_grok_profile_accepts_composite_email(self):
+        """M4: grok profile builds CompositeEmailSource + strategy engine."""
+        from register_core.pipeline import Pipeline
+
+        raw = {
+            "apiVersion": "register.v1",
+            "spec": {
+                "provider": {"name": "grok"},
+                "mailbox": {"type": "tinyhost", "domain": "publicvm.com"},
+                "decode": {"type": "tinyhost"},
+                "strategy": {
+                    "fail_fast": True,
+                    "fail_fast_kinds": ["fatal", "verify"],
+                    "cool_soft_seconds": 5,
+                },
+                "secrets": {"mode": "dev"},
+            },
+        }
+        profile = parse_profile_dict(raw)
+        pipe = Pipeline.from_profile(profile)
+        self.assertIsInstance(pipe.email_source, CompositeEmailSource)
+        self.assertIsNotNone(pipe.strategy)
+        self.assertEqual(pipe.strategy.cool_soft_seconds, 5.0)
 
 
 class TestVerifierStillOk(unittest.TestCase):

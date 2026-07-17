@@ -163,10 +163,14 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(stats.fail, 1)
         self.assertEqual(stats.results[0].error_kind, "verify")
 
-    def test_blackbox_rejects_external_email_source(self):
-        job = RegisterJob(provider="mimo", email_source="tinyhost")
-        with self.assertRaises(ValueError):
-            Pipeline.from_job(job)
+    def test_shell_providers_accept_external_email_source(self):
+        """M3/M4: mimo/grok consume EmailSource via FIXED_EMAIL inject (no black-box gate)."""
+        for provider in ("mimo", "grok"):
+            job = RegisterJob(provider=provider, email_source="tinyhost")
+            pipe = Pipeline.from_job(job)
+            self.assertIsNotNone(pipe.email_source)
+            self.assertEqual(getattr(pipe.email_source, "name", ""), "tinyhost")
+            self.assertIsNotNone(pipe.strategy)
 
     def test_sink_jsonl_mode_0600(self):
         with tempfile.TemporaryDirectory() as td:

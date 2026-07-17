@@ -56,8 +56,9 @@ def cmd_list(_: argparse.Namespace) -> int:
         "Legacy flags still work. Hub: ./register.sh grok|mimo|chatgpt"
     )
     print(
-        "note: grok/mimo are black-box until M3/M4 (profile mailbox/decode must be provider). "
-        "chatgpt is in-process (cloudflare|gmail_imap|tinyhost|auto)."
+        "note: chatgpt/mimo/grok all accept profile mailbox+decode "
+        "(CompositeEmailSource → FIXED_EMAIL / OTP_HELPER inject for shell runners). "
+        "strategy.burn + fail_fast_kinds are live via StrategyEngine."
     )
     return 0
 

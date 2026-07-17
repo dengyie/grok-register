@@ -1,0 +1,52 @@
+# Example: Grok + tinyhost paired mailbox/decode (M4 FIXED_EMAIL + OTP_HELPER)
+#   python -m register_core run --profile profiles/grok-tinyhost.example.yaml -n 1
+#
+# Requires: register_cli.py / grok_register_ttk; EMAIL_PROVIDER=fixed when FIXED_EMAIL set.
+# Product ok requires this-run SSO in accounts ledger (email----pw----sso).
+
+apiVersion: register.v1
+kind: RegisterProfile
+metadata:
+  name: grok-tinyhost
+
+spec:
+  provider:
+    name: grok
+    options:
+      threads: 1
+
+  count: 1
+
+  mailbox:
+    type: tinyhost
+    domain: publicvm.com
+
+  decode:
+    type: tinyhost
+    options:
+      timeout_s: 180
+
+  strategy:
+    fail_fast: true
+    fail_fast_kinds:
+      - fatal
+      - verify
+      - registration_disallowed
+    egress:
+      mode: auto
+    mail_proxy: direct
+    cool_soft_seconds: 30
+    burn:
+      enabled: true
+      track: [ip, domain, proxy]
+      on_kinds: [registration_disallowed, unsupported_email]
+      state_path: output/grok_burn_state.json
+
+  verify:
+    enabled: true
+
+  sink:
+    path: output/pipeline-grok.jsonl
+
+  secrets:
+    mode: prod

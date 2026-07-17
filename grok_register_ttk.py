@@ -2964,11 +2964,22 @@ def gmail_get_oai_code(
 # ──────────────────────── 公共邮箱工具 ────────────────────────
 
 def get_email_provider():
+    # Env EMAIL_PROVIDER overlays config via _ENV_CONFIG_OVERLAYS; FIXED_EMAIL forces fixed.
+    fixed = str(os.environ.get("FIXED_EMAIL") or os.environ.get("MIMO_FIXED_EMAIL") or "").strip()
+    if fixed and "@" in fixed:
+        return "fixed"
     return str(config.get("email_provider", "duckmail") or "duckmail").strip().lower()
 
 
 def get_email_and_token(api_key=None):
     provider = get_email_provider()
+    # register_core inject: FIXED_EMAIL + EMAIL_PROVIDER=fixed (M4)
+    if provider in ("fixed", "core", "register_core"):
+        fixed = str(os.environ.get("FIXED_EMAIL") or os.environ.get("MIMO_FIXED_EMAIL") or "").strip()
+        if not fixed or "@" not in fixed:
+            raise Exception("EMAIL_PROVIDER=fixed requires FIXED_EMAIL")
+        token = str(os.environ.get("FIXED_EMAIL_TOKEN") or "fixed_core").strip() or "fixed_core"
+        return fixed, token
     if provider in ("hotmail", "outlook", "outlookmail", "microsoft"):
         return hotmail_get_email_and_token()
     if provider in ("gmail", "google", "googlemail"):
@@ -3030,6 +3041,53 @@ def get_email_and_token(api_key=None):
     return address, token
 
 
+def _fixed_core_get_oai_code(
+    email,
+    timeout=180,
+    poll_interval=3,
+    log_callback=None,
+    cancel_callback=None,
+    used_codes=None,
+):
+    """Poll OTP via register_core OTP_HELPER / REGISTER_OTP_SPEC (profile mailbox/decode)."""
+    import subprocess
+    import time as _time
+
+    helper = str(os.environ.get("OTP_HELPER") or os.environ.get("MIMO_OTP_HELPER") or "").strip()
+    py = str(os.environ.get("OTP_HELPER_PYTHON") or sys.executable or "python3").strip()
+    if not helper:
+        raise Exception("EMAIL_PROVIDER=fixed requires OTP_HELPER from register_core")
+    used = set(used_codes or [])
+    deadline = _time.time() + float(timeout or 180)
+    last_err = ""
+    while _time.time() < deadline:
+        if cancel_callback and cancel_callback():
+            raise Exception("OTP wait cancelled")
+        try:
+            cmd = [py, helper, str(email), *[str(c) for c in used]]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=max(30.0, float(poll_interval or 3) * 20),
+                env=os.environ.copy(),
+            )
+            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            m = re.search(r"\b(\d{6})\b", out)
+            if m and m.group(1) and m.group(1) not in used:
+                code = m.group(1)
+                if log_callback:
+                    log_callback(f"[mail] fixed core OTP ok")
+                return code
+            last_err = (proc.stderr or proc.stdout or f"exit={proc.returncode}")[:200]
+        except Exception as exc:
+            last_err = str(exc)[:200]
+            if log_callback:
+                log_callback(f"[mail] fixed core poll: {last_err}")
+        _time.sleep(max(1.0, float(poll_interval or 3)))
+    raise Exception(f"fixed core OTP timeout for {email}: {last_err}")
+
+
 def get_oai_code(
     dev_token,
     email,
@@ -3040,6 +3098,14 @@ def get_oai_code(
     resend_callback=None,
 ):
     provider = get_email_provider()
+    if provider in ("fixed", "core", "register_core"):
+        return _fixed_core_get_oai_code(
+            email,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+        )
     if provider in ("hotmail", "outlook", "outlookmail", "microsoft"):
         return hotmail_get_oai_code(
             dev_token,

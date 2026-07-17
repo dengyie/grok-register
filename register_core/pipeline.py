@@ -15,13 +15,15 @@ from register_core.errors import FailFastError, MailMissError, RegisterCoreError
 from register_core.providers.base import RegisterProvider
 from register_core.providers.registry import get_provider
 from register_core.sink.base import ResultSink
+from register_core.strategy.engine import StrategyEngine
 from register_core.verify.base import Verifier
 from register_core.verify.registry import get_verifier
 
 log = logging.getLogger("register_core.pipeline")
 
-# Black-box adapters that cannot consume EmailSource today.
-_BLACKBOX_PROVIDERS = frozenset({"grok", "mimo", "xai", "xiaomi", "mimo-tts"})
+# Shell adapters that historically owned mail internally; M3/M4 consume EmailSource
+# via FIXED_EMAIL (+ optional OTP bridge). Kept only for docs / legacy messages.
+_SHELL_PROVIDERS = frozenset({"grok", "mimo", "xai", "xiaomi", "mimo-tts"})
 
 
 class Pipeline:
@@ -34,6 +36,7 @@ class Pipeline:
         sink: ResultSink | None = None,
         fail_fast: bool = True,
         on_result: Callable[[RegisterResult], None] | None = None,
+        strategy: StrategyEngine | None = None,
     ) -> None:
         self.provider = provider
         self.email_source = email_source
@@ -41,18 +44,25 @@ class Pipeline:
         self.sink = sink
         self.fail_fast = fail_fast
         self.on_result = on_result
+        self.strategy = strategy
 
     @classmethod
     def from_job(cls, job: RegisterJob, *, sink: ResultSink | None = None) -> Pipeline:
         provider = get_provider(job.provider, **(job.extra or {}))
         email = cls._resolve_email_source(job)
         verifier = cls._resolve_verifier(job)
+        strategy = StrategyEngine.from_extra(
+            job.extra,
+            fail_fast=job.fail_fast,
+            log_fn=lambda m: log.info("%s", m),
+        )
         return cls(
             provider,
             email_source=email,
             verifier=verifier,
             sink=sink,
             fail_fast=job.fail_fast,
+            strategy=strategy,
         )
 
     @classmethod
@@ -65,7 +75,8 @@ class Pipeline:
     ) -> Pipeline:
         """Build pipeline from a register.v1 RegisterProfile.
 
-        Injects CompositeEmailSource (mailbox + decode) for in-process providers.
+        Injects CompositeEmailSource (mailbox + decode) for all providers that
+        can consume FIXED_EMAIL / EMAIL_PROVIDER inject (ChatGPT, MiMo, Grok).
         """
         from register_core.config.loader import build_composite_email, profile_to_job
 
@@ -85,20 +96,19 @@ class Pipeline:
             email = cls._resolve_email_source(job)
         else:
             email = composite  # type: ignore[assignment]
-            # Black-box honesty: do not silently ignore composite for grok/mimo yet.
-            prov = (job.provider or "").strip().lower()
-            if prov in _BLACKBOX_PROVIDERS:
-                raise ValueError(
-                    f"provider {job.provider!r} cannot consume profile mailbox/decode yet "
-                    f"(black-box; M3/M4). Use mailbox/decode type provider or ChatGPT."
-                )
         verifier = cls._resolve_verifier(job)
+        strategy = StrategyEngine.from_extra(
+            job.extra,
+            fail_fast=job.fail_fast,
+            log_fn=lambda m: log.info("%s", m),
+        )
         return cls(
             provider,
             email_source=email,
             verifier=verifier,
             sink=sink,
             fail_fast=job.fail_fast,
+            strategy=strategy,
         )
 
     @staticmethod
@@ -110,13 +120,6 @@ class Pipeline:
         name = (job.email_source or "provider").strip().lower()
         if name in ("", "provider", "none", "internal"):
             return None
-        prov = (job.provider or "").strip().lower()
-        if prov in _BLACKBOX_PROVIDERS:
-            raise ValueError(
-                f"provider {job.provider!r} is a black-box runner and cannot use "
-                f"--email-source={job.email_source!r}; use email_source=provider "
-                f"(adapter-internal mail) or an in-process provider"
-            )
         # Mail path must never inherit register egress (PROXY_LIST / attempt proxy).
         mail_proxy = resolve_mail_proxy(job.extra)
         kw: dict[str, Any] = {}
@@ -146,6 +149,12 @@ class Pipeline:
         stats = PipelineStats()
         n = max(1, int(count))
         base_extra = dict(extra or {})
+        strategy = self.strategy or StrategyEngine.from_extra(
+            base_extra,
+            fail_fast=self.fail_fast,
+            log_fn=lambda m: log.info("%s", m),
+        )
+        self.strategy = strategy
 
         # Gate: probe project nodes before any register attempt (list/auto).
         # Dead catalog must not enter the registration hot path.
@@ -209,6 +218,25 @@ class Pipeline:
                     raise
                 log.warning("proxy rotation skipped: %s", exc)
                 attempt_extra = dict(base_extra)
+
+            # Strategy precheck: burned egress / cooling IP.
+            pre = strategy.precheck_egress(attempt_extra)
+            if pre.should_stop:
+                result = RegisterResult(
+                    ok=False,
+                    provider=self.provider.name,
+                    error=pre.stop_reason,
+                    error_kind="fatal",
+                    secret_kind="none",
+                    artifacts={"strategy_precheck": pre.action},
+                )
+                stats.results.append(result)
+                stats.fail += 1
+                self._emit(result)
+                stats.stopped_reason = f"strategy: {pre.stop_reason}"
+                log.error("strategy precheck stop: %s", pre.stop_reason)
+                break
+
             try:
                 result = self.provider.register_one(
                     email_source=self.email_source,
@@ -222,7 +250,7 @@ class Pipeline:
                     error_kind="fatal",
                     secret_kind="none",
                 )
-                self._feedback_proxy(attempt_extra, result)
+                self._feedback_all(attempt_extra, result, strategy)
                 stats.results.append(result)
                 stats.fail += 1
                 self._emit(result)
@@ -252,7 +280,7 @@ class Pipeline:
                 # mail_miss is not a dead proxy — still report so soft-cool path
                 # classifies as non_proxy_failure (no quarantine / network cool).
                 try:
-                    self._feedback_proxy(attempt_extra, result)
+                    self._feedback_all(attempt_extra, result, strategy)
                 except FailFastError as ff:
                     stats.results.append(result)
                     stats.fail += 1
@@ -276,7 +304,7 @@ class Pipeline:
                     secret_kind="none",
                 )
                 try:
-                    self._feedback_proxy(attempt_extra, result)
+                    self._feedback_all(attempt_extra, result, strategy)
                 except FailFastError as ff:
                     stats.results.append(result)
                     stats.fail += 1
@@ -300,7 +328,7 @@ class Pipeline:
                     secret_kind="none",
                 )
                 try:
-                    self._feedback_proxy(attempt_extra, result)
+                    self._feedback_all(attempt_extra, result, strategy)
                 except FailFastError as ff:
                     stats.results.append(result)
                     stats.fail += 1
@@ -333,9 +361,9 @@ class Pipeline:
                     result.error = f"verify: {exc}"
                     result.error_kind = "verify"
 
-            # Feedback node health: success clears fails; proxy/network fail quarantines.
+            # Feedback node health + strategy burn/cool.
             try:
-                self._feedback_proxy(attempt_extra, result)
+                sfb = self._feedback_all(attempt_extra, result, strategy)
             except FailFastError as ff:
                 stats.results.append(result)
                 if result.ok:
@@ -354,12 +382,36 @@ class Pipeline:
                 stats.fail += 1
             self._emit(result)
 
-            if not result.ok and self.fail_fast:
-                stats.stopped_reason = result.error or result.error_kind or "failed"
-                log.error("fail-fast after failure: %s", stats.stopped_reason)
-                break
+            # Strategy fail_fast_kinds may stop even when pipeline.fail_fast is soft
+            # on other kinds; prefer strategy decision when present.
+            if not result.ok:
+                if sfb and sfb.should_stop:
+                    stats.stopped_reason = sfb.stop_reason or result.error or result.error_kind
+                    log.error("strategy fail-fast: %s", stats.stopped_reason)
+                    break
+                if self.fail_fast:
+                    stats.stopped_reason = result.error or result.error_kind or "failed"
+                    log.error("fail-fast after failure: %s", stats.stopped_reason)
+                    break
 
         return stats
+
+    def _feedback_all(
+        self,
+        attempt_extra: dict[str, Any] | None,
+        result: RegisterResult,
+        strategy: StrategyEngine | None = None,
+    ):
+        """Proxy catalog feedback + StrategyEngine burn/cool."""
+        self._feedback_proxy(attempt_extra, result)
+        eng = strategy or self.strategy
+        if eng is None:
+            return None
+        try:
+            return eng.on_result(result, attempt_extra)
+        except Exception as exc:
+            log.debug("strategy feedback skipped: %s", exc)
+            return None
 
     def _feedback_proxy(self, attempt_extra: dict[str, Any] | None, result: RegisterResult) -> None:
         """Mark catalog node success/failure and drop quarantined URLs from rotator."""
