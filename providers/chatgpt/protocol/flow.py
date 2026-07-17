@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import random
 import secrets
 import string
@@ -93,6 +94,35 @@ def _noop_log(_: str) -> None:
 
 def _std_log(msg: str) -> None:
     print(f"[chatgpt] {msg}", flush=True)
+
+
+def _human_pause(log: LogFn | None = None, *, label: str = "") -> float:
+    """Sleep ~10s ±1s between protocol steps to mimic human form pacing.
+
+    Env:
+      CHATGPT_HUMAN_PACE=0|off|false → disable (tests / debug)
+      CHATGPT_STEP_DELAY_S=10        → base seconds (default 10)
+      CHATGPT_STEP_JITTER_S=1        → ±jitter seconds (default 1)
+    """
+    flag = str(os.environ.get("CHATGPT_HUMAN_PACE", "1") or "1").strip().lower()
+    if flag in ("0", "off", "false", "no", "disabled"):
+        return 0.0
+    try:
+        base = float(os.environ.get("CHATGPT_STEP_DELAY_S") or "10")
+    except ValueError:
+        base = 10.0
+    try:
+        jitter = float(os.environ.get("CHATGPT_STEP_JITTER_S") or "1")
+    except ValueError:
+        jitter = 1.0
+    lo = max(0.0, base - max(0.0, jitter))
+    hi = max(lo, base + max(0.0, jitter))
+    delay = random.uniform(lo, hi)
+    if log is not None:
+        log(f"human_pace wait={delay:.2f}s step={label or 'next'}")
+    if delay > 0:
+        time.sleep(delay)
+    return delay
 
 
 def _generate_pkce() -> tuple[str, str]:
@@ -397,6 +427,8 @@ class PlatformRegistrar:
             },
             allow_redirects=True,
         )
+        # Pause after page view before POST create_account (form fill).
+        _human_pause(self.log, label="about_you_form")
         headers = self._accounts_headers(
             f"{AUTH_BASE}/about-you",
             "oauth_create_account",
@@ -663,18 +695,28 @@ def register_one(
     full_name = full_name or _random_name()
     birthdate = birthdate or _random_birthdate()
     steps: dict[str, Any] = {}
+    pace_waits: list[dict[str, Any]] = []
     registrar = PlatformRegistrar(proxy=proxy, log=log)
+
+    def pace(label: str) -> None:
+        waited = _human_pause(log, label=label)
+        if waited > 0:
+            pace_waits.append({"step": label, "wait_s": round(waited, 3)})
+
     try:
         auth_info = registrar.start_authorize(email)
         steps["authorize"] = {
             "status": auth_info.get("status"),
             "final_url": str(auth_info.get("final_url") or "")[:200],
         }
+        pace("after_authorize")
         sess = registrar.establish_session()
         steps["session"] = sess
         # Soft: continue even without session cookie (some flows still work)
+        pace("after_session")
         reg = registrar.register_user(email, password)
         steps["register_user"] = {"status": reg.get("status")}
+        pace("after_register_user")
         otp_send = registrar.send_otp()
         steps["send_otp"] = {"status": otp_send.get("status")}
         steps["otp_sent_at"] = time.time()
@@ -692,6 +734,7 @@ def register_one(
             if code and code.isdigit():
                 break
             if attempt < 2:
+                pace("before_otp_resend")
                 try:
                     resend = registrar.send_otp()
                     steps[f"send_otp_resend_{attempt}"] = {"status": resend.get("status")}
@@ -704,8 +747,10 @@ def register_one(
                 f"otp_wait:{last_otp_err or code!r}", kind="mail_miss"
             )
         steps["otp_code_len"] = len(code)
+        pace("before_validate_otp")
         val = registrar.validate_otp(code)
         steps["validate_otp"] = {"status": val.get("status")}
+        pace("before_create_account")
         create = registrar.create_account(full_name, birthdate)
         steps["create_account"] = {
             "status": create.get("status"),
@@ -717,9 +762,12 @@ def register_one(
             or auth_info.get("final_url")
             or ""
         )
+        pace("before_token_exchange")
         token_result = registrar.exchange_tokens(callback)
         token_result.password = password
         token_result.email = token_result.email or email
+        if pace_waits:
+            steps["human_pace"] = pace_waits
         token_result.steps = steps
         token_result.device_id = registrar.device_id
         if not token_result.ok:

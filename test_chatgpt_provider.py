@@ -132,6 +132,43 @@ class TestChatGPTProtocolHelpers(unittest.TestCase):
         self.assertNotIn("sk-access-abcdefghijklmnopqrstuvwxyz", blob)
         self.assertNotIn("rt-refresh-abcdefghijklmnopqrstuvwxyz", blob)
 
+    def test_human_pause_off_is_noop(self):
+        from providers.chatgpt.protocol.flow import _human_pause
+
+        logs: list[str] = []
+        with patch.dict(
+            "os.environ",
+            {"CHATGPT_HUMAN_PACE": "0"},
+            clear=False,
+        ), patch("providers.chatgpt.protocol.flow.time.sleep") as sleep:
+            waited = _human_pause(logs.append, label="unit")
+        self.assertEqual(waited, 0.0)
+        sleep.assert_not_called()
+        self.assertEqual(logs, [])
+
+    def test_human_pause_default_jitter_range(self):
+        from providers.chatgpt.protocol.flow import _human_pause
+
+        logs: list[str] = []
+        with patch.dict(
+            "os.environ",
+            {
+                "CHATGPT_HUMAN_PACE": "1",
+                "CHATGPT_STEP_DELAY_S": "10",
+                "CHATGPT_STEP_JITTER_S": "1",
+            },
+            clear=False,
+        ), patch(
+            "providers.chatgpt.protocol.flow.random.uniform", return_value=10.4
+        ) as uniform, patch(
+            "providers.chatgpt.protocol.flow.time.sleep"
+        ) as sleep:
+            waited = _human_pause(logs.append, label="after_authorize")
+        self.assertEqual(waited, 10.4)
+        uniform.assert_called_once_with(9.0, 11.0)
+        sleep.assert_called_once_with(10.4)
+        self.assertTrue(any("human_pace" in x and "after_authorize" in x for x in logs))
+
 
 class TestChatGPTAdapterAttribution(unittest.TestCase):
     def test_success_from_this_run_only(self):
