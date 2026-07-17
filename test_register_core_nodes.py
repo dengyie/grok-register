@@ -701,6 +701,14 @@ class TestManager(unittest.TestCase):
             resolve_probe_targets({}, env={"REGISTER_NODES_PROBE_TARGETS": "0"}),
             [],
         )
+        # Present-but-empty env falls through to provider map (not silent L1-only).
+        self.assertEqual(
+            resolve_probe_targets(
+                {"provider": "grok"},
+                env={"REGISTER_NODES_PROBE_TARGETS": ""},
+            ),
+            ["https://accounts.x.ai/"],
+        )
         self.assertEqual(resolve_probe_targets({}, provider="unknown", env={}), [])
 
     def test_preflight_l2_filters_l1_only_passers(self) -> None:
@@ -828,6 +836,153 @@ class TestManager(unittest.TestCase):
                 error_kind="other",
             )
         )
+
+    def test_probe_reachable_http_error_is_transport_ok(self) -> None:
+        """Any HTTP status (incl. 4xx/5xx) must count as L2 transport success."""
+        from register_core.nodes import health as health_mod
+
+        with patch.object(
+            health_mod,
+            "_http_get",
+            return_value=("<html>denied</html>", 403),
+        ):
+            r = health_mod.probe_reachable(
+                "http://proxy:1", "https://accounts.x.ai/", timeout=2.0
+            )
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["status"], 403)
+        self.assertEqual(r["error"], "")
+
+    def test_http_get_urllib_http_error_returns_status(self) -> None:
+        """urllib path: HTTPError must return (body, code), not raise into L2."""
+        import builtins
+        import urllib.error
+        from io import BytesIO
+
+        from register_core.nodes import health as health_mod
+
+        class _FakeHTTPError(urllib.error.HTTPError):
+            def __init__(self) -> None:
+                super().__init__(
+                    "https://accounts.x.ai/",
+                    403,
+                    "Forbidden",
+                    {},
+                    BytesIO(b"nope"),
+                )
+
+        class _Opener:
+            def open(self, req, timeout=None):
+                raise _FakeHTTPError()
+
+        real_import = builtins.__import__
+
+        def _import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "curl_cffi" or name.startswith("curl_cffi."):
+                raise ImportError("forced no curl_cffi")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", side_effect=_import), patch(
+            "urllib.request.build_opener", return_value=_Opener()
+        ):
+            body, status = health_mod._http_get(
+                "http://proxy:1", "https://accounts.x.ai/", timeout=2.0
+            )
+        self.assertEqual(status, 403)
+        self.assertIn("nope", body)
+
+    def test_layered_l2_fail_keeps_l1_stamp_and_annotates_error(self) -> None:
+        from register_core.nodes import health as health_mod
+
+        node = Node(url="http://p:1", id="n1", label="n1")
+
+        def fake_l1(n, **kw):
+            n.last_ok = True
+            n.fail_count = 0
+            n.last_error = ""
+            return {
+                "id": n.id,
+                "label": n.label,
+                "ok": True,
+                "ip": "1.2.3.4",
+                "ms": 10,
+                "status": 200,
+                "error": "",
+            }
+
+        l2_calls: list[str] = []
+
+        def fake_l2(proxy_url, target_url, **kw):
+            l2_calls.append(target_url)
+            return {
+                "ok": False,
+                "status": None,
+                "ms": 5,
+                "error": "ConnectionResetError: reset",
+                "target": target_url,
+            }
+
+        with patch.object(health_mod, "probe_node", side_effect=fake_l1), patch.object(
+            health_mod, "probe_reachable", side_effect=fake_l2
+        ):
+            r = health_mod.probe_node_layered(
+                node,
+                probe_urls=[
+                    "https://accounts.x.ai/",
+                    "https://other.example/",
+                ],
+                timeout=2.0,
+            )
+        self.assertTrue(node.last_ok)
+        self.assertEqual(node.fail_count, 0)
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["pool_ready"])
+        self.assertTrue(str(node.last_error).startswith("l2_fail"))
+        # short-circuit: second L2 target never called
+        self.assertEqual(l2_calls, ["https://accounts.x.ai/"])
+        self.assertEqual(len(r["l2"]), 1)
+
+    def test_smart_order_deprioritizes_l2_miss(self) -> None:
+        """L2-miss (last_ok True + last_error l2_fail) must rank after unprobed."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            a = Node(
+                url="http://a:1",
+                id="a",
+                last_ok=True,
+                last_error="l2_fail target=x",
+            )
+            b = Node(url="http://b:1", id="b", last_ok=None, last_error="")
+            c = Node(url="http://c:1", id="c", last_ok=True, last_error="")
+            save_nodes([a, b, c], path)
+            order: list[str] = []
+
+            def fake_probe(node, **kwargs):
+                order.append(node.id)
+                node.last_ok = True
+                node.fail_count = 0
+                node.last_error = ""
+                return {
+                    "id": node.id,
+                    "label": node.label,
+                    "ok": True,
+                    "error": "",
+                    "pool_ready": True,
+                }
+
+            with patch(
+                "register_core.nodes.manager.probe_node_layered",
+                side_effect=fake_probe,
+            ):
+                mgr = NodeManager(path)
+                mgr.check_all(
+                    probe_urls=["https://accounts.x.ai/"],
+                    smart_order=True,
+                    limit=None,
+                    persist=False,
+                )
+            # clean L1 (c) → unprobed (b) → l2_miss (a)
+            self.assertEqual(order, ["c", "b", "a"])
 
 
 if __name__ == "__main__":

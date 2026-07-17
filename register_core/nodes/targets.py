@@ -64,7 +64,10 @@ def resolve_probe_targets(
       3. provider map (extra provider / _provider / explicit provider=)
       4. empty → L1-only (legacy)
 
-    Explicit disable: ``0`` / ``none`` / empty list via extra or env.
+    Explicit disable: ``0`` / ``none`` / ``off`` / ``false`` via extra or env.
+    Empty / whitespace-only env value is treated as **missing** (fall through to
+    provider map) so accidental ``export REGISTER_NODES_PROBE_TARGETS=`` does not
+    silently force L1-only. Empty list/string in *extra* still disables.
     """
     ex = dict(extra or {})
     environ = env if env is not None else os.environ
@@ -74,8 +77,13 @@ def resolve_probe_targets(
             return _split_urls(ex[key])
 
     for env_key in ("REGISTER_NODES_PROBE_TARGETS", "NODES_PROBE_TARGETS"):
-        if env_key in environ:
-            return _split_urls(environ.get(env_key))
+        if env_key not in environ:
+            continue
+        raw = environ.get(env_key)
+        if raw is None or not str(raw).strip():
+            # Present-but-empty: treat as unset (fall through).
+            continue
+        return _split_urls(raw)
 
     name = (
         provider

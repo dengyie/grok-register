@@ -108,8 +108,10 @@ def probe_node_layered(
     - Always runs L1 via ``probe_node`` (mutates last_ok).
     - When ``probe_urls`` empty: layered ok == L1 ok (legacy).
     - When L2 set: ok only if L1 and every target is transport-reachable.
-    - L2 failures do **not** flip last_ok to False if L1 already passed —
-      catalog stamp stays L1-true; pool filter uses result["ok"] / pool_ready.
+    - L2 failures do **not** flip last_ok / fail_count if L1 already passed —
+      catalog stamp stays L1-true; ``last_error`` may note ``l2_fail …`` for
+      ops + smart_order deprioritization; pool filter uses ok / pool_ready.
+    - Remaining L2 targets short-circuit after the first miss.
     """
     targets = [str(u).strip() for u in (probe_urls or []) if str(u).strip()]
     l1 = probe_node(node, probe_url=l1_url, timeout=timeout)
@@ -137,6 +139,7 @@ def probe_node_layered(
         l2_results.append(r)
         if not r.get("ok"):
             all_l2 = False
+            break  # short-circuit remaining L2 targets
     result["l2"] = l2_results
     result["l2_ok"] = all_l2
     result["pool_ready"] = all_l2
@@ -146,9 +149,15 @@ def probe_node_layered(
         failed = next((x for x in l2_results if not x.get("ok")), None)
         detail = (failed or {}).get("error") or "l2_unreachable"
         tgt = (failed or {}).get("target") or (targets[0] if targets else "")
-        result["error"] = f"l2_fail target={tgt}: {detail}"[:200]
-        # Keep L1 stamp: last_ok remains True from probe_node so catalog is not
-        # hard-quarantined solely for missing a business path; pool uses ok/pool_ready.
+        err = f"l2_fail target={tgt}: {detail}"[:200]
+        result["error"] = err
+        # Ops visibility only: do not flip last_ok / fail_count (no hard quarantine
+        # for missing a business path). Pool gate still uses ok / pool_ready.
+        node.last_error = err
+    else:
+        # Clear prior L2 annotation when dual-pass succeeds.
+        if (node.last_error or "").startswith("l2_fail"):
+            node.last_error = ""
     return result
 
 
@@ -163,6 +172,7 @@ def _http_get(proxy: str, url: str, *, timeout: float) -> tuple[str, int]:
     except ImportError:
         pass
 
+    import urllib.error
     import urllib.request
 
     handlers = []
@@ -170,8 +180,17 @@ def _http_get(proxy: str, url: str, *, timeout: float) -> tuple[str, int]:
         handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
     opener = urllib.request.build_opener(*handlers)
     req = urllib.request.Request(url, headers={"User-Agent": "register-machine-node-probe/1.0"})
-    with opener.open(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", "replace"), int(resp.status)
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", "replace"), int(resp.status)
+    except urllib.error.HTTPError as e:
+        # L2 contract: any HTTP status = transport OK (match curl_cffi).
+        # HTTPError is a valid response with .code; do not raise into probe_reachable.
+        try:
+            body = e.read().decode("utf-8", "replace") if e.fp is not None else ""
+        except Exception:
+            body = ""
+        return body, int(e.code)
 
 
 def _extract_ip(body: str) -> str:

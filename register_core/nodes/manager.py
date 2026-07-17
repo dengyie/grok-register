@@ -236,13 +236,19 @@ class NodeManager:
             candidates.append(n)
 
         if smart_order:
-            # Prefer nodes already proven, then never probed, then soft-failed.
+            # Prefer dual-pass / clean L1 → unprobed → L2-miss (last_ok True +
+            # last_error l2_fail) → soft L1 fail. L2-miss must not monopolize the
+            # REGISTER_NODES_PROBE_LIMIT budget on large catalogs.
             def _rank(n: Node) -> tuple[int, int]:
-                if n.last_ok is True:
+                err = (n.last_error or "").lower()
+                l2_miss = err.startswith("l2_fail") or "l2_fail " in err
+                if n.last_ok is True and not l2_miss:
                     return (0, int(n.fail_count or 0))
                 if n.last_ok is None:
                     return (1, 0)
-                return (2, -int(n.fail_count or 0))
+                if n.last_ok is True and l2_miss:
+                    return (2, 0)
+                return (3, -int(n.fail_count or 0))
 
             candidates.sort(key=_rank)
 
@@ -331,31 +337,21 @@ class NodeManager:
         skipped = [r for r in results if r.get("skipped")]
 
         if targets:
-            # Dual-pass pool: only layered ok (pool_ready). Do not fall back to last_ok-only.
-            by_id = {str(r.get("id") or ""): r for r in results}
+            # Dual-pass pool: only layered ok (L1∧L2). Do not fall back to last_ok-only.
+            # Prefer probe-ok order (smart_order); skip quarantine/cooling.
             self.ensure_loaded()
+            with self._lock:
+                id_to_node = {str(n.id or ""): n for n in self.nodes}
             ordered: list[str] = []
             seen: set[str] = set()
-            with self._lock:
-                nodes_snap = list(self.nodes)
-            # Prefer probe-ok order first (smart_order preference).
             for r in ok:
-                rid = str(r.get("id") or "")
-                for n in nodes_snap:
-                    if str(n.id or "") == rid and n.url and n.url not in seen:
-                        if n.enabled and not self._is_quarantined(n) and not self.is_cooling(n):
-                            ordered.append(n.url)
-                            seen.add(n.url)
-                        break
-            for n in nodes_snap:
-                if not n.enabled or not n.url or n.url in seen:
+                n = id_to_node.get(str(r.get("id") or ""))
+                if n is None or not n.url or n.url in seen:
                     continue
-                if self._is_quarantined(n) or self.is_cooling(n):
+                if not n.enabled or self._is_quarantined(n) or self.is_cooling(n):
                     continue
-                r = by_id.get(str(n.id or "")) or {}
-                if r.get("ok") or r.get("pool_ready"):
-                    ordered.append(n.url)
-                    seen.add(n.url)
+                ordered.append(n.url)
+                seen.add(n.url)
             healthy_urls = ordered
         else:
             healthy_urls = self.urls(healthy_only=True)
