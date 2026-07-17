@@ -101,6 +101,17 @@ case "$cmd" in
     COUNT="${1:-1}"
     THREADS="${2:-1}"
     CODE_ROOT="$(_resolve_code_root)"
+    # migrate milestone A: production entry → register_core Pipeline (grok_adapter
+    # shell-out, serial). Prefers run-register-core.sh when present (Clash preflight
+    # + .env + xvfb外壳 preserved, only the inner register_cli call swapped).
+    # GROK_LEGACY=1 forces the legacy run-register.sh path (rollback / batch并发).
+    if [[ "${GROK_LEGACY:-0}" != "1" ]]; then
+      for _core in "$CODE_ROOT/run-register-core.sh" "$ROOT/run-register-core.sh"; do
+        if [[ -x "$_core" ]]; then
+          exec bash "$_core" "$COUNT" "$THREADS"
+        fi
+      done
+    fi
     if [[ -x "$CODE_ROOT/run-register.sh" && -d "$CODE_ROOT/.venv" ]]; then
       exec bash "$CODE_ROOT/run-register.sh" "$COUNT" "$THREADS"
     fi
