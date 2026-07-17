@@ -45,9 +45,19 @@ LogFn = Callable[[str], None]
 class ChatGPTRegisterError(RuntimeError):
     """Single-attempt registration failure (caller maps to RegisterResult)."""
 
-    def __init__(self, message: str, *, kind: str = "provider") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "provider",
+        step: str = "",
+        steps: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.kind = kind
+        self.step = step or ""
+        # Partial protocol ledger when raised mid-flow (adapter may surface as artifacts).
+        self.steps: dict[str, Any] = dict(steps or {})
 
 
 @dataclass
@@ -61,6 +71,7 @@ class RegistrationResult:
     callback_url: str = ""
     error: str = ""
     error_kind: str = ""
+    fail_step: str = ""
     steps: dict[str, Any] = field(default_factory=dict)
     device_id: str = ""
 
@@ -74,9 +85,16 @@ class RegistrationResult:
             "id_token": _preview(self.id_token),
             "error": self.error,
             "error_kind": self.error_kind,
+            "fail_step": self.fail_step,
             "device_id": self.device_id,
             "step_keys": sorted(self.steps.keys()),
         }
+
+
+def _sentinel_soft_enabled() -> bool:
+    """Default hard-fail on sentinel PoW. Opt-in soft: CHATGPT_SENTINEL_SOFT=1."""
+    flag = str(os.environ.get("CHATGPT_SENTINEL_SOFT", "0") or "0").strip().lower()
+    return flag in ("1", "true", "yes", "on", "soft")
 
 
 def _preview(value: str) -> str:
@@ -245,8 +263,16 @@ class PlatformRegistrar:
             headers["openai-sentinel-token"] = token
             headers["OpenAI-Sentinel-Token"] = token
         except Exception as exc:
-            headers["x-openai-sentinel-error"] = str(exc)[:200]
-            self.log(f"sentinel soft-fail flow={flow}: {exc}")
+            if _sentinel_soft_enabled():
+                headers["x-openai-sentinel-error"] = str(exc)[:200]
+                self.log(f"sentinel soft-fail flow={flow}: {exc}")
+            else:
+                # Hard gate: PoW failure is captcha class, not silent continue.
+                raise ChatGPTRegisterError(
+                    f"sentinel_fail:{flow}:{exc}",
+                    kind="captcha",
+                    step=f"sentinel:{flow}",
+                ) from exc
         return headers
 
     def start_authorize(self, email: str) -> dict[str, str]:
@@ -290,7 +316,9 @@ class PlatformRegistrar:
         )
         if resp is None:
             raise ChatGPTRegisterError(
-                error or "authorize_request_failed", kind="provider"
+                error or "authorize_request_failed",
+                kind="provider",
+                step="authorize",
             )
         status = int(getattr(resp, "status_code", 0) or 0)
         final_url = str(getattr(resp, "url", "") or "")
@@ -316,7 +344,15 @@ class PlatformRegistrar:
         try:
             headers["OpenAI-Sentinel-Token"] = self._ensure_sentinel("signup")
         except Exception as exc:
-            headers["x-openai-sentinel-error"] = str(exc)[:200]
+            if _sentinel_soft_enabled():
+                headers["x-openai-sentinel-error"] = str(exc)[:200]
+                self.log(f"sentinel soft-fail flow=signup: {exc}")
+            else:
+                raise ChatGPTRegisterError(
+                    f"sentinel_fail:signup:{exc}",
+                    kind="captcha",
+                    step="session",
+                ) from exc
         candidates = [
             self.last_authorize.get("final_url") or f"{AUTH_BASE}/u/signup",
             f"{AUTH_BASE}/u/signup",
@@ -341,7 +377,14 @@ class PlatformRegistrar:
             or cookie_get(self.session, "oai-auth-token")
         )
         self.log(f"session establish ok={has_session}")
-        return {"ok": has_session}
+        if not has_session:
+            # Hard gate: no session cookie → subsequent account APIs are noise.
+            raise ChatGPTRegisterError(
+                "session_cookie_missing",
+                kind="session",
+                step="session",
+            )
+        return {"ok": True}
 
     def register_user(self, email: str, password: str) -> dict[str, Any]:
         headers = self._accounts_headers(
@@ -361,10 +404,15 @@ class PlatformRegistrar:
         self.log(f"register_user status={status} ok={ok}")
         if not ok:
             detail = str(body.get("error") or body.get("detail") or error or "")[:200]
-            # 409 often means already registered — still fail this attempt cleanly
+            detail_l = detail.lower()
+            kind = "provider"
+            # 409 / already-exists signals are product identity collisions, not protocol bugs.
+            if status == 409 or "already" in detail_l or "exists" in detail_l:
+                kind = "already_registered"
             raise ChatGPTRegisterError(
                 f"register_user_http_{status}:{detail}",
-                kind="provider",
+                kind=kind,
+                step="register_user",
             )
         return {"ok": True, "status": status, "json": body}
 
@@ -384,7 +432,9 @@ class PlatformRegistrar:
         self.log(f"send_otp status={status} ok={ok}")
         if not ok:
             raise ChatGPTRegisterError(
-                f"send_otp_http_{status}:{error}", kind="provider"
+                f"send_otp_http_{status}:{error}",
+                kind="provider",
+                step="send_otp",
             )
         return {"ok": True, "status": status, "json": response_json(resp)}
 
@@ -407,7 +457,8 @@ class PlatformRegistrar:
         if not ok:
             raise ChatGPTRegisterError(
                 f"validate_otp_http_{status}:{error or body}",
-                kind="provider",
+                kind="otp_invalid",
+                step="validate_otp",
             )
         return {"ok": True, "status": status, "json": body}
 
@@ -479,6 +530,7 @@ class PlatformRegistrar:
             raise ChatGPTRegisterError(
                 f"create_account_http_{status}:{detail}",
                 kind=kind,
+                step="create_account",
             )
         continue_url = str(
             body.get("continue_url") or location or body.get("url") or ""
@@ -598,16 +650,26 @@ class PlatformRegistrar:
         )
 
     def exchange_tokens(self, callback_url: str) -> RegistrationResult:
+        consent_step: dict[str, Any] = {
+            "callback_url_present": bool(callback_url),
+            "callback_url_preview": str(callback_url or "")[:160],
+        }
         params = self._follow_consent_for_code(callback_url)
         if not params:
+            consent_step["ok"] = False
+            consent_step["error"] = "missing_oauth_callback"
             return RegistrationResult(
                 ok=False,
                 error="missing_oauth_callback",
-                error_kind="provider",
+                error_kind="oauth_callback",
+                fail_step="oauth_callback",
                 callback_url=callback_url,
                 device_id=self.device_id,
+                steps={"oauth_callback": consent_step},
             )
         code = params["code"]
+        consent_step["ok"] = True
+        consent_step["has_code"] = True
         # Fresh session for token exchange is more reliable with some proxies
         token_session = create_session(self.proxy)
         try:
@@ -630,37 +692,53 @@ class PlatformRegistrar:
                 token_session.close()
             except Exception:
                 pass
+        token_step: dict[str, Any] = {}
         if resp is None:
+            token_step = {"ok": False, "error": str(error or "")[:200]}
             return RegistrationResult(
                 ok=False,
                 error=f"oauth_token_failed:{error}",
-                error_kind="provider",
+                error_kind="token",
+                fail_step="token",
                 callback_url=callback_url,
                 device_id=self.device_id,
+                steps={"oauth_callback": consent_step, "token": token_step},
             )
         status = int(getattr(resp, "status_code", 0) or 0)
         data = response_json(resp)
+        token_step["status"] = status
         if status != 200:
+            token_step["ok"] = False
             return RegistrationResult(
                 ok=False,
                 error=f"oauth_token_http_{status}",
-                error_kind="provider",
+                error_kind="token",
+                fail_step="token",
                 callback_url=callback_url,
                 device_id=self.device_id,
+                steps={"oauth_callback": consent_step, "token": token_step},
             )
         access_token = str(data.get("access_token") or "").strip()
         refresh_token = str(data.get("refresh_token") or "").strip()
         id_token = str(data.get("id_token") or "").strip()
+        token_step["has_access"] = bool(access_token)
+        token_step["has_refresh"] = bool(refresh_token)
+        token_step["has_id"] = bool(id_token)
         if not access_token or not refresh_token:
+            token_step["ok"] = False
+            token_step["error"] = "missing_tokens"
             return RegistrationResult(
                 ok=False,
                 error="missing_tokens",
-                error_kind="provider",
+                error_kind="token",
+                fail_step="token",
                 callback_url=callback_url,
                 device_id=self.device_id,
+                steps={"oauth_callback": consent_step, "token": token_step},
             )
         payload = _decode_jwt_payload(id_token) or _decode_jwt_payload(access_token)
         email = str(payload.get("email") or "").strip()
+        token_step["ok"] = True
         self.log("oauth token exchange ok")
         return RegistrationResult(
             ok=True,
@@ -670,6 +748,7 @@ class PlatformRegistrar:
             id_token=id_token,
             callback_url=callback_url,
             device_id=self.device_id,
+            steps={"oauth_callback": consent_step, "token": token_step},
         )
 
 
@@ -703,20 +782,24 @@ def register_one(
         if waited > 0:
             pace_waits.append({"step": label, "wait_s": round(waited, 3)})
 
+    fail_step = ""
     try:
+        fail_step = "authorize"
         auth_info = registrar.start_authorize(email)
         steps["authorize"] = {
             "status": auth_info.get("status"),
             "final_url": str(auth_info.get("final_url") or "")[:200],
         }
         pace("after_authorize")
+        fail_step = "session"
         sess = registrar.establish_session()
         steps["session"] = sess
-        # Soft: continue even without session cookie (some flows still work)
         pace("after_session")
+        fail_step = "register_user"
         reg = registrar.register_user(email, password)
         steps["register_user"] = {"status": reg.get("status")}
         pace("after_register_user")
+        fail_step = "send_otp"
         otp_send = registrar.send_otp()
         steps["send_otp"] = {"status": otp_send.get("status")}
         steps["otp_sent_at"] = time.time()
@@ -724,6 +807,7 @@ def register_one(
         code = ""
         last_otp_err = ""
         # One resend after first miss — temp-mail delivery is flaky.
+        fail_step = "otp_wait"
         for attempt in range(1, 3):
             try:
                 code = str(otp_provider() or "").strip()
@@ -744,13 +828,18 @@ def register_one(
                     steps[f"send_otp_resend_{attempt}"] = {"error": str(exc)[:120]}
         if not code or not code.isdigit():
             raise ChatGPTRegisterError(
-                f"otp_wait:{last_otp_err or code!r}", kind="mail_miss"
+                f"otp_wait:{last_otp_err or code!r}",
+                kind="mail_miss",
+                step="otp_wait",
+                steps=steps,
             )
         steps["otp_code_len"] = len(code)
         pace("before_validate_otp")
+        fail_step = "validate_otp"
         val = registrar.validate_otp(code)
         steps["validate_otp"] = {"status": val.get("status")}
         pace("before_create_account")
+        fail_step = "create_account"
         create = registrar.create_account(full_name, birthdate)
         steps["create_account"] = {
             "status": create.get("status"),
@@ -763,20 +852,40 @@ def register_one(
             or ""
         )
         pace("before_token_exchange")
+        fail_step = "token"
         token_result = registrar.exchange_tokens(callback)
         token_result.password = password
         token_result.email = token_result.email or email
         if pace_waits:
             steps["human_pace"] = pace_waits
-        token_result.steps = steps
+        # Merge pre-token protocol ledger with consent/token sub-steps.
+        merged = dict(steps)
+        for k, v in (token_result.steps or {}).items():
+            merged[k] = v
+        token_result.steps = merged
         token_result.device_id = registrar.device_id
         if not token_result.ok:
             token_result.error_kind = token_result.error_kind or "provider"
+            token_result.fail_step = token_result.fail_step or fail_step
         return token_result
-    except ChatGPTRegisterError:
+    except ChatGPTRegisterError as exc:
+        # Attach partial steps for sink attribution when raised mid-flow.
+        if pace_waits and "human_pace" not in steps:
+            steps["human_pace"] = pace_waits
+        if not exc.steps:
+            exc.steps = dict(steps)
+        if not exc.step:
+            exc.step = fail_step
         raise
     except Exception as exc:
-        raise ChatGPTRegisterError(f"unexpected:{exc}", kind="other") from exc
+        if pace_waits and "human_pace" not in steps:
+            steps["human_pace"] = pace_waits
+        raise ChatGPTRegisterError(
+            f"unexpected:{exc}",
+            kind="other",
+            step=fail_step or "unknown",
+            steps=steps,
+        ) from exc
     finally:
         registrar.close()
 
