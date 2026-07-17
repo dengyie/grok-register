@@ -2,7 +2,7 @@
 
 本索引汇总**已在 main 落地**的功能开发，便于一眼看清「开发了什么」。每条附代表 commit；对应的设计文档（design spec / plan）已归档至 [`docs/archive/`](archive/)。
 
-> 生产现状：Grok 仍跑根目录 legacy（`grok_register_ttk.py` + `register_cli.py` + `cpa_xai/`），`register_core/` 为分层目标架构。下表「归档 spec/plan」指设计稿，不代表代码落点。
+> 生产现状：三个 `./register.sh` 生产入口（`grok | mimo | chatgpt`）统一经 `register_core` Pipeline 调度（attribution / strategy burn-cool / 节点 L1+L2 preflight / 代理轮换 / 验证器 / JSONL sink）。Grok/MiMo adapter 仍 shell-out 到 legacy runner（`register_cli.py` + `grok_register_ttk.py` / `providers/mimo` Node runner）作为 adapter 目标 + 回滚后路（`GROK_LEGACY=1` / `MIMO_LEGACY=1` / `CHATGPT_LEGACY=1`）。in-process 重写（B 方案）未启动。下表「归档 spec/plan」指设计稿，不代表代码落点。
 
 | 功能 | 交付内容 | 代表 commit | 归档 spec/plan |
 |---|---|---|---|
@@ -15,10 +15,11 @@
 | ChatGPT human-pace | protocol API 步骤间 ~10s±1s 拟人节拍 | `f421837` | [chatgpt-code-align](archive/specs/2026-07-16-chatgpt-code-align-design.md) |
 | SPA-stuck browser_boot 回收 | pre-email「您正在登录」粘滞 → `AccountRetryNeeded browser_boot` slot-retry；legacy wording 兼容归类 | `773404c`、`e635334`、`530f770` | — |
 | Hotmail plus-alias 关停 | 别名农场 kill-switch（mode=off / allow=false），别名耗尽立即致命停止不空转 | `78fd894` | [chatgpt-code-align](archive/specs/2026-07-16-chatgpt-code-align-design.md) |
+| register_core 迁移 A（生产入口切 Pipeline） | `./register.sh grok\|mimo\|chatgpt` 统一经 register_core Pipeline 调度（attribution/strategy/节点 preflight/代理轮换/验证器/sink）；Grok/MiMo 仍 shell-out legacy；`GROK_LEGACY`/`MIMO_LEGACY`/`CHATGPT_LEGACY=1` 回滚；退出码映射 0/1/2；路由静态门禁 `test_router.py` | `5c10946`、`18f2976`、(phase-3) | — |
 
 ## 待开发（backlog，未启动，本轮不做）
 
-- **register_core 迁移收尾**：生产仍跑 legacy `grok_register_ttk.py`，未把 Grok/ChatGPT 切到 `register_core/` 管线。
+- **register_core 迁移收尾**：**A 已落地 / B in-process 未启动**。A（生产入口切 register_core 外壳）完成：`./register.sh grok|mimo|chatgpt` 经 Pipeline 调度，Grok/MiMo shell-out legacy 保留。B（把 `grok_register_ttk.py` + `cpa_xai` 改 in-process、保留 batch 并发）未启动。
 - **CF `token长度=0` 日志噪声**：P3，非阻塞。
 - 节点 catalog / Clash 产物进一步瘦身（`nodes.json` 2.2MB；可选）。
 
@@ -28,3 +29,27 @@
 - **OpenAI `registration_disallowed`**：IP/风控侧，与 chat 403 同属 external。
 
 验证入口：mint 后本地 probe `/v1/responses` 观察 403 body；ChatGPT 注册观察 create_account 是否仍 `registration_disallowed`。
+
+## 路由门禁验证入口（migrate milestone A）
+
+生产入口外壳正确性（无需真机/真号）：
+
+```bash
+# dry Pipeline 编排冒烟（仅验证外壳打通，不期望产真号）：
+SKIP_CLASH_PREFLIGHT=1 ./register.sh grok 1     # 经 register_core Pipeline + grok_adapter shell-out
+SKIP_CLASH_PREFLIGHT=1 ./register.sh chatgpt 1  # 经 register_core profile 路径（in-process）
+SKIP_CLASH_PREFLIGHT=1 ./register.sh mimo 1     # 经 register_core Pipeline + mimo_adapter shell-out
+# 日志应出现 [register_core.pipeline] StrategyEngine precheck + 节点 preflight + 验证器 + sink 写入
+```
+
+回滚（单 provider 一行 env，复产号路径）：
+
+```bash
+GROK_LEGACY=1 ./register.sh grok N T          # 回到 run-register.sh → register_cli.py legacy 并发
+MIMO_LEGACY=1 ./register.sh mimo N            # 回到 providers/mimo/run-register.sh Node runner
+CHATGPT_LEGACY=1 ./register.sh chatgpt N       # 回到 providers/chatgpt/run-register.sh env 驱动
+```
+
+静态门禁：`python -m pytest test_router.py -q`（6 断言：三入口默认路由 register_core，`*_LEGACY=1` 回滚，`core` 子命令不变）。
+
+生产冒烟（Manual-required，非阻塞）：pxed 上 `./register.sh grok 1` 真实节点产 Grok reg+mint 确认切外壳后仍产出；ChatGPT 仍 `registration_disallowed`（外部依赖）。

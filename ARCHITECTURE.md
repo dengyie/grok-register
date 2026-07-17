@@ -159,7 +159,7 @@ Two leaf-health preflights exist; both strip dead nodes before batch work, **bac
 - Operator `PROXY_LIST` owns the pool and skips catalog probe unless `force_nodes_preflight=1` (see product contract above).
 - Never treat Clash group rewrite as `nodes.json` authority, or vice versa.
 
-Root-level Grok modules (`register_cli.py`, `grok_register_ttk.py`, `cpa_xai/`, `proxy_*`) remain **runtime-valid** until a dedicated migrate milestone. `providers/grok/` documents the target package shape without breaking imports.
+Root-level Grok modules (`register_cli.py`, `grok_register_ttk.py`, `cpa_xai/`, `proxy_*`) are **adapter targets** for `register_core/providers/grok_adapter`, reached via shell-out. Since migrate milestone A, the three `./register.sh` production entries (`grok | mimo | chatgpt`) route through the `register_core` Pipeline (attribution / strategy burn-cool / node L1+L2 preflight / proxy rotation / verifiers / sink), with Grok and MiMo still shelling out to these legacy runners internally. Rollback per provider: `GROK_LEGACY=1` / `MIMO_LEGACY=1` / `CHATGPT_LEGACY=1`. In-process rewrites of Grok/MiMo (no shell-out) remain backlog (not started). `providers/grok/` documents the target package shape without breaking imports.
 
 ## Registry pattern
 

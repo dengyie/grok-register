@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Unified layered register CLI.
+"""Unified layered register CLI — production entry for all providers.
 
-Production authority for full signup remains:
-  ./register.sh grok | ./register.sh mimo
+The three ./register.sh production entries (grok | mimo | chatgpt) all route
+through this register_core Pipeline (migrate milestone A):
+  grok    → run-register-core.sh → `python -m register_core run --profile ...`
+  mimo    → `python -m register_core run --profile profiles/mimo-tinyhost...`
+  chatgpt → `python -m register_core run --profile profiles/chatgpt-tinyhost...`
 
-This CLI orchestrates adapters with honest success attribution. Black-box
-providers (grok/mimo) use adapter-internal mail only (email_source=provider).
-In-process providers (chatgpt) accept EmailSource (tinyhost/auto/…).
+Pipeline owns attribution, strategy burn/cool, node L1/L2 preflight, proxy
+rotation, verifiers, and JSONL sink. Grok/MiMo adapters still shell out to
+the legacy runners internally (register_cli.py / providers/mimo Node runner)
+as adapter targets + rollback (GROK_LEGACY / MIMO_LEGACY / CHATGPT_LEGACY=1).
+In-process providers (chatgpt) consume EmailSource directly.
 """
 
 from __future__ import annotations
