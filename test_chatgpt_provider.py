@@ -236,8 +236,59 @@ class TestChatGPTAdapterAttribution(unittest.TestCase):
         ):
             result = provider.register_one(email_source=email)
         self.assertFalse(result.ok)
-        self.assertEqual(result.error_kind, "provider")
+        self.assertEqual(result.error_kind, "token")
+        self.assertEqual(result.artifacts.get("fail_step"), "token")
         self.assertEqual(email.released[-1][1], False)
+
+    def test_error_path_surfaces_steps_and_fail_step(self):
+        email = FakeEmail()
+        provider = ChatGPTProvider(proxy="")
+        from providers.chatgpt.protocol.flow import ChatGPTRegisterError
+
+        with patch(
+            "providers.chatgpt.protocol.flow.register_one",
+            side_effect=ChatGPTRegisterError(
+                "create_account_http_400:registration_disallowed",
+                kind="registration_disallowed",
+                step="create_account",
+                steps={
+                    "authorize": {"status": 200},
+                    "session": {"ok": True},
+                    "register_user": {"status": 200},
+                    "send_otp": {"status": 200},
+                    "validate_otp": {"status": 200},
+                },
+            ),
+        ):
+            result = provider.register_one(email_source=email)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_kind, "registration_disallowed")
+        self.assertEqual(result.artifacts.get("fail_step"), "create_account")
+        self.assertIsInstance(result.artifacts.get("steps"), dict)
+        self.assertIn("validate_otp", result.artifacts["steps"])
+        self.assertEqual(result.artifacts.get("protocol"), "openai_platform_oauth")
+        # fail_step is create_account even when partial ledger stops before recording it
+        self.assertEqual(result.artifacts.get("fail_step"), "create_account")
+        self.assertIn("validate_otp", result.artifacts.get("step_keys", []))
+
+    def test_otp_invalid_kind_passthrough(self):
+        email = FakeEmail()
+        provider = ChatGPTProvider(proxy="")
+        from providers.chatgpt.protocol.flow import ChatGPTRegisterError
+
+        with patch(
+            "providers.chatgpt.protocol.flow.register_one",
+            side_effect=ChatGPTRegisterError(
+                "validate_otp_http_400:bad",
+                kind="otp_invalid",
+                step="validate_otp",
+                steps={"send_otp": {"status": 200}},
+            ),
+        ):
+            result = provider.register_one(email_source=email)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_kind, "otp_invalid")
+        self.assertEqual(result.artifacts.get("fail_step"), "validate_otp")
 
     def test_mail_miss_returns_result_with_email(self):
         email = FakeEmail(fail_otp=True)

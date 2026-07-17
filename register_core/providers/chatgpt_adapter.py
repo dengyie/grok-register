@@ -210,6 +210,14 @@ class ChatGPTProvider:
             )
         except ChatGPTRegisterError as exc:
             kind = normalize_error_kind(getattr(exc, "kind", "provider"))
+            fail_step = str(getattr(exc, "step", "") or "").strip()
+            partial_steps = getattr(exc, "steps", None)
+            if isinstance(partial_steps, dict) and partial_steps:
+                arts["steps"] = partial_steps
+                arts["step_keys"] = sorted(str(k) for k in partial_steps.keys())
+            if fail_step:
+                arts["fail_step"] = fail_step
+            arts["protocol"] = "openai_platform_oauth"
             try:
                 source.release(mailbox, success=False)
             except Exception:
@@ -254,7 +262,17 @@ class ChatGPTProvider:
             raise ProviderError(f"chatgpt unexpected: {exc}") from exc
 
         arts["tail"] = "\n".join(logs)[-1500:]
-        arts["steps"] = list((result.steps or {}).keys())
+        # Keep full step ledger for sink attribution (not just keys).
+        if isinstance(result.steps, dict) and result.steps:
+            arts["steps"] = result.steps
+            arts["step_keys"] = sorted(str(k) for k in result.steps.keys())
+        else:
+            arts["steps"] = {}
+            arts["step_keys"] = []
+        fail_step = str(getattr(result, "fail_step", "") or "").strip()
+        if fail_step:
+            arts["fail_step"] = fail_step
+        arts["protocol"] = "openai_platform_oauth"
         arts["device_id"] = result.device_id
 
         if not result.ok:
@@ -280,13 +298,14 @@ class ChatGPTProvider:
                 source.release(mailbox, success=False)
             except Exception:
                 pass
+            arts["fail_step"] = arts.get("fail_step") or "token"
             return RegisterResult(
                 ok=False,
                 provider=self.name,
                 email=result.email or email,
                 password=password,
                 error="missing_refresh_token",
-                error_kind="provider",
+                error_kind="token",
                 secret_kind="none",
                 artifacts=arts,
             )
