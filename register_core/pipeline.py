@@ -158,6 +158,13 @@ class Pipeline:
 
         # Gate: probe project nodes before any register attempt (list/auto).
         # Dead catalog must not enter the registration hot path.
+        # Stash provider so L2 business-domain targets resolve from the map.
+        try:
+            if self.provider and getattr(self.provider, "name", None):
+                base_extra.setdefault("provider", self.provider.name)
+                base_extra.setdefault("_provider", self.provider.name)
+        except Exception:
+            pass
         try:
             from register_core.util.proxy import preflight_nodes_for_register
 
@@ -169,7 +176,17 @@ class Pipeline:
             if isinstance(pf, dict):
                 stats.nodes_preflight = {
                     k: pf.get(k)
-                    for k in ("skipped", "reason", "ok", "fail", "healthy", "probed", "path")
+                    for k in (
+                        "skipped",
+                        "reason",
+                        "ok",
+                        "fail",
+                        "healthy",
+                        "probed",
+                        "path",
+                        "probe_targets",
+                        "l2_enabled",
+                    )
                     if k in pf
                 }
         except FailFastError as exc:

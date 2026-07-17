@@ -556,27 +556,53 @@ def preflight_nodes_for_register(
     except Exception:
         limit = None
 
-    summary = mgr.preflight(timeout=timeout, log=_log, persist=True, limit=limit)
+    # L2 business targets (strategy-group analogue). Empty → L1-only legacy.
+    try:
+        from register_core.nodes.targets import (
+            provider_target_summary,
+            resolve_probe_targets,
+        )
+
+        probe_urls = resolve_probe_targets(base)
+    except Exception:
+        probe_urls = []
+        provider_target_summary = lambda _t: "L1-only"  # noqa: E731
+
+    summary = mgr.preflight(
+        timeout=timeout,
+        log=_log,
+        persist=True,
+        limit=limit,
+        probe_urls=probe_urls or None,
+    )
     healthy_list = summary.get("proxy_list") or ""
     healthy_n = int(summary.get("healthy") or 0)
+    targets_label = provider_target_summary(summary.get("probe_targets") or probe_urls)
 
     if healthy_n <= 0:
         msg = (
             f"nodes preflight found 0 healthy proxies "
-            f"(probed={summary.get('probed')} fail={summary.get('fail')} path={summary.get('path')})"
+            f"(probed={summary.get('probed')} fail={summary.get('fail')} "
+            f"targets={targets_label} path={summary.get('path')})"
         )
         if _nodes_required_for_backend(backend, base) or backend == "list":
             raise FailFastError(msg)
         # auto: fall through to core without list pool
         _log(f"[nodes] {msg}; falling through to core/auto")
         base["_nodes_preflight_done"] = True
-        base["_nodes_preflight"] = {**summary, "skipped": False, "healthy": 0}
+        base["_nodes_preflight"] = {
+            **summary,
+            "skipped": False,
+            "healthy": 0,
+            "probe_targets": list(summary.get("probe_targets") or probe_urls),
+            "l2_enabled": bool(probe_urls),
+        }
         # ensure empty list doesn't block core: leave proxy_list unset
         base.pop("proxy_list", None)
         configure_rotation_once(base, log_fn=log_fn, force=True)
         return base
 
-    # Seed rotation with only probed-ok URLs; force list mode for this batch.
+    # Seed rotation with only dual-pass (or L1-only) URLs; force list mode for this batch.
     base["proxy_list"] = healthy_list
     if backend == "auto":
         base["egress"] = "list"
@@ -590,8 +616,12 @@ def preflight_nodes_for_register(
         "healthy": healthy_n,
         "probed": summary.get("probed"),
         "path": summary.get("path"),
+        "probe_targets": list(summary.get("probe_targets") or probe_urls),
+        "l2_enabled": bool(summary.get("l2_enabled") or probe_urls),
     }
-    _log(f"[nodes] preflight ready healthy={healthy_n} → list rotation")
+    _log(
+        f"[nodes] preflight ready healthy={healthy_n} targets={targets_label} → list rotation"
+    )
     configure_rotation_once(base, log_fn=log_fn, force=True)
     return base
 
@@ -610,6 +640,11 @@ _PROXY_FAIL_MARKERS = (
     "unreachable",
     "refused",
     "reset by peer",
+    "connection reset",
+    "connection_reset",
+    "err_empty_response",
+    "empty response",
+    "empty_response",
     "ssl",
     "tls",
     "eof",

@@ -1,10 +1,16 @@
-"""Node health probe — uses curl_cffi when available (matches ChatGPT path)."""
+"""Node health probe — uses curl_cffi when available (matches ChatGPT path).
+
+Layers:
+  L1 (probe_node / DEFAULT_PROBE_URL): require HTTP 2xx; mutates catalog last_ok.
+  L2 (probe_reachable / business URL): any HTTP status = transport success; no stamp.
+  L1∧L2 (probe_node_layered): registration pool gate when target domains are known.
+"""
 
 from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, Sequence
 
 from register_core.nodes.models import Node
 
@@ -54,6 +60,96 @@ def probe_node(
         "error": node.last_error,
         "url_label": node.label,
     }
+
+
+def probe_reachable(
+    proxy_url: str,
+    target_url: str,
+    *,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """L2 transport probe: any HTTP response (incl. 3xx/4xx/5xx) is success.
+
+    RST / tunnel timeout / empty / connect errors are failures. Does **not**
+    mutate Node catalog fields — filter-only for registration pool seeding.
+    """
+    t0 = time.time()
+    ok = False
+    err = ""
+    status: int | None = None
+    try:
+        _body, status = _http_get(proxy_url, target_url, timeout=timeout)
+        # Transport success: we received an HTTP status line (any code).
+        if status is not None:
+            ok = True
+        else:
+            err = "empty_status"
+    except Exception as exc:
+        err = f"{type(exc).__name__}: {exc}"[:200]
+    ms = int((time.time() - t0) * 1000)
+    return {
+        "ok": ok,
+        "status": status,
+        "ms": ms,
+        "error": "" if ok else err,
+        "target": target_url,
+    }
+
+
+def probe_node_layered(
+    node: Node,
+    *,
+    probe_urls: Sequence[str] | None = None,
+    l1_url: str = DEFAULT_PROBE_URL,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """L1 egress (2xx) then L2 business targets (any status).
+
+    - Always runs L1 via ``probe_node`` (mutates last_ok).
+    - When ``probe_urls`` empty: layered ok == L1 ok (legacy).
+    - When L2 set: ok only if L1 and every target is transport-reachable.
+    - L2 failures do **not** flip last_ok to False if L1 already passed —
+      catalog stamp stays L1-true; pool filter uses result["ok"] / pool_ready.
+    """
+    targets = [str(u).strip() for u in (probe_urls or []) if str(u).strip()]
+    l1 = probe_node(node, probe_url=l1_url, timeout=timeout)
+    result: dict[str, Any] = {
+        **l1,
+        "l1_ok": bool(l1.get("ok")),
+        "l2_ok": True if not targets else False,
+        "l2": [],
+        "pool_ready": bool(l1.get("ok")),
+        "probe_targets": list(targets),
+    }
+    if not l1.get("ok"):
+        result["ok"] = False
+        result["pool_ready"] = False
+        return result
+    if not targets:
+        result["ok"] = True
+        result["pool_ready"] = True
+        return result
+
+    l2_results: list[dict[str, Any]] = []
+    all_l2 = True
+    for target in targets:
+        r = probe_reachable(node.url, target, timeout=timeout)
+        l2_results.append(r)
+        if not r.get("ok"):
+            all_l2 = False
+    result["l2"] = l2_results
+    result["l2_ok"] = all_l2
+    result["pool_ready"] = all_l2
+    # Public "ok" for preflight healthy pool = L1∧L2 when targets present.
+    result["ok"] = all_l2
+    if not all_l2:
+        failed = next((x for x in l2_results if not x.get("ok")), None)
+        detail = (failed or {}).get("error") or "l2_unreachable"
+        tgt = (failed or {}).get("target") or (targets[0] if targets else "")
+        result["error"] = f"l2_fail target={tgt}: {detail}"[:200]
+        # Keep L1 stamp: last_ok remains True from probe_node so catalog is not
+        # hard-quarantined solely for missing a business path; pool uses ok/pool_ready.
+    return result
 
 
 def _http_get(proxy: str, url: str, *, timeout: float) -> tuple[str, int]:

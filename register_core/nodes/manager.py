@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from register_core.nodes.catalog import default_nodes_path, load_nodes, save_nodes
-from register_core.nodes.health import probe_node
+from register_core.nodes.health import probe_node, probe_node_layered
 from register_core.nodes.models import Node
 
 LogFn = Callable[[str], None] | None
@@ -179,16 +179,24 @@ class NodeManager:
         limit: int | None = None,
         smart_order: bool = False,
         skip_quarantined: bool = False,
+        probe_urls: list[str] | tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         """Probe catalog nodes and persist health fields.
 
         ``smart_order`` (register preflight): previously healthy → unprobed → soft-fail,
         and optionally skip hard-quarantined nodes so bulk dead dumps don't burn the budget.
+
+        ``probe_urls``: optional L2 business targets. When set, each candidate runs
+        ``probe_node_layered`` (L1∧L2); result ``ok`` / ``pool_ready`` gates the register
+        pool. L1-only (empty probe_urls) keeps legacy ``probe_node`` behavior.
         """
         self.ensure_loaded()
         results: list[dict[str, Any]] = []
         with self._lock:
             nodes = list(self.nodes)
+
+        targets = [str(u).strip() for u in (probe_urls or []) if str(u).strip()]
+        use_layered = bool(targets)
 
         candidates: list[Node] = []
         for n in nodes:
@@ -251,13 +259,22 @@ class NodeManager:
                     }
                 )
                 continue
-            r = probe_node(n, timeout=timeout)
+            if use_layered:
+                r = probe_node_layered(n, probe_urls=targets, timeout=timeout)
+            else:
+                r = probe_node(n, timeout=timeout)
             probed += 1
             results.append(r)
             if log:
                 try:
                     if r.get("ok"):
-                        log(f"[nodes] OK {r.get('label')} ip={r.get('ip')} {r.get('ms')}ms")
+                        l2note = ""
+                        if use_layered:
+                            l2note = " L1∧L2"
+                        log(
+                            f"[nodes] OK{l2note} {r.get('label')} "
+                            f"ip={r.get('ip')} {r.get('ms')}ms"
+                        )
                     else:
                         log(f"[nodes] FAIL {r.get('label')}: {r.get('error')}")
                 except Exception:
@@ -276,11 +293,16 @@ class NodeManager:
         log: LogFn = None,
         persist: bool = True,
         limit: int | None = None,
+        probe_urls: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         """Probe enabled nodes before register; return healthy pool summary.
 
-        Register path should only consume ``healthy_urls`` from this result.
-        Uses smart order + skips quarantined; default limit protects large dumps.
+        Register path should only consume ``healthy_urls`` / ``proxy_list`` from this
+        result. Uses smart order + skips quarantined; default limit protects large dumps.
+
+        When ``probe_urls`` is non-empty, pool is the L1∧L2 dual-pass subset (not merely
+        catalog ``last_ok``). L2-only failures stay out of the seed list without
+        hard-quarantining the node for missing a business path.
         """
         if limit is None:
             # Default budget: avoid probing hundreds of dead free-list nodes on every run.
@@ -289,6 +311,7 @@ class NodeManager:
             raw = (os.environ.get("REGISTER_NODES_PROBE_LIMIT") or "").strip()
             if raw == "0":
                 limit = None
+        targets = [str(u).strip() for u in (probe_urls or []) if str(u).strip()]
         results = self.check_all(
             timeout=timeout,
             log=log,
@@ -297,6 +320,7 @@ class NodeManager:
             limit=limit,
             smart_order=True,
             skip_quarantined=True,
+            probe_urls=targets or None,
         )
         ok = [r for r in results if r.get("ok")]
         fail = [
@@ -305,7 +329,37 @@ class NodeManager:
             if not r.get("ok") and not r.get("skipped")
         ]
         skipped = [r for r in results if r.get("skipped")]
-        healthy_urls = self.urls(healthy_only=True)
+
+        if targets:
+            # Dual-pass pool: only layered ok (pool_ready). Do not fall back to last_ok-only.
+            by_id = {str(r.get("id") or ""): r for r in results}
+            self.ensure_loaded()
+            ordered: list[str] = []
+            seen: set[str] = set()
+            with self._lock:
+                nodes_snap = list(self.nodes)
+            # Prefer probe-ok order first (smart_order preference).
+            for r in ok:
+                rid = str(r.get("id") or "")
+                for n in nodes_snap:
+                    if str(n.id or "") == rid and n.url and n.url not in seen:
+                        if n.enabled and not self._is_quarantined(n) and not self.is_cooling(n):
+                            ordered.append(n.url)
+                            seen.add(n.url)
+                        break
+            for n in nodes_snap:
+                if not n.enabled or not n.url or n.url in seen:
+                    continue
+                if self._is_quarantined(n) or self.is_cooling(n):
+                    continue
+                r = by_id.get(str(n.id or "")) or {}
+                if r.get("ok") or r.get("pool_ready"):
+                    ordered.append(n.url)
+                    seen.add(n.url)
+            healthy_urls = ordered
+        else:
+            healthy_urls = self.urls(healthy_only=True)
+
         summary = {
             "probed": len(ok) + len(fail),
             "ok": len(ok),
@@ -317,12 +371,16 @@ class NodeManager:
             "results": results,
             "path": str(self.path),
             "limit": limit,
+            "probe_targets": list(targets),
+            "l2_enabled": bool(targets),
         }
         if log:
             try:
+                tgt = ",".join(targets) if targets else "L1-only"
                 log(
                     f"[nodes] preflight ok={summary['ok']} fail={summary['fail']} "
-                    f"healthy={summary['healthy']} limit={limit} path={self.path}"
+                    f"healthy={summary['healthy']} targets={tgt} "
+                    f"limit={limit} path={self.path}"
                 )
             except Exception:
                 pass

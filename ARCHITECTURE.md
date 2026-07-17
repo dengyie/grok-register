@@ -98,7 +98,7 @@ REGISTER_EGRESS / --egress / nodes egress set
         └─ auto   → healthy list → core → clash URL → direct
                 │
                 ▼
-        preflight (list/auto): probe nodes → healthy-only pool
+        preflight (list/auto): L1 ipify (+ optional L2 business targets) → dual-pass pool
                 │
                 ▼
         proxy_rotate → concrete URL per attempt
@@ -115,6 +115,7 @@ REGISTER_EGRESS / --egress / nodes egress set
 | Switch | `register_core/util/egress.py` + `.nodes/config/egress.mode` |
 | HTTP catalog | `nodes.json` + `register_core/nodes/` (import **merges** by URL) |
 | Preflight + quarantine | `NodeManager.preflight/mark_result` + `util/proxy.preflight_nodes_for_register` |
+| L2 targets | `register_core/nodes/targets.py` (provider map / env / extra) |
 | Convert (opt-in) | `register_core/nodes/convert/` — parse/validate/pack only |
 | Protocol YAML | `.nodes/config/runtime.yaml` (from `nodes import`) |
 | Mini-core | `.nodes/bin/mihomo` via `nodes core start` (optional) |
@@ -123,9 +124,16 @@ REGISTER_EGRESS / --egress / nodes egress set
 
 Primary backends: `list` \| `core` \| `direct`. Advanced: `auto` (healthy list → core → clash-if-set), `clash`.
 
-**Product contract (imported catalogs):** After `nodes import` writes `nodes.json`, each batch register with `egress=list|auto` **live-probes** the catalog (`REGISTER_NODES_PREFLIGHT=1` default) and seeds rotation with **healthy-only** URLs. Dead rows stay in the catalog but never enter the pool. Zero healthy on `list` (or `REGISTER_NODES_REQUIRED`) → FailFastError (no account burn). Operator `PROXY_LIST` / `CHATGPT_PROXY_LIST` owns the pool and skips catalog probe unless `force_nodes_preflight=1`. Optional convenience: `nodes import … --check` or `nodes check` (batch preflight remains the authority gate). Skip reasons are logged (`backend=*`, `REGISTER_NODES=0`, `explicit_proxy_list`, `preflight_disabled`).
+**Product contract (imported catalogs):** After `nodes import` writes `nodes.json`, each batch register with `egress=list|auto` **live-probes** the catalog (`REGISTER_NODES_PREFLIGHT=1` default) and seeds rotation with **healthy-only** URLs. Health has two layers:
 
-Dead nodes are quarantined after `REGISTER_NODES_MAX_FAIL`. VLESS/SS/… need `egress=core`. Import/validate is **not** on the hot register path.
+| Layer | Probe | Pass rule | Mutates `last_ok` |
+|-------|-------|-----------|-------------------|
+| **L1** egress | `api.ipify.org` | HTTP 2xx | Yes (catalog stamp) |
+| **L2** target | provider business URL(s) | any HTTP status (transport OK) | No — filters pool only |
+
+Defaults: `grok`/`xai` → `https://accounts.x.ai/`; `chatgpt`/`openai` → `https://auth.openai.com/`; `mimo`/`xiaomi`/`mimo-tts` → `https://api.xiaomimimo.com/`. Override: `extra.probe_targets` / `REGISTER_NODES_PROBE_TARGETS` (set `0`/`none` to force L1-only). Pipeline stashes `provider` before preflight. Pool seed = L1∧L2 when targets set; L1-only when empty. Dead rows stay in the catalog but never enter the pool. Zero dual-pass (or L1-only when L2 off) on `list` (or `REGISTER_NODES_REQUIRED`) → FailFastError (no account burn). Operator `PROXY_LIST` / `CHATGPT_PROXY_LIST` owns the pool and skips catalog probe unless `force_nodes_preflight=1`. Optional convenience: `nodes import … --check` or `nodes check` (batch preflight remains the authority gate). Skip reasons are logged (`backend=*`, `REGISTER_NODES=0`, `explicit_proxy_list`, `preflight_disabled`).
+
+Dead nodes are quarantined after `REGISTER_NODES_MAX_FAIL`. Runtime proxy/network markers include empty response / connection reset language; never burn email domains on proxy RST. VLESS/SS/… need `egress=core`. Import/validate is **not** on the hot register path.
 
 ## Production authority (do not invert)
 
@@ -133,7 +141,7 @@ Dead nodes are quarantined after `REGISTER_NODES_MAX_FAIL`. VLESS/SS/… need `e
 |---------|----------------|
 | Grok signup + mint + chat gate | `./register.sh grok` → `register_cli.py` / `grok_register_ttk.py` + `cpa_xai/` |
 | **Grok production egress (pxed)** | **Clash mixed-port `127.0.0.1:7897`** via `run-register.sh` → `preflight-clash-nodes.sh` → `scripts/probe_clash_nodes.py` → `start-clash-for-grok.sh` |
-| Grok catalog egress (list\|auto) | monorepo `nodes.json` + `preflight_nodes_for_register` (separate backend; not the pxed Grok default) |
+| Grok catalog egress (list\|auto) | monorepo `nodes.json` + L1∧L2 `preflight_nodes_for_register` (separate backend; not the pxed Grok default until L2 pool non-empty for `accounts.x.ai`) |
 | MiMo API key | `./register.sh mimo` → `providers/mimo/run-register.sh` |
 | Layered orchestration only | `./register.sh core` → `python -m register_core` |
 | CPA OpenAI inject (MiMo) | `providers/mimo/inject_cpa_openai.py` (local; never silent prod write) |
@@ -145,7 +153,7 @@ Two leaf-health preflights exist; both strip dead nodes before batch work, **bac
 | Backend | When | Entry | Probe | Healthy gate |
 |---------|------|-------|-------|--------------|
 | **Clash mixed-port (pxed Grok production)** | `bash run-register.sh` on host with mihomo | `preflight-clash-nodes.sh` | mihomo controller delay API (`scripts/probe_clash_nodes.py`) | rewrites register groups (`🎯Grok注册` …) to healthy-only, pins `GROK_NODE`, restarts mihomo on `:7897` |
-| **nodes.json list\|auto** | `REGISTER_EGRESS=list\|auto` / ChatGPT / self-controlled `PROXY_LIST` path | `util/proxy.preflight_nodes_for_register` | HTTP probe of catalog URLs | healthy-only pool into rotation; zero healthy → FailFastError |
+| **nodes.json list\|auto** | `REGISTER_EGRESS=list\|auto` / ChatGPT / self-controlled `PROXY_LIST` path | `util/proxy.preflight_nodes_for_register` | L1 ipify (+ optional L2 business targets via `nodes/targets.py`) | dual-pass (or L1-only) pool into rotation; zero healthy → FailFastError |
 
 - `SKIP_CLASH_PREFLIGHT=1` skips the Clash path (local debug / non-Clash host only).
 - Operator `PROXY_LIST` owns the pool and skips catalog probe unless `force_nodes_preflight=1` (see product contract above).

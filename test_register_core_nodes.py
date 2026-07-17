@@ -679,6 +679,156 @@ class TestManager(unittest.TestCase):
         self.assertIn("catalog_unavailable", str(extra["_nodes_preflight"].get("reason")))
         self.assertTrue(any("catalog unavailable" in m for m in logs))
 
+    def test_resolve_probe_targets_provider_and_override(self) -> None:
+        from register_core.nodes.targets import resolve_probe_targets
+
+        self.assertEqual(
+            resolve_probe_targets({"provider": "grok"}, env={}),
+            ["https://accounts.x.ai/"],
+        )
+        self.assertEqual(
+            resolve_probe_targets({"_provider": "chatgpt"}, env={}),
+            ["https://auth.openai.com/"],
+        )
+        self.assertEqual(
+            resolve_probe_targets(
+                {"provider": "grok", "probe_targets": "https://custom.example/"},
+                env={},
+            ),
+            ["https://custom.example/"],
+        )
+        self.assertEqual(
+            resolve_probe_targets({}, env={"REGISTER_NODES_PROBE_TARGETS": "0"}),
+            [],
+        )
+        self.assertEqual(resolve_probe_targets({}, provider="unknown", env={}), [])
+
+    def test_preflight_l2_filters_l1_only_passers(self) -> None:
+        """L1 pass + L2 fail must not seed proxy_list when targets are set."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes(
+                [
+                    Node(url="http://dual:1", id="dual"),
+                    Node(url="http://l1only:1", id="l1"),
+                ],
+                path,
+            )
+
+            def fake_layered(node, **kwargs):
+                dual = node.url.endswith("dual:1")
+                node.last_ok = True  # L1 stamp true for both
+                node.fail_count = 0
+                node.last_error = "" if dual else "l2_fail"
+                return {
+                    "id": node.id,
+                    "label": node.label,
+                    "ok": dual,
+                    "l1_ok": True,
+                    "l2_ok": dual,
+                    "pool_ready": dual,
+                    "error": "" if dual else "l2_fail target=https://accounts.x.ai/",
+                }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES": "1",
+                    "REGISTER_EGRESS": "list",
+                    "REGISTER_CORE": "0",
+                    "PROXY_LIST": "",
+                    "CHATGPT_PROXY_LIST": "",
+                    "REGISTER_NODES_PREFLIGHT": "1",
+                    "REGISTER_NODES_PROBE_TARGETS": "",
+                },
+                clear=False,
+            ), patch(
+                "register_core.nodes.manager.probe_node_layered",
+                side_effect=fake_layered,
+            ):
+                reset_manager_for_tests()
+                core_proxy.reset_rotation_for_tests()
+                extra = core_proxy.preflight_nodes_for_register(
+                    {
+                        "egress": "list",
+                        "provider": "grok",
+                        "probe_targets": "https://accounts.x.ai/",
+                    }
+                )
+                self.assertFalse(extra["_nodes_preflight"].get("skipped"))
+                self.assertTrue(extra["_nodes_preflight"].get("l2_enabled"))
+                self.assertEqual(extra["_nodes_preflight"]["healthy"], 1)
+                self.assertEqual(extra.get("proxy_list"), "http://dual:1")
+
+    def test_preflight_all_l2_fail_fail_fast_on_list(self) -> None:
+        from register_core.errors import FailFastError
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            save_nodes([Node(url="http://l1ok:1", id="n1")], path)
+
+            def fake_layered(node, **kwargs):
+                node.last_ok = True
+                node.fail_count = 0
+                node.last_error = "l2_fail"
+                return {
+                    "id": node.id,
+                    "label": node.label,
+                    "ok": False,
+                    "l1_ok": True,
+                    "l2_ok": False,
+                    "pool_ready": False,
+                    "error": "l2_fail target=https://accounts.x.ai/",
+                }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES": "1",
+                    "REGISTER_EGRESS": "list",
+                    "REGISTER_CORE": "0",
+                    "PROXY_LIST": "",
+                    "REGISTER_NODES_PREFLIGHT": "1",
+                },
+                clear=False,
+            ), patch(
+                "register_core.nodes.manager.probe_node_layered",
+                side_effect=fake_layered,
+            ):
+                reset_manager_for_tests()
+                core_proxy.reset_rotation_for_tests()
+                with self.assertRaises(FailFastError):
+                    core_proxy.preflight_nodes_for_register(
+                        {
+                            "egress": "list",
+                            "provider": "grok",
+                            "probe_targets": "https://accounts.x.ai/",
+                        }
+                    )
+
+    def test_empty_response_is_proxy_network_failure(self) -> None:
+        self.assertTrue(
+            core_proxy.is_proxy_network_failure(
+                ok=False,
+                error="net::ERR_EMPTY_RESPONSE while loading accounts.x.ai",
+            )
+        )
+        self.assertTrue(
+            core_proxy.is_proxy_network_failure(
+                ok=False,
+                error="Connection reset by peer to target",
+            )
+        )
+        self.assertFalse(
+            core_proxy.is_proxy_network_failure(
+                ok=False,
+                error="registration_disallowed by risk",
+                error_kind="other",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
