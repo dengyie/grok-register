@@ -3065,11 +3065,19 @@ def _fixed_core_get_oai_code(
             raise Exception("OTP wait cancelled")
         try:
             cmd = [py, helper, str(email), *[str(c) for c in used]]
+            # Helper (register_core.tools.poll_otp) runs its own internal poll
+            # up to timeout_s (default 180s). Cap each subprocess at the
+            # REMAINING outer deadline + slack, not poll_interval*20, so a
+            # single helper invocation can complete its full internal poll
+            # (with poll_interval=3 the old max(30,3*20)=30s killed it early
+            # with "timed out after 30.0 seconds"). Local/SubprocessExpired on
+            # timeout is caught below and retried within the outer deadline.
+            sub_to = max(35.0, (deadline - _time.time()) + 15.0)
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=max(30.0, float(poll_interval or 3) * 20),
+                timeout=sub_to,
                 env=os.environ.copy(),
             )
             out = (proc.stdout or "") + "\n" + (proc.stderr or "")
