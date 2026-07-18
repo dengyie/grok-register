@@ -149,7 +149,9 @@ class MimoProvider:
 
             ok = proc.returncode == 0 and bool(secret)
             if not ok:
-                kind = self._classify(out)
+                kind = self._classify(
+                    out, stdout=proc.stdout or "", returncode=proc.returncode
+                )
                 return RegisterResult(
                     ok=False,
                     provider=self.name,
@@ -174,13 +176,65 @@ class MimoProvider:
             _release()
 
     @staticmethod
-    def _classify(out: str) -> str:
-        low = out.lower()
-        if "fail-fast" in low or "fatal" in low:
+    def _classify(
+        out: str,
+        *,
+        stdout: str = "",
+        returncode: int | None = None,
+    ) -> str:
+        """Classify a failed MiMo attempt.
+
+        Authority order (decode once at the boundary — don't re-derive with a
+        weaker matcher):
+          1. ``RESULT_JSON:{status, error}`` from register-one.js is the
+             authoritative structured signal. The Node runner sets
+             ``process.exitCode = 1`` for *every* failure (Geetest, OTP
+             timeout, provider error) — there is no ``exit 2`` fatal contract
+             here. RESULT_JSON ``status:"FAILED"`` is therefore retryable, and
+             ``error`` drives the public error_kind.
+          2. Only when register-one emitted NO RESULT_JSON AND the whole output
+             is empty (spawn crash / orphan before main) is this fatal — a
+             genuine batch-stopper we still want to surface.
+
+        What we explicitly do NOT do: substring-match ``"fail-fast"`` /
+        ``"fatal"`` against the merged blob. run-register.sh wrapper echoes
+        ``[mimo] fail-fast after error code=...`` on ANY non-zero node exit, so
+        a naive ``"fail-fast" in lower(out)`` classifies every retryable
+        Geetest/OTP timeout as ``"fatal"`` → Pipeline fail-fast stops the whole
+        batch on a single transient failure, contradicting the rerun-wins
+        strategy for probabilistic Geetest (see
+        [[project-mimo-migrate-route-ok-20260718]]).
+        """
+        # 1) Authoritative structured RESULT_JSON (last one wins).
+        last_result: dict[str, Any] | None = None
+        for m in _RESULT_LINE.finditer(stdout or out):
+            try:
+                data = json.loads(m.group(1))
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                last_result = data
+        if last_result is not None:
+            err = str(last_result.get("error") or "").lower()
+            if "geetest" in err or "captcha" in err or "sentinel" in err:
+                return "captcha"
+            if "otp" in err and ("timeout" in err or "time out" in err or "no mail" in err):
+                return "mail_miss"
+            if "alias" in err or "耗尽" in err or "exhausted" in err:
+                return "fatal"
+            return "provider"
+        # 2) No structured authority at all + empty output → fatal spawn.
+        if not out.strip():
             return "fatal"
-        if "geetest" in low or "captcha" in low:
+        # 3) RESULT_JSON absent but output present: best-effort kind from the
+        # tail. Geetest/OTP strings still indicate retryable; only an explicit
+        # alias-exhaustion marker upgrades to fatal.
+        low = out.lower()
+        if "别名" in low and ("耗尽" in low or "exhausted" in low):
+            return "fatal"
+        if "geetest" in low or "captcha" in low or "sentinel" in low:
             return "captcha"
-        if "otp" in low and "timeout" in low:
+        if "otp" in low and ("timeout" in low or "time out" in low or "no mail" in low):
             return "mail_miss"
         return "provider"
 

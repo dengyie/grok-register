@@ -558,6 +558,114 @@ class TestGrokFatalContract(unittest.TestCase):
 
 
 
+class TestMimoFatalContract(unittest.TestCase):
+    """MiMo classify contract (authoritative, machine-readable):
+    register-one.js emits ``RESULT_JSON:{status, email, error, at}`` and sets
+    ``process.exitCode = 1`` for *every* failure (Geetest, OTP timeout, provider
+    error) — there is no ``exit 2`` fatal here. run-register.sh wrapper echoes
+    ``[mimo] fail-fast after error code=...`` on ANY non-zero exit, so the old
+    ``_classify`` substring matcher (``"fail-fast" in lower(out)``) labeled every
+    retryable Geetest/OTP timeout as ``error_kind="fatal"`` → StrategyEngine
+    ``fail_fast_kings`` stopped the whole batch on a single transient failure,
+    contradicting the rerun-wins strategy for probabilistic Geetest
+    (see [[project-mimo-migrate-route-ok-20260718]]).
+
+    Fix: ``_classify`` decodes RESULT_JSON ``status:"FAILED"`` + ``error`` as
+    authority → captcha / mail_miss / provider (retryable). Only a genuinely
+    empty spawn (no RESULT_JSON, no output) is fatal.
+    """
+
+    def _make_provider(self, tmp: str) -> MimoProvider:
+        runtime = Path(tmp)
+        (runtime / "output").mkdir(exist_ok=True)
+        provider = MimoProvider(runtime=str(runtime))
+        return provider, runtime
+
+    def _run(self, provider: MimoProvider, runtime: Path, stdout: str, stderr: str = "", rc: int = 1) -> RegisterResult:
+        fake = CmdResult(returncode=rc, stdout=stdout, stderr=stderr, timed_out=False)
+        runner = runtime / "run-register.sh"
+        if not runner.is_file():
+            runner.write_text("#!/bin/bash\n", encoding="utf-8")
+        with patch("register_core.providers.mimo_adapter.MIMO_DIR", runtime):
+            with patch("register_core.providers.mimo_adapter.file_size", return_value=0):
+                with patch("register_core.providers.mimo_adapter.read_appended", return_value=""):
+                    with patch("register_core.providers.mimo_adapter.run_command", return_value=fake):
+                        return provider.register_one()
+
+    def test_geetest_failure_is_captcha_not_fatal(self):
+        # Regression: Geetest solve failure is probabilistic + retryable. The
+        # runner wrapper prints "fail-fast" on this exit-1; RESULT_JSON error
+        # "geetest" must drive kind=captcha, NOT fatal.
+        with tempfile.TemporaryDirectory() as td:
+            provider, runtime = self._make_provider(td)
+            stdout = (
+                "=== mimo register 1/1 ===\n"
+                "[mimo] fail-fast after error code=1 (no empty spin)\n"
+                "RESULT_JSON:" + json.dumps(
+                    {"status": "FAILED", "email": "r1@boom", "error": "geetest challenge failed"}
+                ) + "\n"
+            )
+            r = self._run(provider, runtime, stdout=stdout, rc=1)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "captcha", "Geetest failure must be retryable captcha, not fatal")
+        self.assertNotIn("fatal", (r.error_kind or ""))
+
+    def test_otp_timeout_is_mail_miss_not_fatal(self):
+        with tempfile.TemporaryDirectory() as td:
+            provider, runtime = self._make_provider(td)
+            stdout = (
+                "[mimo] fail-fast after error code=1 (no empty spin)\n"
+                "RESULT_JSON:" + json.dumps(
+                    {"status": "FAILED", "email": "r2@boom", "error": "otp timeout: no mail in 180s"}
+                ) + "\n"
+            )
+            r = self._run(provider, runtime, stdout=stdout, rc=1)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "mail_miss", "OTP timeout must be retryable mail_miss")
+
+    def test_empty_spawn_is_fatal(self):
+        # No RESULT_JSON + empty output → fatal spawn (orphan before main).
+        with tempfile.TemporaryDirectory() as td:
+            provider, runtime = self._make_provider(td)
+            r = self._run(provider, runtime, stdout="", stderr="", rc=1)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "fatal", "empty spawn with no authority must be fatal")
+
+    def test_generic_failed_error_is_provider_not_fatal(self):
+        # RESULT_JSON FAILED with a non-captcha, non-otp, non-alias error → provider
+        # (retryable), never fatal.
+        with tempfile.TemporaryDirectory() as td:
+            provider, runtime = self._make_provider(td)
+            stdout = (
+                "[mimo] fail-fast after error code=1 (no empty spin)\n"
+                "RESULT_JSON:" + json.dumps(
+                    {"status": "FAILED", "email": "r3@boom", "error": "network reset by peer"}
+                ) + "\n"
+            )
+            r = self._run(provider, runtime, stdout=stdout, rc=1)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "provider")
+
+    def test_result_json_wins_over_failfast_substring(self):
+        # The exact regression: output contains BOTH the wrapper's "fail-fast"
+        # string AND a retryable RESULT_JSON. Authority (RESULT_JSON) must win;
+        # kind must not be fatal even though "fail-fast" / "fatal" substring is
+        # present in the merged blob.
+        with tempfile.TemporaryDirectory() as td:
+            provider, runtime = self._make_provider(td)
+            stdout = (
+                "[mimo] fail-fast after error code=1 (no empty spin)\n"
+                "fatal: unhandledRejection should not happen\n"
+                "RESULT_JSON:" + json.dumps(
+                    {"status": "FAILED", "email": "r4@boom", "error": "geetest timeout"}
+                ) + "\n"
+            )
+            r = self._run(provider, runtime, stdout=stdout, rc=1)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "captcha")
+
+
+
 class TestExtractOtpCode(unittest.TestCase):
     """xAI OTP is alnum+dash XXX-XXX (e.g. FN8-ECQ); OpenAI is 6 digits in
     "verification code" context. CSS hex (#333333/#888888) embedded in xAI
