@@ -97,20 +97,50 @@ fi
 set -e
 
 # Map register_core exit → legacy Grok contract (0=ok / 1=not product-usable / 2=fatal).
-# register_core cmd_run: 0 = ok≥1, 1 = ok<1 or profile/job ValueError, Python
-# exception (FailFastError etc.) → nonzero exit from ProcessExit/SystemExit.
-# Treat any nonzero as not-product-or-fatal; distinguish fatal via stderr log marker.
-if [[ "$code" -eq 0 ]]; then
-  out=0
-  label="0=ok"
+# register_core cmd_run prints an authoritative `CONTRACT_EXIT:N` line whose N is
+# the single source of truth (N computed from result.error_kind=="fatal", not
+# from log prose — see register_core/cli.py). Read it instead of re-deriving
+# fatality by grepping "fatal"/"fail_fast": a grep bridge silently downgrades a
+# strategy all-egress-cooling hard-stop (stopped_reason="strategy: ...") to
+# exit 1, breaking the 2=fatal contract for ops/cron callers.
+# CONTRACT_EXIT is emitted on every clean run (incl. retryable). Its absence
+# means register_core crashed before the summary (spawn/Import) → TreatTraceback
+# fallback parses the python exit code + log for a Traceback marker.
+ce=$(grep -E '^CONTRACT_EXIT:[012]$' "$LOG" 2>/dev/null | tail -1 | cut -d: -f2)
+if [[ -n "$ce" ]]; then
+  # CONTRACT_EXIT line wins — register_core printed the authoritative contract
+  # exit (0/1/2) computed from stats.stopped_reason (per run-register-core.sh:248).
+  out="$ce"
+  case "$out" in
+    0) label="0=ok" ;;
+    1) label="1=not product-usable" ;;
+    2) label="2=fatal" ;;
+    *) label="?unknown CONTRACT_EXIT=$out" ;;
+  esac
 else
-  if grep -qiE "(FatalError|fail_fast|cairo|fatal_stop|Traceback|register_cli.py missing|fatal:)" "$LOG" 2>/dev/null; then
-    out=2
-    label="2=fatal"
-  else
-    out=1
-    label="1=not product-usable"
-  fi
+  # No CONTRACT_EXIT → register_core died before printing the summary. Its raw
+  # python exit code is still authoritative for config/ValueError returns:
+  #   cmd_run returns 2 directly on profile/provider/sink ValueError, so
+  #   `code==2` ⇒ 2=fatal (config broken = batch-stopper); `code==0` ⇒ 0=ok
+  #   (clean-but-no-line, e.g. dry-run logging early-exit); only `code==1`
+  #   without CONTRACT_EXIT is genuinely ambiguous (uncaught non-fatal) and we
+  #   upgrade to 2 only when a Traceback confirms a fatal crash.
+  case "$code" in
+    0)
+      out=0
+      label="0=ok (no CONTRACT_EXIT, exit 0)" ;;
+    2)
+      out=2
+      label="2=fatal (no CONTRACT_EXIT, code=2 config/boundary)" ;;
+    *)
+      if grep -qE "Traceback|FatalError|register_cli.py missing" "$LOG" 2>/dev/null; then
+        out=2
+        label="2=fatal (no CONTRACT_EXIT, code=$code + traceback)"
+      else
+        out=1
+        label="1=not product-usable (no CONTRACT_EXIT, code=$code)"
+      fi ;;
+  esac
 fi
 echo "=== register_core exit=$code → contract $label (product: 0=ok 1=not product-usable 2=fatal) ===" | tee -a "$LOG"
 exit "$out"

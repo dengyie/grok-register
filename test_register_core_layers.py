@@ -15,7 +15,7 @@ from unittest.mock import patch
 from register_core.contracts import Mailbox, RegisterJob, RegisterResult
 from register_core.email.registry import list_email_sources
 from register_core.errors import FailFastError
-from register_core.pipeline import Pipeline
+from register_core.pipeline import Pipeline, PipelineStats
 from register_core.providers.grok_adapter import GrokProvider
 from register_core.providers.mimo_adapter import MimoProvider
 from register_core.providers.registry import list_providers
@@ -81,6 +81,69 @@ class BoomVerifier:
 
     def verify(self, result: RegisterResult):
         raise RuntimeError("probe exploded")
+
+
+class TestContractExit(unittest.TestCase):
+    """Authoritative run-time contract exit: 0 ok>=1 | 1 retryable | 2 fatal.
+
+    Regression for the grok shell-out exit mapping (migrate milestone A review
+    fix). The prior ``run-register-core.sh`` bridge grepped log prose for
+    "fail_fast"/"fatal:" and silently DOWNGRADED hard-stops whose stopped_reason
+    carries no such substring — notably a strategy domain-burn stop
+    ("strategy: domain burned: ...") and the post-loop fail_fast stop reading
+    ``result.error_kind``. register_core.cli now prints ``CONTRACT_EXIT:N``
+    computed by ``_contract_exit_from_stats`` from the structured
+    ``stats.stopped_reason``, and run-register-core.sh trusts that line. These
+    tests pin the contract so a rename / weak-predicate regression can't sneak
+    exit 1 back in for a true batch-stop.
+    """
+
+    def _ce(self, *, ok=0, fail=0, stopped_reason=""):
+        # Local import avoids binding the function as a descriptor (a ``from …
+        # import`` of a plain function inside a class body turns it into a
+        # bound method on instances, re-passing self into the 1-arg helper).
+        from register_core.cli import _contract_exit_from_stats
+
+        stats = PipelineStats(ok=ok, fail=fail, stopped_reason=stopped_reason)
+        return _contract_exit_from_stats(stats), stats
+
+    def test_ok_returns_0(self):
+        ce, _ = self._ce(ok=2, fail=0)
+        self.assertEqual(ce, 0)
+
+    def test_retryable_exhaustion_no_stop_returns_1(self):
+        # All attempts fail, NO early-break stop (re-run may succeed) → exit 1.
+        ce, stats = self._ce(ok=0, fail=3, stopped_reason="")
+        self.assertEqual(ce, 1)
+        self.assertFalse(stats.stopped_reason)
+
+    def test_loop_fatal_failfast_returns_2(self):
+        # FailFastError caught in-loop → stopped_reason="fail_fast: ...".
+        ce, _ = self._ce(ok=0, fail=1, stopped_reason="fail_fast: pool exhausted")
+        self.assertEqual(ce, 2)
+
+    def test_strategy_domain_burn_hardstop_returns_2(self):
+        # The exact case the old grep bridge downgraded to exit 1: a strategy
+        # domain-burn break with stopped_reason="strategy: ..." carries no
+        # "fail_fast"/"fatal:" substring → must still be contract exit 2.
+        ce, _ = self._ce(
+            ok=0, fail=1, stopped_reason="strategy: domain burned: bad.example"
+        )
+        self.assertEqual(ce, 2)
+
+    def test_post_loop_failfast_kindstop_returns_2(self):
+        # Post-loop fail_fast stop where stopped_reason == result.error_kind
+        # ("registration_disallowed" etc., NOT "fatal") — still a batch stop.
+        ce, _ = self._ce(ok=0, fail=1, stopped_reason="registration_disallowed")
+        self.assertEqual(ce, 2)
+
+    def test_mail_miss_early_stop_returns_2(self):
+        ce, _ = self._ce(ok=0, fail=1, stopped_reason="mail_miss: no mail")
+        self.assertEqual(ce, 2)
+
+    def test_unexpected_core_error_returns_2(self):
+        ce, _ = self._ce(ok=0, fail=1, stopped_reason="unexpected: boom")
+        self.assertEqual(ce, 2)
 
 
 class TestRegistry(unittest.TestCase):

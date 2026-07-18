@@ -229,6 +229,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         stats = pipe.run(job.count, extra=job.extra)
 
+    contract_exit = _contract_exit_from_stats(stats)
     summary = {
         "ok": stats.ok,
         "fail": stats.fail,
@@ -236,9 +237,30 @@ def cmd_run(args: argparse.Namespace) -> int:
         "results": [r.to_public_dict() for r in stats.results],
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    if stats.ok < 1:
-        return 1
-    return 0
+    # Authoritative run-time contract exit, printed for the outer shell
+    # (run-register-core.sh) to read directly — NOT grepped from log prose.
+    # See `_contract_exit_from_stats` for the single source of truth and why
+    # the prior grep-the-prose bridge silently downgraded a domain-burn /
+    # fail_fast_kinds hard-stop to exit 1.
+    print(f"CONTRACT_EXIT:{contract_exit}")
+    return contract_exit
+
+
+def _contract_exit_from_stats(stats: Any) -> int:
+    """Map a Pipeline.run result to the authoritative run-time contract exit.
+
+    Pipeline.run catches FailFastError / strategy-hard-stop / RegisterCoreError
+    and returns stats; EVERY early-break stop path sets ``stats.stopped_reason``
+    (pipeline.py nodes-preflight :203, strategy-precheck :262/+289, loop-fatal
+    :310/+341/+365/+389, unexpected :396, post-loop strategy/fail-fast :442/+446,
+    mail_miss :348). A clean retryable exhaustion leaves ``stopped_reason=""``
+    (no break). So "stopped_reason non-empty" is the single authoritative signal
+    for "the batch stopped early" = fatal (ops must intervene, not just re-run),
+    and "" = retryable (re-run may succeed — out of qualifying egress, etc.).
+    contract: 0 ok>=1 | 1 not product-usable but retryable (stopped_reason="") |
+              2 fatal / batch-stopped (stopped_reason set).
+    """
+    return 2 if stats.stopped_reason else (1 if stats.ok < 1 else 0)
 
 
 def build_parser() -> argparse.ArgumentParser:
