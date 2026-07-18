@@ -19,7 +19,69 @@ BAD_DOMAIN_RE = re.compile(
     r"(infinityfree|000\.pe|work\.gd|\.io\.vn$|\.\.$|\.\s*$)",
     re.I,
 )
+# Legacy grok_register_ttk.extract_verification_code rigor, ported to the
+# migrate-path decoder. The old `OTP_RE = \b(\d{4,8})\b` against tag-stripped
+# HTML mis-grabbed CSS hex colors (#333333 / #888888): xAI's real code is an
+# alnum+dash `XXX-XXX` token in the subject ("FN8-ECQ xAI confirmation code")
+# and body, while OpenAI uses 6 digits inside "verification code" context.
+# Bare-tag strip (re.sub(r"<[^>]+>",...)) leaves `<style>{color:#333333}`
+# behind as plain `#333333`, which the 6-digit RE seized first → the form was
+# filled with `333333`, xAI rejected it, and the page hung at /sign-up
+# ("验证码已填写，但未进入资料页"). See pxed smoke 2026-07-18.
+OAI_SUBJECT_XAI_CODE_RE = re.compile(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI", re.I)
+XAI_BODY_CODE_RE = re.compile(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b")
 OTP_RE = re.compile(r"\b(\d{4,8})\b")
+_OPENAI_OTP_PATTERNS = (
+    re.compile(r"temporary\s+verification\s+code[^\d]{0,80}(\d{6})", re.I),
+    re.compile(r"verification\s+code\s+to\s+continue[:\s]+(\d{6})", re.I),
+    re.compile(r"verification\s+code[^\d]{0,40}(\d{4,8})", re.I),
+    re.compile(r"your\s+(?:temporary\s+)?code[:\s]+(\d{4,8})", re.I),
+    re.compile(r"confirm(?:ation)?\s+code[:\s]+(\d{4,8})", re.I),
+    re.compile(r"otp[^\d]{0,20}(\d{4,8})", re.I),
+)
+
+
+def extract_otp_code(blob: str, subject: str = "") -> str:
+    """Extract a real OTP code from a decoded email (xAI XXX-XXX or OpenAI 6-digit).
+
+    Order returns the legacy contract:
+      1. xAI subject-style "FN8-ECQ xAI confirmation code".
+      2. xAI body-style "XXX-XXX" alnum+dash token.
+      3. OpenAI contextual 6-digit (after stripping <style>/<script> so CSS
+         hex colors like #333333 / #888888 never win).
+      4. Bare 4-8 digit fallback (post-strip).
+    """
+    # 1. xAI subject
+    if subject:
+        m = OAI_SUBJECT_XAI_CODE_RE.search(str(subject))
+        if m:
+            return m.group(1)
+    raw = str(blob or "")
+    # 2. xAI body token (works on raw HTML too — alnum+dash isn't in CSS)
+    m = XAI_BODY_CODE_RE.search(raw)
+    if m:
+        return m.group(1)
+    # 3+4. OpenAI/numeric — must strip style/script/comments FIRST so CSS hex
+    # (#333333 etc.) is not a 6-digit hit.
+    if "<" in raw and ">" in raw:
+        raw = re.sub(r"(?is)<(style|script)[^>]*>.*?</\1>", " ", raw)
+        raw = re.sub(r"(?is)<!--.*?-->", " ", raw)
+        raw = re.sub(r"<[^>]+>", " ", raw)
+    raw = re.sub(r"\s+", " ", raw)
+    m = XAI_BODY_CODE_RE.search(raw)
+    if m:
+        return m.group(1)
+    for pat in _OPENAI_OTP_PATTERNS:
+        m = pat.search(raw)
+        if m:
+            return m.group(1)
+    # subject-aligned 6-digit fallback (OpenAI subject context)
+    if subject and re.search(r"openai|verification code", subject, re.I):
+        m = re.search(r"\b(\d{6})\b", raw)
+        if m:
+            return m.group(1)
+    return ""
+
 DEFAULT_BASE = "https://tinyhost.shop"
 # Prefer domains that historically deliver product OTPs (OpenAI/MiMo path).
 # publicvm.com often accepts allocate but never delivers OpenAI OTP → demoted last.
@@ -177,19 +239,15 @@ class TinyhostSource:
                 ts = _parse_mail_ts(mail.get("date"))
                 if ts and ts < since:
                     continue
+                subject = str(mail.get("subject") or "")
                 blob = " ".join(
                     str(mail.get(k) or "")
                     for k in ("from", "sender", "subject", "body", "html_body", "text")
                 )
                 if hint and hint not in blob.lower():
                     continue
-                plain = re.sub(r"<[^>]+>", " ", blob)
-                plain = re.sub(r"\s+", " ", plain)
-                m = OTP_RE.search(plain)
-                if not m:
-                    continue
-                code = m.group(1)
-                if code in used:
+                code = extract_otp_code(blob, subject=subject)
+                if not code or code in used:
                     continue
                 diag.matched_at = time.time()
                 diag.matched_after_seconds = diag.matched_at - started

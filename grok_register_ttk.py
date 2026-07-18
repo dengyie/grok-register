@@ -3073,11 +3073,21 @@ def _fixed_core_get_oai_code(
                 env=os.environ.copy(),
             )
             out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-            m = re.search(r"\b(\d{6})\b", out)
-            if m and m.group(1) and m.group(1) not in used:
-                code = m.group(1)
+            # poll_otp emits the decoded code on stdout line 1 ("042902" or
+            # xAI "FN8-ECQ") plus "OTP <code>" on stderr. Match either format:
+            # xAI alnum+dash XXX-XXX first, then plain 6-digit (OpenAI/old).
+            code = ""
+            mx = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", out)
+            if mx:
+                code = mx.group(1)
+            if not code:
+                m = re.search(r"\b(\d{6})\b", out)
+                if m:
+                    code = m.group(1)
+            code = code.strip()
+            if code and code not in used:
                 if log_callback:
-                    log_callback(f"[mail] fixed core OTP ok")
+                    log_callback("[mail] fixed core OTP ok")
                 return code
             last_err = (proc.stderr or proc.stdout or f"exit={proc.returncode}")[:200]
         except Exception as exc:

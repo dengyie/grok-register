@@ -558,8 +558,64 @@ class TestGrokFatalContract(unittest.TestCase):
 
 
 
-class TestMimoAdapterMock(unittest.TestCase):
-    def test_historical_only_is_fail(self):
+class TestExtractOtpCode(unittest.TestCase):
+    """xAI OTP is alnum+dash XXX-XXX (e.g. FN8-ECQ); OpenAI is 6 digits in
+    "verification code" context. CSS hex (#333333/#888888) embedded in xAI
+    HTML <style> must never win. Regression for pxed 2026-07-18 form-fill
+    of 333333 / SPA hang at /sign-up."""
+
+    def _xai_html(self, code: str = "FN8-ECQ") -> str:
+        # Real xAI confirmation-code email shape: visible code in body, CSS hex
+        # colors in a <style> block (the thing the old \b(\d{4,8})\b seized).
+        return f"""<!DOCTYPE html><html><head><style>
+body {{ background:#ffffff; color:#333333; }}
+a {{ color:#888888; }}
+.code {{ font-family:monospace; }}
+</style></head>
+<body>
+<p>Please use the code below to confirm your xAI account.</p>
+<div class="code"><strong>{code}</strong></div>
+<p>If you did not request this, ignore this email.</p>
+</body></html>"""
+
+    def test_xai_subject_code_wins(self):
+        from register_core.email.sources.tinyhost import extract_otp_code
+
+        blob = self._xai_html("FN8-ECQ")
+        self.assertEqual(extract_otp_code(blob, subject="FN8-ECQ xAI confirmation code"), "FN8-ECQ")
+
+    def test_xai_body_code_not_css_hex(self):
+        from register_core.email.sources.tinyhost import extract_otp_code
+
+        # The whole point: real code FN8-ECQ, NOT 333333/888888 from CSS.
+        blob = self._xai_html("FN8-ECQ")
+        code = extract_otp_code(blob, subject="xAI confirmation code")
+        self.assertEqual(code, "FN8-ECQ")
+        self.assertNotIn("333333", code)
+        self.assertNotIn("888888", code)
+
+    def test_openai_contextual_6_digit(self):
+        from register_core.email.sources.tinyhost import extract_otp_code
+
+        blob = "Enter this temporary verification code to continue: 042902"
+        self.assertEqual(extract_otp_code(blob, subject="Your OpenAI verification code"), "042902")
+
+    def test_openai_no_css_hex_false_positive(self):
+        from register_core.email.sources.tinyhost import extract_otp_code
+
+        # OpenAI-style body that happens to ship CSS hex but with NO real OTP
+        # context must NOT fabricate 333333. (Empty stub subject vs an html
+        # mailer header.) extract_otp_code should return "" here.
+        blob = "<style>.x{color:#333333}</style> hi welcome <style>a{color:#888888}</style>"
+        self.assertEqual(extract_otp_code(blob, subject="Welcome to xAI"), "")
+
+    def test_empty_returns_empty(self):
+        from register_core.email.sources.tinyhost import extract_otp_code
+
+        self.assertEqual(extract_otp_code(""), "")
+
+
+
         with tempfile.TemporaryDirectory() as td:
             runtime = Path(td)
             (runtime / "output").mkdir()
