@@ -24,6 +24,13 @@ from DrissionPage import Chromium, ChromiumOptions
 from DrissionPage.errors import PageDisconnectedError
 from curl_cffi import requests
 
+# OTP decode moved to the single authoritative decoder in register_core. The
+# legacy extract_verification_code here previously drifted from it (weaker:
+# no post-strip xAI re-scan, runtime-recompiled patterns), which is how the
+# xAI CSS-hex #333333 mis-decode slipped in. 2026-07-18: collapse onto it.
+# register_cli adds this repo root to sys.path before importing ttk, so the
+# register_core package is importable here.
+from register_core.decode.extract import extract_otp_code  # noqa: E402
 from proxy_bridge import resolve_browser_proxy
 from proxy_rotate import (
     configure_proxy_rotation,
@@ -1397,7 +1404,7 @@ def yyds_get_oai_code(
             subject = detail.get("subject", "")
             if log_callback:
                 log_callback(f"[Debug] YYDS 收到邮件: {subject}")
-            code = extract_verification_code(combined, subject)
+            code = extract_otp_code(combined, subject)
             if code:
                 if log_callback:
                     log_callback(f"[*] YYDS 从邮件中提取到验证码: {code}")
@@ -1617,7 +1624,7 @@ def cloudmail_get_oai_code(
             combined = "\n".join(parts)
             if log_callback:
                 log_callback(f"[Debug] CloudMail 收到邮件: {subject}")
-            code = extract_verification_code(combined, subject)
+            code = extract_otp_code(combined, subject)
             if code:
                 if log_callback:
                     log_callback(f"[*] CloudMail 从邮件中提取到验证码: {code}")
@@ -2196,7 +2203,7 @@ def _hotmail_rest_get_code(mailbox_email, target_email, access_token, log_callba
             # subject 本身常带 "ABC-DEF xAI confirmation code"
             if "xai" not in subject.lower() and "confirmation" not in subject.lower():
                 continue
-        code = extract_verification_code(combined, subject)
+        code = extract_otp_code(combined, subject)
         if code:
             if log_callback:
                 log_callback(
@@ -2234,7 +2241,7 @@ def _hotmail_manual_prompt(mailbox_email, target_email, log_callback=None, promp
     line = line.strip()
     if not line:
         return ""
-    code = extract_verification_code(line)
+    code = extract_otp_code(line)
     if code:
         if log_callback:
             log_callback(f"[*] manual 提取到验证码: {code}")
@@ -2327,7 +2334,7 @@ def _hotmail_imap_get_code(mailbox_email, target_email, access_token, log_callba
             combined_lower = combined.lower()
             if not any(kw in combined_lower for kw in keywords):
                 continue
-            code = extract_verification_code(combined, subject)
+            code = extract_otp_code(combined, subject)
             if code:
                 if log_callback:
                     log_callback(f"[*] Hotmail/Outlook 从邮件中提取到验证码: {code}")
@@ -2872,7 +2879,7 @@ def _gmail_imap_get_code_on_conn(imap, target_email, log_callback=None):
         if not any(kw in combined_lower for kw in keywords):
             if "xai" not in subject.lower() and "confirmation" not in subject.lower():
                 continue
-        code = extract_verification_code(combined, subject)
+        code = extract_otp_code(combined, subject)
         if code:
             if log_callback:
                 log_callback(
@@ -3198,41 +3205,15 @@ def get_oai_code(
 
 
 def extract_verification_code(text, subject=""):
-    if subject:
-        match = re.search(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI", subject, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    match = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", text, re.IGNORECASE)
-    if match:
-        return match.group(1)
+    """Deprecated shim retained for any external/import callers.
 
-    # Strip HTML chrome so CSS hex-ish numbers don't win before real OTP.
-    blob = str(text or "")
-    if "<" in blob and ">" in blob:
-        blob = re.sub(r"(?is)<(style|script)[^>]*>.*?</\1>", " ", blob)
-        blob = re.sub(r"(?is)<!--.*?-->", " ", blob)
-        blob = re.sub(r"<[^>]+>", " ", blob)
-    blob = re.sub(r"\s+", " ", blob)
-
-    patterns = [
-        # OpenAI: "Enter this temporary verification code to continue: 042902"
-        r"temporary\s+verification\s+code[^\d]{0,80}(\d{6})",
-        r"verification\s+code\s+to\s+continue[:\s]+(\d{6})",
-        r"verification\s+code[^\d]{0,40}(\d{4,8})",
-        r"your\s+(?:temporary\s+)?code[:\s]+(\d{4,8})",
-        r"confirm(?:ation)?\s+code[:\s]+(\d{4,8})",
-        r"otp[^\d]{0,20}(\d{4,8})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, blob, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    # Subject-only OpenAI/Microsoft style 6-digit fallback when body already filtered.
-    if subject and re.search(r"openai|verification code", subject, re.I):
-        m = re.search(r"\b(\d{6})\b", blob)
-        if m:
-            return m.group(1)
-    return None
+    Use ``register_core.decode.extract.extract_otp_code`` — the single
+    authoritative decoder — instead. Behavior matches except this returns
+    ``None`` (legacy) whereas extract_otp_code returns ``""``; both are falsy
+    at the ``if code:`` call sites.
+    """
+    code = extract_otp_code(text, subject=subject)
+    return code if code else None
 
 
 def duckmail_get_oai_code(
@@ -3279,7 +3260,7 @@ def duckmail_get_oai_code(
             subject = detail.get("subject", "")
             if log_callback:
                 log_callback(f"[Debug] 收到邮件: {subject}")
-            code = extract_verification_code(combined, subject)
+            code = extract_otp_code(combined, subject)
             if code:
                 if log_callback:
                     log_callback(f"[*] 从邮件中提取到验证码: {code}")
@@ -3376,7 +3357,7 @@ def cloudflare_get_oai_code(
                     log_callback(f"[Debug] Cloudflare detail接口失败，改用列表内容解析: {exc}")
             if log_callback:
                 log_callback(f"[Debug] Cloudflare 收到邮件: {subject}")
-            code = extract_verification_code(combined, subject)
+            code = extract_otp_code(combined, subject)
             if code:
                 if log_callback:
                     log_callback(f"[*] Cloudflare 从邮件中提取到验证码: {code}")
