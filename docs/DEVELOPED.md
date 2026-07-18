@@ -30,6 +30,25 @@
 
 验证入口：mint 后本地 probe `/v1/responses` 观察 403 body；ChatGPT 注册观察 create_account 是否仍 `registration_disallowed`（再测前先接住宅代理 ASN，否则 77/0 已充分）。
 
+### 住宅代理接入（2026-07-19，进口+计数已落，真机冒烟 Manual 触发）
+
+接了 5 个 1024proxy 住宅凭证（`cchv57025-region-Rand-sid-<token>-t-5`，sticky 5min、region-Rand 出口随机）。代码底座已落（commit `a82ce14`）：`Node.tier/success_count/attempt_count/disallow_count` + 派生 `quality_score()`；`node_from_dict` 四段 `hpup`（`host:port:user:pass` 含 `region-`/`sid-`）→ `socks5h://user:pass@host:port` 归一化（socks5h 远端 DNS，住宅必需）；`report_attempt_proxy_result` 各分支 credential 粒度计数（attempt 一次 / success / disallow）。tier 本轮 **在场不消费 rotation**，消费（加权 weight）下一 milestone。
+
+本地已验证（非真机）：
+- **住宅 egress 通 + 真 ISP ASN**：`curl --socks5-hostname <cred> api.ipify.org` → 凭证1 出口 `107.137.159.33` = **AT&T Enterprises, AS7018，Charlotte NC，`hosting:false proxy:false`**；凭证2 出口 `202.63.210.10`（不同 IP，region-Rand 生效）。即 pxed 77/0 `registration_disallowed` 缺的「未被列禁住宅 ISP ASN」现在有了。
+- **注册机消费住宅池**：5 凭证写 `nodes.json`（list 模式不经 Clash），`inject_attempt_proxy` round-robin 依次命中 5 个 socks5h URL、tier=1 全在；`report_attempt_proxy_result` 计数精确落盘（disallow→`score=-0.5`，success→`score=1.0`）。即凭据→注册机进口→注册机轮询→注册机计数→读产物，整链是注册机自己的路径，未手搓前端。
+
+pxed 真机冒烟 Manual 触发（本地无 pxed Clash/tinyhost/真机浏览器环境，不硬跑）：
+1. 在 pxed 把 5 凭证导住宅 catalog（每行 `{"url":"<hpup>","tier":1}`，hpup→socks5h 由 border 自动转）：
+   `python3 -c "...save via node_from_dict..."` 或追加进 pxed `nodes.json`，标 `tier=1`。
+2. Grok 优先用住宅池 list 模式跑（profile钉clash，override成list+PROXY_LIST=住宅池）：
+   `REGISTER_EGRESS=list PROXY_LIST=<5个socks5h，逗号分隔> SKIP_CLASH_PREFLIGHT=1 ./register.sh grok 1`
+   住宅 socks5h 远端 DNS 走真 Grok egress，绕开 pxed Clash 机房 ASN。
+3. 读产物查 residential egress 是否解 block：`logs/` 最近 run-core log + `output/pipeline-grok.jsonl` sink + `nodes.json` credential 计数（`atom_count/success_count/disallow_count` 落盘即上轮底座生效）；看前端到没到注册表单 / `registration_disallowed` 还出不出。
+1024proxy 账号 `cchv57025` 流量配额/订阅有效期是后台约束，代码无法判；配额耗尽需后台续费/换账号后导新凭证组。
+
+设计稿：`docs/IP-ISOLATION-QUALITY-DESIGN.md`；tier 入 weighted rotation 留下一 milestone。
+
 ## 路由门禁验证入口（migrate milestone A）
 
 生产入口外壳正确性（无需真机/真号）：
