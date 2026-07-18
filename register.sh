@@ -159,24 +159,51 @@ case "$cmd" in
     COUNT="${1:-1}"
     export COUNT
     # migrate milestone A: production entry → register_core profile path.
-    # providers/chatgpt/run-register.sh already drove register_core via env flags;
-    # collapse to profile-declared egress/mailbox/strategy/verify/sink + env overrides.
-    # CHATGPT_LEGACY=1 rolls back to the env-driven providers/chatgpt/run-register.sh.
+    # Profile is selected by CHATGPT_EMAIL_SOURCE to preserve the legacy operator
+    # knob (legacy runner defaulted to cloudflare). Provider options mailbox.type
+    # is the source of truth; selecting the matching profile keeps env override alive:
+    #   CHATGPT_EMAIL_SOURCE=cloudflare (default) → chatgpt-cf.example.yaml
+    #   CHATGPT_EMAIL_SOURCE=tinyhost              → chatgpt-tinyhost.example.yaml
+    #   CHATGPT_EMAIL_SOURCE=gmail_imap            → chatgpt-gmail.example.yaml
+    # Other CHATGPT_* env overrides are forwarded as register_core CLI flags so the
+    # profile defaults do not silently shadow them (timeout 900, proxy rotation, sink).
+    # CHATGPT_LEGACY=1 rolls back to providers/chatgpt/run-register.sh (env-driven).
     if [[ "${CHATGPT_LEGACY:-0}" != "1" ]]; then
       if [[ -d "$ROOT/.venv" && -x "$ROOT/.venv/bin/python" ]]; then
         _PY="$ROOT/.venv/bin/python"
       else
         _PY="${PYTHON:-python3}"
       fi
+      # Resolve mailbox profile from CHATGPT_EMAIL_SOURCE (legacy default = cloudflare).
+      _ES="${CHATGPT_EMAIL_SOURCE:-cloudflare}"
+      case "$_ES" in
+        tinyhost)        _CHAT_PROFILE="$ROOT/profiles/chatgpt-tinyhost.example.yaml" ;;
+        gmail_imap|gmail) _CHAT_PROFILE="$ROOT/profiles/chatgpt-gmail.example.yaml" ;;
+        cloudflare|cf|auto|"") _CHAT_PROFILE="$ROOT/profiles/chatgpt-cf.example.yaml" ;;
+        *)
+          echo "register.sh: unsupported CHATGPT_EMAIL_SOURCE=$_ES (use cloudflare|tinyhost|gmail_imap)" >&2
+          exit 2
+          ;;
+      esac
       _ARGS=(
         -m register_core run
-        --profile "$ROOT/profiles/chatgpt-tinyhost.example.yaml"
+        --profile "$_CHAT_PROFILE"
         -n "$COUNT"
-        --sink "${CHATGPT_SINK:-$ROOT/providers/chatgpt/output/pipeline.jsonl}"
+        --timeout "${CHATGPT_TIMEOUT:-900}"
       )
+      # --sink only when operator pinning it; otherwise let the profile sink.path win.
+      [[ -n "${CHATGPT_SINK:-}" ]] && _ARGS+=(--sink "$CHATGPT_SINK")
       [[ -n "${REGISTER_EGRESS:-}" ]] && _ARGS+=(--egress "$REGISTER_EGRESS")
       [[ -n "${CHATGPT_PROXY:-}" ]] && _ARGS+=(--proxy "$CHATGPT_PROXY")
       [[ -n "${CHATGPT_PROXY_LIST:-}" ]] && _ARGS+=(--proxy-list "$CHATGPT_PROXY_LIST")
+      [[ -n "${CHATGPT_PROXY_ROTATE_MODE:-}" ]] && _ARGS+=(--proxy-rotate "$CHATGPT_PROXY_ROTATE_MODE")
+      if [[ -n "${CHATGPT_PROXY_ROTATE_EVERY:-}" ]]; then
+        _ARGS+=(--proxy-rotate-every "$CHATGPT_PROXY_ROTATE_EVERY")
+      fi
+      # CHATGPT_EMAIL_DOMAIN override: profile mailbox.domain wins at the loader
+      # (extra["email_domain"] set from profile), so to honor an operator pin we set
+      # the env the composite/tinyhost reads. Only override when explicitly set.
+      [[ -n "${CHATGPT_EMAIL_DOMAIN:-}" ]] && export CHATGPT_EMAIL_DOMAIN
       exec "$_PY" "${_ARGS[@]}"
     fi
     exec bash "$ROOT/providers/chatgpt/run-register.sh" "$COUNT"

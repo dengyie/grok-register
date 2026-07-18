@@ -50,6 +50,16 @@ MIMO_LEGACY=1 ./register.sh mimo N            # 回到 providers/mimo/run-regist
 CHATGPT_LEGACY=1 ./register.sh chatgpt N       # 回到 providers/chatgpt/run-register.sh env 驱动
 ```
 
-静态门禁：`python -m pytest test_router.py -q`（6 断言：三入口默认路由 register_core，`*_LEGACY=1` 回滚，`core` 子命令不变）。
+静态门禁：`python -m pytest test_router.py -q`（断言：三入口默认路由 register_core，`*_LEGACY=1` 回滚，`core` 子命令不变，chatgpt 按 `CHATGPT_EMAIL_SOURCE` 选 profile 并恢复 timeout 900 / proxy-rotate / sink 的 env override）。
+
+环境变量契约（chatgpt 外壳切 register_core 后保留的 legacy 旋钮）：
+- `CHATGPT_EMAIL_SOURCE`（默认 `cloudflare`）选 profile：`cloudflare→chatgpt-cf`、`tinyhost→chatgpt-tinyhost`、`gmail_imap→chatgpt-gmail`。**默认从 legacy `auto` 改为 `cloudflare`**（匹配 legacy runner 的 `CHATGPT_EMAIL_SOURCE=cloudflare` 默认）。
+- `CHATGPT_EMAIL_DOMAIN`：tinyhost profile 不再钉 `publicvm.com`，由 adapter 读 env（huychau.online 等 override 生效；cf/gmail profile 本不钉 domain）。
+- `CHATGPT_TIMEOUT`（默认 `900`）→ `--timeout`（修复 argparse 默认 1200 的静默覆盖）。
+- `CHATGPT_PROXY_ROTATE_MODE` / `CHATGPT_PROXY_ROTATE_EVERY` → `--proxy-rotate` / `--proxy-rotate-every`（legacy 已转发，切外壳找回）。
+- `CHATGPT_SINK`：仅显式设置时传 `--sink`；否则用 profile 的 `sink.path`（不再恒覆盖）。
+- `REGISTER_EGRESS` / `CHATGPT_PROXY` / `CHATGPT_PROXY_LIST`：按既有行为转发；未设时 profile 默认（chatgpt profile 为 `clash:7897`，与 legacy Clash egress 一致）。
+
+egress 边界说明（Grok）：grok-tinyhost profile 钉 `strategy.egress.mode: clash proxy 127.0.0.1:7897`，使 `profile_to_job` 设 `extra["proxy"]` → grok_adapter force-set 子进程 `PROXY/CPA_PROXY`（attempt proxy 胜过 ambient shell env），Pipeline 真正持有 Grok egress（而非靠 `run-register-core.sh` 继承的旧 `PROXY` env）。Pipeline 在此 backend 持有 attribution / strategy burn-cool / GrokChatVerifier / sink；Clash 叶子健康仍由 `preflight-clash-nodes.sh` 探（`nodes.json` L1/L2 catalog preflight 是 `list|auto` 独立 backend，非 Grok 默认）。
 
 生产冒烟（Manual-required，非阻塞）：pxed 上 `./register.sh grok 1` 真实节点产 Grok reg+mint 确认切外壳后仍产出；ChatGPT 仍 `registration_disallowed`（外部依赖）。

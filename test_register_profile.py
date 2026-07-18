@@ -100,7 +100,12 @@ class TestProfileParse(unittest.TestCase):
         p = load_profile(path)
         self.assertEqual(p.provider.name, "chatgpt")
         self.assertEqual(p.mailbox_type(), "tinyhost")
-        self.assertTrue(p.mailbox and p.mailbox.domain)
+        # domain intentionally unpinned so the CHATGPT_EMAIL_DOMAIN operator knob is
+        # honored (extra["email_domain"] unset → adapter self.email_domain ← env).
+        self.assertFalse(
+            (p.mailbox and p.mailbox.domain),
+            "chatgpt-tinyhost profile must not pin mailbox.domain (keep env override)",
+        )
 
 
 class TestMailProxyResolve(unittest.TestCase):

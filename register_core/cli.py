@@ -7,11 +7,21 @@ through this register_core Pipeline (migrate milestone A):
   mimo    → `python -m register_core run --profile profiles/mimo-tinyhost...`
   chatgpt → `python -m register_core run --profile profiles/chatgpt-tinyhost...`
 
-Pipeline owns attribution, strategy burn/cool, node L1/L2 preflight, proxy
-rotation, verifiers, and JSONL sink. Grok/MiMo adapters still shell out to
-the legacy runners internally (register_cli.py / providers/mimo Node runner)
-as adapter targets + rollback (GROK_LEGACY / MIMO_LEGACY / CHATGPT_LEGACY=1).
-In-process providers (chatgpt) consume EmailSource directly.
+Pipeline owns attribution, strategy burn/cool, verifiers, and JSONL sink for all
+three entries. Egress ownership is backend-dependent and declared in the profile
+(not implicit): Grok/MiMo profiles pin `strategy.egress.mode: clash proxy
+127.0.0.1:7897` so profile_to_job sets extra["proxy"] truthy and the grok/mimo
+adapter force-sets the child PROXY/CPA_PROXY from the attempt proxy (attempt
+proxy wins over ambient shell env → Pipeline owns the egress); Clash leaf health
+is still probed by preflight-clash-nodes.sh (Grok) / Node runner (MiMo), since
+preflight_nodes_for_register skips `clash` backend (nodes.json L1/L2 catalog
+preflight is the separate `list|auto` backend). ChatGPT in-process selects mailbox
+from CHATGPT_EMAIL_SOURCE → matching profile (cf default clash:7897; tinyhost/gmail
+variants), with CHATGPT_* env overrides forwarded as register_core CLI flags.
+Grok/MiMo adapters still shell out to the legacy runners internally (register_cli.py
+/ providers/mimo Node runner) as adapter targets + rollback
+(GROK_LEGACY / MIMO_LEGACY / CHATGPT_LEGACY=1). In-process providers (chatgpt)
+consume EmailSource directly.
 """
 
 from __future__ import annotations

@@ -36,18 +36,21 @@ def _case_block(src: str, trigger: str) -> str:
     if start is None:
         raise AssertionError(f"case arm {trigger!r} not found in register.sh")
     end = len(lines)
-    # Next arm: a line whose strip matches `word|word...)` at the same 2-space indent
-    # as the trigger, or `esac`.
+    # Next arm: a line whose strip matches `<words>)` at the same 2-space indent
+    # as the trigger, or `esac`. `words` allows `*` and `...` so a same-indent
+    # `*)` / `*|*)` default guard also terminates the block, and `esac` must be at
+    # the same indent as the trigger so a nested inner `case ... esac` (deeper
+    # indent) doesn't prematurely end the outer arm.
     trig_indent = len(lines[start]) - len(lines[start].lstrip())
     for j in range(start + 1, len(lines)):
         line = lines[j]
         stripped = line.strip()
-        if stripped == "esac":
+        if stripped == "esac" and (len(line) - len(line.lstrip())) == trig_indent:
             end = j
             break
         # arm line: indent matches trigger and looks like `<words>)`
         indent = len(line) - len(line.lstrip())
-        if indent == trig_indent and re.match(r"^[A-Za-z0-9_|.\-]+\)\s*$", stripped):
+        if indent == trig_indent and re.match(r"^[A-Za-z0-9_|.*\-\[\] ]+\)\s*$", stripped):
             end = j
             break
     return "\n".join(lines[start:end])
@@ -108,12 +111,49 @@ class TestRouterGate(unittest.TestCase):
     def test_chatgpt_routes_to_register_core_profile(self) -> None:
         block = _case_block(self.src, "chatgpt|openai|openai-platform")
         self.assertIn("-m register_core run", block)
-        self.assertIn("profiles/chatgpt-tinyhost.example.yaml", block)
         self.assertIn("CHATGPT_LEGACY", block)
         self.assertIn("providers/chatgpt/run-register.sh", block)
         # env overrides still forwarded via register_core CLI flags
         self.assertIn("REGISTER_EGRESS", block)
         self.assertIn("CHATGPT_PROXY", block)
+        # default register_core must precede the legacy runner — check on exec lines
+        # only (strip `#` comments so prose mentions don't skew ordering).
+        code = "\n".join(
+            ln for ln in block.splitlines() if not ln.lstrip().startswith("#")
+        )
+        core_pos = code.find('exec "$_PY"')
+        legacy_pos = code.find('exec bash "$ROOT/providers/chatgpt/run-register.sh"')
+        self.assertGreater(core_pos, -1, "chatgpt branch must exec register_core")
+        self.assertGreater(legacy_pos, -1, "chatgpt legacy fallback must be present")
+        self.assertLess(core_pos, legacy_pos, "register_core must precede legacy chatgpt runner")
+
+    def test_chatgpt_profile_selection_by_email_source(self) -> None:
+        block = _case_block(self.src, "chatgpt|openai|openai-platform")
+        # Profile is chosen by CHATGPT_EMAIL_SOURCE (legacy default = cloudflare → cf).
+        self.assertIn("CHATGPT_EMAIL_SOURCE", block)
+        for prof in (
+            "profiles/chatgpt-cf.example.yaml",
+            "profiles/chatgpt-tinyhost.example.yaml",
+            "profiles/chatgpt-gmail.example.yaml",
+        ):
+            self.assertIn(prof, block, f"chatgpt branch must list profile {prof}")
+        # default (cloudflare/auto/empty) maps to cf profile (matches legacy default)
+        self.assertIn('cloudflare|cf|auto|"")', block)
+        self.assertIn("CHATGPT_TIMEOUT", block)
+        # timeout default 900 preserved (not argparse 1200)
+        self.assertIn('"${CHATGPT_TIMEOUT:-900}"', block)
+
+    def test_chatgpt_env_knobs_preserved(self) -> None:
+        block = _case_block(self.src, "chatgpt|openai|openai-platform")
+        # proxy rotation env forwarded (was dropped before the fix)
+        self.assertIn("CHATGPT_PROXY_ROTATE_MODE", block)
+        self.assertIn("CHATGPT_PROXY_ROTATE_EVERY", block)
+        self.assertIn("--proxy-rotate", block)
+        # sink only passed when CHATGPT_SINK explicitly set (else profile sink.path wins)
+        self.assertIn("CHATGPT_SINK", block)
+        self.assertIn("--sink", block)
+        # email domain override honored at the env layer (profile no longer pins it)
+        self.assertIn("CHATGPT_EMAIL_DOMAIN", block)
 
     # ---- cross-cutting ----
     def test_all_three_provider_branches_mention_register_core(self) -> None:
@@ -125,6 +165,58 @@ class TestRouterGate(unittest.TestCase):
         # `./register.sh core ...` keeps delegating to `python -m register_core "$@"`
         block = _case_block(self.src, "core|framework")
         self.assertIn("-m register_core", block)
+
+    # ---- _case_block regex hardening ----
+    def test_case_block_regex_recognizes_default_guard(self) -> None:
+        # A same-indent `*)` (default arm) must terminate a sibling block, so future
+        # additions of a default guard don't get mis-segmented into the next sibling.
+        src = (
+            "case x in\n"
+            "  foo|bar)\n"
+            "    echo one\n"
+            "    ;;\n"
+            "  *)\n"
+            "    echo default\n"
+            "    ;;\n"
+            "esac\n"
+        )
+        block = _case_block(src, "foo|bar")
+        self.assertIn("echo one", block)
+        self.assertNotIn("echo default", block, "*) default guard must end the foo|bar block")
+
+    def test_case_block_regex_recognizes_dotdot_guard(self) -> None:
+        # `...` range arm (some shells) and `*|*)` both terminate.
+        src = (
+            "case x in\n"
+            "  grok|xai)\n"
+            "    exec a\n"
+            "    ;;\n"
+            "  ...)\n"
+            "    exec b\n"
+            "esac\n"
+        )
+        block = _case_block(src, "grok|xai")
+        self.assertIn("exec a", block)
+        self.assertNotIn("exec b", block)
+
+    # ---- profile egress honesty (fix #1 / core finding) ----
+    def test_grok_profile_pins_clash_egress(self) -> None:
+        # Grok egress must be pinned in the profile (not `auto`) so profile_to_job
+        # sets extra["proxy"] truthy and grok_adapter force-sets child PROXY/CPA_PROXY
+        # → Pipeline owns egress instead of relying on inherited shell PROXY env.
+        p = (ROOT / "profiles" / "grok-tinyhost.example.yaml").read_text(encoding="utf-8")
+        self.assertIn("mode: clash", p)
+        self.assertIn('"http://127.0.0.1:7897"', p)
+        # a concrete proxy url must accompany clash mode (the fix)
+        self.assertRegex(p, r"proxy:\s*\"?http://127\.0\.0\.1:7897")
+
+    def test_chatgpt_tinyhost_profile_does_not_pin_domain(self) -> None:
+        # chatgpt tinyhost profile must NOT pin domain so CHATGPT_EMAIL_DOMAIN env
+        # override is honored (extra["email_domain"] unset → adapter self.email_domain ← env).
+        p = (ROOT / "profiles" / "chatgpt-tinyhost.example.yaml").read_text(encoding="utf-8")
+        mailbox_lines = p.split("  decode:", 1)[0].split("  mailbox:", 1)[1]
+        self.assertNotIn("publicvm.com", mailbox_lines)
+        self.assertNotRegex(mailbox_lines, r"^\s*domain:\s*\S")
 
 
 if __name__ == "__main__":

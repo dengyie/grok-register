@@ -32,8 +32,17 @@ spec:
       - fatal
       - verify
       - registration_disallowed
+    # egress: Clash mixed-port (pxed Grok production default, same backend the legacy
+    # run-register.sh pinned via preflight-clash-nodes.sh + PROXY=127.0.0.1:7897).
+    # Pinned here (not `auto`) so register_core owns a concrete proxy: profile_to_job
+    # sets extra["proxy"]=this URL → grok_adapter force-sets child PROXY/CPA_PROXY
+    # (attempt proxy wins over ambient shell env). Pipeline owns attribution /
+    # strategy / verifier / sink; Clash leaf health is still probed by
+    # preflight-clash-nodes.sh in run-register-core.sh (nodes.json L1/L2 catalog
+    # preflight is a separate `list|auto` backend, not Grok's default).
     egress:
-      mode: auto
+      mode: clash
+      proxy: "http://127.0.0.1:7897"
     mail_proxy: direct
     cool_soft_seconds: 30
     burn:

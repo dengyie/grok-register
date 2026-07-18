@@ -16,7 +16,10 @@ spec:
 
   mailbox:
     type: tinyhost
-    domain: publicvm.com   # pin preferred tinyhost domain; omit for pool pick
+    # domain omitted on purpose: remove the profile pin so CHATGPT_EMAIL_DOMAIN
+    # (legacy operator knob, e.g. huychau.online) is honored by the chatgpt adapter
+    # (extra["email_domain"] unset → adapter self.email_domain ← env). Echoes the
+    # legacy non-profile path behavior. Pin via CHATGPT_EMAIL_DOMAIN=<domain>.
 
   decode:
     type: tinyhost
