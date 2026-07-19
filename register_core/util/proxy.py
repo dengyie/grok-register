@@ -578,11 +578,12 @@ def preflight_nodes_for_register(
     healthy_list = summary.get("proxy_list") or ""
     healthy_n = int(summary.get("healthy") or 0)
     targets_label = provider_target_summary(summary.get("probe_targets") or probe_urls)
+    pool_strategy = summary.get("pool_strategy") or getattr(mgr, "pool_strategy", lambda: "both")()
 
     if healthy_n <= 0:
         msg = (
             f"nodes preflight found 0 healthy proxies "
-            f"(probed={summary.get('probed')} fail={summary.get('fail')} "
+            f"(pool={pool_strategy} probed={summary.get('probed')} fail={summary.get('fail')} "
             f"targets={targets_label} path={summary.get('path')})"
         )
         if _nodes_required_for_backend(backend, base) or backend == "list":
@@ -616,6 +617,8 @@ def preflight_nodes_for_register(
         "healthy": healthy_n,
         "probed": summary.get("probed"),
         "path": summary.get("path"),
+        "pool_strategy": pool_strategy,
+        "pool_counts": summary.get("pool_counts"),
         "probe_targets": list(summary.get("probe_targets") or probe_urls),
         "l2_enabled": bool(summary.get("l2_enabled") or probe_urls),
     }

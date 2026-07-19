@@ -14,6 +14,97 @@ from register_core.nodes.models import Node
 
 LogFn = Callable[[str], None] | None
 
+# Dual-pool product strategies (tier isolation + rotation consumption).
+#   residential — tier>=1 only (家宽 / 加宽 / 1024proxy)
+#   datacenter  — tier==0 only (机房 / Clash leaf / ordinary)
+#   both        — no tier filter (default; mixed pool)
+_POOL_STRATEGY_ALIASES: dict[str, str] = {
+    "both": "both",
+    "all": "both",
+    "any": "both",
+    "mixed": "both",
+    "mix": "both",
+    "全部": "both",
+    "混用": "both",
+    "双池": "both",
+    "residential": "residential",
+    "res": "residential",
+    "home": "residential",
+    "house": "residential",
+    "jia kuan": "residential",
+    "加宽": "residential",
+    "家宽": "residential",
+    "住宅": "residential",
+    "tier1": "residential",
+    "t1": "residential",
+    "1": "residential",
+    "datacenter": "datacenter",
+    "dc": "datacenter",
+    "ordinary": "datacenter",
+    "colo": "datacenter",
+    "idc": "datacenter",
+    "机房": "datacenter",
+    "普通": "datacenter",
+    "非加宽": "datacenter",
+    "tier0": "datacenter",
+    "t0": "datacenter",
+    "0": "datacenter",
+}
+
+
+def normalize_node_pool_strategy(raw: Any = None) -> str:
+    """Normalize operator pool strategy → ``residential`` | ``datacenter`` | ``both``."""
+    if raw is None or str(raw).strip() == "":
+        for env_key in (
+            "REGISTER_NODES_POOL",
+            "REGISTER_NODE_POOL",
+            "NODE_POOL",
+            "NODES_POOL",
+            "NODE_POOL_STRATEGY",
+            "REGISTER_NODES_POOL_STRATEGY",
+        ):
+            v = (os.environ.get(env_key) or "").strip()
+            if v:
+                raw = v
+                break
+    s = str(raw or "both").strip().lower()
+    # Chinese keys may not lower the same; also try original strip
+    if s in _POOL_STRATEGY_ALIASES:
+        return _POOL_STRATEGY_ALIASES[s]
+    raw_s = str(raw or "").strip()
+    if raw_s in _POOL_STRATEGY_ALIASES:
+        return _POOL_STRATEGY_ALIASES[raw_s]
+    # soft contains for Chinese ops labels
+    for key, canon in (
+        ("加宽", "residential"),
+        ("家宽", "residential"),
+        ("住宅", "residential"),
+        ("机房", "datacenter"),
+        ("非加宽", "datacenter"),
+        ("residential", "residential"),
+        ("datacenter", "datacenter"),
+        ("both", "both"),
+    ):
+        if key in raw_s or key in s:
+            return canon
+    return "both"
+
+
+def node_matches_pool_strategy(node: Node | None, strategy: str | None = None) -> bool:
+    """Whether a catalog node belongs to the active dual-pool strategy."""
+    if node is None:
+        return False
+    strat = normalize_node_pool_strategy(strategy)
+    try:
+        tier = int(getattr(node, "tier", 0) or 0)
+    except (TypeError, ValueError):
+        tier = 0
+    if strat == "residential":
+        return tier >= 1
+    if strat == "datacenter":
+        return tier <= 0
+    return True
+
 
 class NodeManager:
     """Owns the project node catalog and round-robin selection."""
@@ -31,6 +122,10 @@ class NodeManager:
             os.environ.get("REGISTER_NODES_SKIP_FAILED"), default=True
         )
         self._max_fail = max(1, _as_int(os.environ.get("REGISTER_NODES_MAX_FAIL"), 3))
+
+    def pool_strategy(self) -> str:
+        """Active dual-pool strategy for this process (env-driven)."""
+        return normalize_node_pool_strategy()
 
     def reload(self) -> list[Node]:
         with self._lock:
@@ -155,13 +250,24 @@ class NodeManager:
                     pass
             return node
 
-    def enabled_nodes(self, *, healthy_only: bool = False) -> list[Node]:
-        """Enabled dialable nodes.
+    def enabled_nodes(
+        self,
+        *,
+        healthy_only: bool = False,
+        pool_strategy: str | None = None,
+    ) -> list[Node]:
+        """Enabled dialable nodes in the active dual-pool strategy.
 
         ``healthy_only=True`` → only ``last_ok is True`` (post-probe pool for register).
         Always excludes quarantined hard-fails when ``REGISTER_NODES_SKIP_FAILED``.
         Also skips soft-cooling nodes until ``cooldown_until`` expires.
+
+        ``pool_strategy`` defaults to env ``REGISTER_NODES_POOL``
+        (``residential`` | ``datacenter`` | ``both``).
         """
+        strat = normalize_node_pool_strategy(
+            pool_strategy if pool_strategy is not None else self.pool_strategy()
+        )
         self.ensure_loaded()
         with self._lock:
             out: list[Node] = []
@@ -169,6 +275,8 @@ class NodeManager:
                 if not n.enabled:
                     continue
                 if not n.url:
+                    continue
+                if not node_matches_pool_strategy(n, strat):
                     continue
                 if self._is_quarantined(n):
                     continue
@@ -182,12 +290,54 @@ class NodeManager:
                 out.append(n)
             return out
 
-    def urls(self, *, healthy_only: bool = False) -> list[str]:
-        return [n.url for n in self.enabled_nodes(healthy_only=healthy_only)]
+    def urls(
+        self,
+        *,
+        healthy_only: bool = False,
+        pool_strategy: str | None = None,
+    ) -> list[str]:
+        return [
+            n.url
+            for n in self.enabled_nodes(
+                healthy_only=healthy_only, pool_strategy=pool_strategy
+            )
+        ]
 
-    def as_proxy_list_value(self, *, healthy_only: bool = False) -> str:
-        """Comma-joined URLs for proxy_rotate list mode."""
-        return ",".join(self.urls(healthy_only=healthy_only))
+    def as_proxy_list_value(
+        self,
+        *,
+        healthy_only: bool = False,
+        pool_strategy: str | None = None,
+    ) -> str:
+        """Comma-joined URLs for proxy_rotate list mode (strategy-filtered)."""
+        return ",".join(
+            self.urls(healthy_only=healthy_only, pool_strategy=pool_strategy)
+        )
+
+    def pool_counts(self) -> dict[str, Any]:
+        """Catalog counts by tier (ignores health; for ops logs)."""
+        self.ensure_loaded()
+        res = dc = other = 0
+        with self._lock:
+            for n in self.nodes:
+                if not n.enabled or not n.url:
+                    continue
+                try:
+                    tier = int(n.tier or 0)
+                except (TypeError, ValueError):
+                    tier = 0
+                if tier >= 1:
+                    res += 1
+                elif tier <= 0:
+                    dc += 1
+                else:
+                    other += 1
+        return {
+            "residential": res,
+            "datacenter": dc,
+            "other": other,
+            "strategy": self.pool_strategy(),
+        }
 
     def find_by_url(self, url: str) -> Node | None:
         url = (url or "").strip()
@@ -243,6 +393,7 @@ class NodeManager:
         targets = [str(u).strip() for u in (probe_urls or []) if str(u).strip()]
         use_layered = bool(targets)
 
+        strat = self.pool_strategy()
         candidates: list[Node] = []
         for n in nodes:
             if enabled_only and not n.enabled:
@@ -264,6 +415,18 @@ class NodeManager:
                         "ok": False,
                         "skipped": True,
                         "reason": "empty_url",
+                    }
+                )
+                continue
+            if not node_matches_pool_strategy(n, strat):
+                results.append(
+                    {
+                        "id": n.id,
+                        "label": n.label,
+                        "ok": False,
+                        "skipped": True,
+                        "reason": f"pool_strategy:{strat}",
+                        "tier": int(getattr(n, "tier", 0) or 0),
                     }
                 )
                 continue
@@ -382,6 +545,7 @@ class NodeManager:
         ]
         skipped = [r for r in results if r.get("skipped")]
 
+        strat = self.pool_strategy()
         if targets:
             # Dual-pass pool: only layered ok (L1∧L2). Do not fall back to last_ok-only.
             # Prefer probe-ok order (smart_order); skip quarantine/cooling.
@@ -401,11 +565,13 @@ class NodeManager:
                         continue
                     if not n.enabled or self._is_quarantined(n) or self.is_cooling(n):
                         continue
+                    if not node_matches_pool_strategy(n, strat):
+                        continue
                     ordered.append(n.url)
                     seen.add(n.url)
             healthy_urls = ordered
         else:
-            healthy_urls = self.urls(healthy_only=True)
+            healthy_urls = self.urls(healthy_only=True, pool_strategy=strat)
 
         summary = {
             "probed": len(ok) + len(fail),
@@ -420,14 +586,19 @@ class NodeManager:
             "limit": limit,
             "probe_targets": list(targets),
             "l2_enabled": bool(targets),
+            "pool_strategy": strat,
+            "pool_counts": self.pool_counts(),
         }
         if log:
             try:
                 tgt = ",".join(targets) if targets else "L1-only"
+                counts = summary.get("pool_counts") or {}
                 log(
                     f"[nodes] preflight ok={summary['ok']} fail={summary['fail']} "
-                    f"healthy={summary['healthy']} targets={tgt} "
-                    f"limit={limit} path={self.path}"
+                    f"healthy={summary['healthy']} pool={strat} "
+                    f"catalog_res={counts.get('residential', 0)} "
+                    f"catalog_dc={counts.get('datacenter', 0)} "
+                    f"targets={tgt} limit={limit} path={self.path}"
                 )
             except Exception:
                 pass

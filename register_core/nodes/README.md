@@ -97,6 +97,7 @@ Default L2 map: `grok`/`xai` → `accounts.x.ai`; `chatgpt`/`openai` → `auth.o
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `REGISTER_NODES_PREFLIGHT` | `1` | Probe catalog before register |
+| `REGISTER_NODES_POOL` | `both` | Dual-pool strategy: `residential`/`加宽` (tier≥1 only), `datacenter`/`机房`/`非加宽` (tier=0 only), `both`/`混用` (both pools) |
 | `REGISTER_NODES_MAX_FAIL` | `3` | Failures before quarantine |
 | `REGISTER_NODES_SKIP_FAILED` | `1` | Skip quarantined in rotation |
 | `REGISTER_NODES_REQUIRED` | list-backend true | Zero healthy → fail-fast |

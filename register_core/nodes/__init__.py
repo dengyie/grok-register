@@ -14,6 +14,8 @@ from register_core.nodes.manager import (
     NodeManager,
     get_manager,
     invalidate_manager,
+    node_matches_pool_strategy,
+    normalize_node_pool_strategy,
     reset_manager_for_tests,
 )
 from register_core.nodes.models import Node
@@ -25,6 +27,8 @@ __all__ = [
     "get_manager",
     "invalidate_manager",
     "load_nodes",
+    "node_matches_pool_strategy",
+    "normalize_node_pool_strategy",
     "reset_manager_for_tests",
     "save_nodes",
 ]

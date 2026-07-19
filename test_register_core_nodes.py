@@ -12,7 +12,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from register_core.nodes.catalog import load_nodes, save_nodes
-from register_core.nodes.manager import NodeManager, reset_manager_for_tests
+from register_core.nodes.manager import (
+    NodeManager,
+    get_manager,
+    reset_manager_for_tests,
+)
 from register_core.nodes.models import Node, node_from_dict
 from register_core.util import proxy as core_proxy
 
@@ -241,11 +245,8 @@ class TestReportAttemptCounters(unittest.TestCase):
                 self.assertIsNone(get_manager().find_by_url("http://not-in-catalog:1"))
 
 
-class TestTierDoesNotAffectRotationOrder(unittest.TestCase):
-    """Cement 'tier present but not consumed this round' — a tier=1 node does
-    NOT jump ahead of tier=0 nodes in inject_attempt_proxy's rotation order.
-    Consuming tier into rotation weight is the NEXT milestone.
-    """
+class TestDualPoolStrategy(unittest.TestCase):
+    """Residential (tier>=1) vs datacenter (tier==0) dual pools + 3 strategies."""
 
     def setUp(self) -> None:
         reset_manager_for_tests()
@@ -254,8 +255,146 @@ class TestTierDoesNotAffectRotationOrder(unittest.TestCase):
     def tearDown(self) -> None:
         reset_manager_for_tests()
         core_proxy.reset_rotation_for_tests()
+        for k in (
+            "REGISTER_NODES_POOL",
+            "REGISTER_NODE_POOL",
+            "NODE_POOL",
+            "NODES_POOL",
+            "NODE_POOL_STRATEGY",
+            "REGISTER_NODES_POOL_STRATEGY",
+        ):
+            os.environ.pop(k, None)
 
-    def test_tier_nodes_rotate_in_original_order(self) -> None:
+    def _seed(self, path: Path) -> None:
+        save_nodes(
+            [
+                Node(url="http://dc0:1", id="dc0", tier=0, last_ok=True),
+                Node(url="http://dc1:1", id="dc1", tier=0, last_ok=True),
+                Node(url="http://res1:1", id="res1", tier=1, last_ok=True),
+                Node(url="http://res2:1", id="res2", tier=1, last_ok=True),
+            ],
+            path,
+        )
+
+    def test_normalize_pool_strategy_aliases(self) -> None:
+        from register_core.nodes.manager import normalize_node_pool_strategy
+
+        self.assertEqual(normalize_node_pool_strategy("residential"), "residential")
+        self.assertEqual(normalize_node_pool_strategy("加宽"), "residential")
+        self.assertEqual(normalize_node_pool_strategy("家宽"), "residential")
+        self.assertEqual(normalize_node_pool_strategy("datacenter"), "datacenter")
+        self.assertEqual(normalize_node_pool_strategy("机房"), "datacenter")
+        self.assertEqual(normalize_node_pool_strategy("非加宽"), "datacenter")
+        self.assertEqual(normalize_node_pool_strategy("ordinary"), "datacenter")
+        self.assertEqual(normalize_node_pool_strategy("both"), "both")
+        self.assertEqual(normalize_node_pool_strategy("混用"), "both")
+        self.assertEqual(normalize_node_pool_strategy(""), "both")
+        self.assertEqual(normalize_node_pool_strategy(None), "both")
+
+    def test_enabled_nodes_residential_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            self._seed(path)
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES_POOL": "residential",
+                },
+                clear=False,
+            ):
+                reset_manager_for_tests()
+                mgr = get_manager()
+                urls = [n.url for n in mgr.enabled_nodes()]
+                self.assertEqual(urls, ["http://res1:1", "http://res2:1"])
+                self.assertEqual(mgr.pool_strategy(), "residential")
+
+    def test_enabled_nodes_datacenter_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            self._seed(path)
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES_POOL": "机房",
+                },
+                clear=False,
+            ):
+                reset_manager_for_tests()
+                mgr = get_manager()
+                urls = [n.url for n in mgr.enabled_nodes()]
+                self.assertEqual(urls, ["http://dc0:1", "http://dc1:1"])
+
+    def test_enabled_nodes_both(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            self._seed(path)
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES_POOL": "both",
+                },
+                clear=False,
+            ):
+                reset_manager_for_tests()
+                mgr = get_manager()
+                urls = [n.url for n in mgr.enabled_nodes()]
+                self.assertEqual(
+                    urls,
+                    [
+                        "http://dc0:1",
+                        "http://dc1:1",
+                        "http://res1:1",
+                        "http://res2:1",
+                    ],
+                )
+
+    def test_preflight_respects_pool_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nodes.json"
+            self._seed(path)
+            with patch.dict(
+                os.environ,
+                {
+                    "REGISTER_NODES_FILE": str(path),
+                    "REGISTER_NODES_POOL": "residential",
+                    "REGISTER_NODES_PROBE_LIMIT": "0",
+                },
+                clear=False,
+            ):
+                reset_manager_for_tests()
+                mgr = get_manager()
+
+                def _fake_check_all(**_kw):
+                    # Only return OK for candidates that would be probed; manager
+                    # already filtered by strategy before check_all body — but we
+                    # stub the whole method and re-run filter via enabled_nodes.
+                    out = []
+                    for n in mgr.enabled_nodes(healthy_only=False):
+                        out.append(
+                            {
+                                "id": n.id,
+                                "label": n.label,
+                                "ok": True,
+                                "ip": "1.1.1.1",
+                                "ms": 10,
+                            }
+                        )
+                        n.last_ok = True
+                    return out
+
+                with patch.object(mgr, "check_all", side_effect=_fake_check_all):
+                    summary = mgr.preflight(timeout=1.0, persist=False, limit=None)
+                self.assertEqual(summary["pool_strategy"], "residential")
+                self.assertEqual(
+                    summary["healthy_urls"], ["http://res1:1", "http://res2:1"]
+                )
+                self.assertEqual(summary["healthy"], 2)
+
+    def test_both_preserves_catalog_order_in_rotation(self) -> None:
+        """When pool=both, RR still follows catalog order (no silent reweight)."""
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "nodes.json"
             save_nodes(
@@ -275,6 +414,7 @@ class TestTierDoesNotAffectRotationOrder(unittest.TestCase):
                     "REGISTER_CORE": "0",
                     "PROXY_LIST": "",
                     "REGISTER_NODES_PREFLIGHT": "0",
+                    "REGISTER_NODES_POOL": "both",
                 },
                 clear=False,
             ):
@@ -286,7 +426,6 @@ class TestTierDoesNotAffectRotationOrder(unittest.TestCase):
                     "proxy_rotate_on_start": True,
                     "nodes_preflight": False,
                 }
-                # Round-robin must preserve catalog order regardless of tier.
                 seq = []
                 for _ in range(3):
                     p, _ = core_proxy.resolve_attempt_proxy(extra)

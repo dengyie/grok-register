@@ -17,9 +17,10 @@ class Node:
     label: str = ""
     tags: list[str] = field(default_factory=list)
     enabled: bool = True
-    # Isolation tier + credential-granularity quality signal (collected, not
-    # consumed by rotation this round — see docs/IP-ISOLATION-QUALITY-DESIGN.md).
+    # Isolation tier + credential-granularity quality signal.
     #   tier: 0 = datacenter / Clash leaf (default, backward-compat); 1 = residential.
+    # Pool selection via REGISTER_NODES_POOL={residential|datacenter|both}
+    # filters by tier (see NodeManager + docs/IP-ISOLATION-QUALITY-DESIGN.md).
     # quality counters are keyed by Node id (= url), which for region-Rand
     # residential creds accumulates across rotating exit IPs — exactly right.
     tier: int = 0
@@ -41,8 +42,8 @@ class Node:
 
         ``success_count / max(1, attempt_count) - lambda * disallow_count``.
         ``lambda`` defaults to env ``REGISTER_NODES_QUALITY_LAMBDA`` (0.5)
-        so ops can tune without code change. Collected + displayed only —
-        NOT consumed by rotation this milestone (tier 在场不消费).
+        so ops can tune without code change. Score is display/history only;
+        pool membership is decided by ``tier`` + ``REGISTER_NODES_POOL``.
         """
         if lambda_disallow is None:
             try:
