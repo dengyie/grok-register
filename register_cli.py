@@ -861,6 +861,16 @@ def register_one(
             except Exception:
                 pass
 
+        def _reset_mail_provider_attempt_state() -> None:
+            # New account (or fresh mail stage): failover index must not leak
+            # from a previous account that already advanced through the pool.
+            try:
+                if hasattr(reg, "reset_email_provider_failover"):
+                    reg.reset_email_provider_failover()
+            except Exception:
+                pass
+            _clear_mail_provider_bind()
+
         def _advance_mail_provider_on_miss() -> None:
             # Multi-select: release bind so next try picks next channel
             # (RR/random) or next failover member.
@@ -871,6 +881,7 @@ def register_one(
                 pass
             _clear_mail_provider_bind()
 
+        _reset_mail_provider_attempt_state()
         for mail_try in range(1, max_mail_retry + 1):
             email = ""
             dev_token = ""

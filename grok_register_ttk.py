@@ -6936,6 +6936,12 @@ class GrokRegisterGUI:
         code = ""
         mail_ok = False
         max_mail_retry = 3
+        # Fresh account: do not inherit failover index / bind from prior account.
+        try:
+            reset_email_provider_failover()
+        except Exception:
+            pass
+        clear_email_provider_bind()
         for mail_try in range(1, max_mail_retry + 1):
             logf(f"[*] 1. 打开注册页 (尝试 {mail_try}/{max_mail_retry})")
             open_signup_page(log_callback=logf, cancel_callback=self.should_stop)

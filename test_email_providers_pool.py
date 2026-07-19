@@ -243,6 +243,43 @@ def test_get_email_and_token_binds_pool() -> None:
                 os.environ[k] = v
 
 
+def test_failover_resets_between_accounts() -> None:
+    """failover_index must not leak across accounts after reset_email_provider_failover."""
+    m = _load()
+    if m is None:
+        print("SKIP failover reset")
+        return
+    old_env = {
+        k: os.environ.get(k)
+        for k in ("EMAIL_PROVIDERS", "EMAIL_PROVIDER_STRATEGY", "FIXED_EMAIL", "MIMO_FIXED_EMAIL")
+    }
+    old_cfg = dict(m.config)
+    try:
+        os.environ.pop("FIXED_EMAIL", None)
+        os.environ.pop("MIMO_FIXED_EMAIL", None)
+        os.environ["EMAIL_PROVIDERS"] = "gmail,duckmail,cloudflare"
+        os.environ["EMAIL_PROVIDER_STRATEGY"] = "failover"
+        m.config = dict(old_cfg)
+        _reset_pool_state(m)
+
+        assert m.select_email_provider_from_pool(strategy="failover", bind=True) == "gmail"
+        m.advance_email_provider_failover()
+        assert m.select_email_provider_from_pool(strategy="failover", bind=True) == "duckmail"
+        # Simulate next account start (register_cli / GUI reset)
+        m.reset_email_provider_failover()
+        m.clear_email_provider_bind()
+        assert m.select_email_provider_from_pool(strategy="failover", bind=True) == "gmail"
+        print("PASS failover_resets_between_accounts")
+    finally:
+        m.config = old_cfg
+        _reset_pool_state(m)
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def test_env_overlay_includes_providers() -> None:
     m = _load()
     if m is None:
@@ -274,6 +311,7 @@ if __name__ == "__main__":
     test_parse_email_providers_list()
     test_round_robin_and_bind()
     test_failover_advance()
+    test_failover_resets_between_accounts()
     test_single_provider_compat()
     test_get_email_and_token_binds_pool()
     test_env_overlay_includes_providers()
