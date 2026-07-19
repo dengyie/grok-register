@@ -307,6 +307,32 @@ def test_env_overlay_includes_providers() -> None:
             os.environ["EMAIL_PROVIDER_STRATEGY"] = old_s
 
 
+def test_duckmail_api_key_env_wins() -> None:
+    m = _load()
+    if m is None:
+        print("SKIP duckmail env wins")
+        return
+    old = os.environ.get("DUCKMAIL_API_KEY")
+    old_cfg = dict(m.config)
+    try:
+        m.config = dict(old_cfg)
+        m.config["duckmail_api_key"] = "from-config-key-value"
+        os.environ.pop("DUCKMAIL_API_KEY", None)
+        assert m.get_duckmail_api_key() == "from-config-key-value"
+        os.environ["DUCKMAIL_API_KEY"] = "from-env-key-value"
+        assert m.get_duckmail_api_key() == "from-env-key-value"
+        # empty env must not wipe to blank if we only use or-chain; empty string is falsy → config
+        os.environ["DUCKMAIL_API_KEY"] = ""
+        assert m.get_duckmail_api_key() == "from-config-key-value"
+        print("PASS duckmail_api_key_env_wins")
+    finally:
+        m.config = old_cfg
+        if old is None:
+            os.environ.pop("DUCKMAIL_API_KEY", None)
+        else:
+            os.environ["DUCKMAIL_API_KEY"] = old
+
+
 if __name__ == "__main__":
     test_parse_email_providers_list()
     test_round_robin_and_bind()
@@ -315,4 +341,5 @@ if __name__ == "__main__":
     test_single_provider_compat()
     test_get_email_and_token_binds_pool()
     test_env_overlay_includes_providers()
+    test_duckmail_api_key_env_wins()
     print("ALL OK")

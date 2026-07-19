@@ -379,6 +379,9 @@ _ENV_CONFIG_OVERLAYS = (
     ("EMAIL_PROVIDER", "email_provider"),
     ("EMAIL_PROVIDERS", "email_providers"),
     ("EMAIL_PROVIDER_STRATEGY", "email_provider_strategy"),
+    ("DUCKMAIL_API_KEY", "duckmail_api_key"),
+    ("YYDS_API_KEY", "yyds_api_key"),
+    ("YYDS_JWT", "yyds_jwt"),
     ("GMAIL_IMAP_USER", "gmail_imap_user"),
     ("GMAIL_IMAP_PASSWORD", "gmail_imap_password"),
     ("GMAIL_APP_PASSWORD", "gmail_imap_password"),
@@ -623,7 +626,12 @@ def prepare_browser_proxy(use_proxy: bool = True, log_callback=None):
 
 
 def get_duckmail_api_key():
-    return config.get("duckmail_api_key", "")
+    # Env wins (pxed .env has DUCKMAIL_API_KEY); config is fallback/GUI.
+    return str(
+        os.environ.get("DUCKMAIL_API_KEY")
+        or config.get("duckmail_api_key", "")
+        or ""
+    ).strip()
 
 
 def get_cloudflare_api_base():
@@ -1246,11 +1254,13 @@ YYDS_API_BASE = "https://maliapi.215.im/v1"
 
 
 def get_yyds_api_key():
-    return config.get("yyds_api_key", "")
+    return str(
+        os.environ.get("YYDS_API_KEY") or config.get("yyds_api_key", "") or ""
+    ).strip()
 
 
 def get_yyds_jwt():
-    return config.get("yyds_jwt", "")
+    return str(os.environ.get("YYDS_JWT") or config.get("yyds_jwt", "") or "").strip()
 
 
 def yyds_get_domains(api_key=None, jwt=None):
