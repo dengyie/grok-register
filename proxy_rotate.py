@@ -826,7 +826,9 @@ class ProxyRotator:
             "scope": "browser_only",
         }
 
-    def _rotate_clash_locked(self, log: LogFn = None) -> dict[str, Any]:
+    def _rotate_clash_locked(
+        self, log: LogFn = None, *, force_advance: bool = False
+    ) -> dict[str, Any]:
         self._ensure_clash_setup_locked(log=log)
         # hard guard again
         if self.clash_group in {self.clash_donor_group, "GLOBAL"}:
@@ -847,7 +849,8 @@ class ProxyRotator:
 
         # First due rotate (rotate_on_start): claim current / pin — do NOT advance off
         # pre-pinned GROK_NODE (smoke bug: TUIC → AnyTLS on worker start).
-        if not self._started:
+        # force_advance (fail-fast path switch): always leave current node.
+        if not self._started and not force_advance:
             pin = self.clash_pin_node
             if pin and pin in nodes and pin != now:
                 clash_switch_node(
@@ -966,7 +969,8 @@ class ProxyRotator:
                 if self.mode == "list":
                     result = self._rotate_list_locked()
                 else:
-                    result = self._rotate_clash_locked(log=log)
+                    # force=True (fail-fast): advance even on first call / same every window
+                    result = self._rotate_clash_locked(log=log, force_advance=bool(force))
                 self._last_error = ""
             except Exception as exc:
                 self._last_error = str(exc)

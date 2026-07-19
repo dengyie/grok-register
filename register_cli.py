@@ -260,13 +260,16 @@ def headed_display_ready() -> bool:
 
 
 def product_batch_success(stats: dict, cfg: dict | None = None) -> bool:
-    """True when this batch delivered product-usable free Build (not mere register).
+    """True when this batch delivered the configured product criterion.
 
     - Always require reg_success > 0.
-    - When cpa_export_enabled (default True): require at least one chat_ok.
+    - Pure register mode (cpa_export_enabled=false): reg_success alone is enough.
+    - disk-first: mint_token_ok is product success when chat probe off
+      (CPA_PROBE_CHAT=false / cpa_probe_chat=false). Models-only or chat probe
+      stay separate; import still filters healthy later.
+    - When cpa_export_enabled and chat probe on: require at least one chat_ok.
     - When cpa_remote_inject also on: require at least one remote_live_ok
       (one-click live pool success). Inventory-only inject without live does not count.
-    - Pure register mode (cpa_export_enabled=false): reg_success alone is enough.
     """
     cfg = cfg or {}
     if int(stats.get("reg_success", 0) or 0) <= 0:
@@ -281,13 +284,22 @@ def product_batch_success(stats: dict, cfg: dict | None = None) -> bool:
             cpa_on = False
     if not cpa_on:
         return True
+
+    def _cfg_bool(val, default: bool = False) -> bool:
+        if isinstance(val, bool):
+            return val
+        if val is None:
+            return default
+        return str(val).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+    # disk-first export: token write is the success criterion when chat is not probed.
+    probe_chat = _cfg_bool(cfg.get("cpa_probe_chat"), default=True)
+    if not probe_chat:
+        return int(stats.get("mint_token_ok", 0) or 0) > 0
+
     if int(stats.get("chat_ok", 0) or 0) <= 0:
         return False
-    inj_raw = cfg.get("cpa_remote_inject", False)
-    if isinstance(inj_raw, bool):
-        inj_on = inj_raw
-    else:
-        inj_on = str(inj_raw).strip().lower() in {"1", "true", "yes", "on", "y"}
+    inj_on = _cfg_bool(cfg.get("cpa_remote_inject"), default=False)
     if inj_on and int(stats.get("remote_live_ok", 0) or 0) <= 0:
         return False
     return True
@@ -425,11 +437,6 @@ def _ensure_browser(worker_id: int, force_recycle: bool = False):
     new account attempt uses the rotated egress. List mode rewrites
     reg.config["proxy"]; clash mode only switches the dedicated GROK-REG
     selector (main profile group untouched).
-
-    List-mode rotate + soft browser reuse is a known footgun: Chromium binds
-    ``--proxy-server`` only at process start. When rotate rewrites config.proxy
-    while the process is still alive, subsequent accounts keep the old egress
-    unless we hard-stop the browser so the next start_browser rebinds.
     """
     if force_recycle:
         try:
@@ -437,36 +444,10 @@ def _ensure_browser(worker_id: int, force_recycle: bool = False):
         except Exception:
             pass
     # Rotate egress before (re)creating the browser so --proxy-server picks it up.
-    rotate_result: dict = {}
     try:
-        rotate_result = (
-            maybe_rotate_proxy(log=lambda m: log(worker_id, m), config=reg.config)
-            or {}
-        )
+        maybe_rotate_proxy(log=lambda m: log(worker_id, m), config=reg.config)
     except Exception as exc:
         log(worker_id, f"[!] 代理轮换失败(继续用当前出口): {exc}")
-        rotate_result = {}
-
-    # List rotate rewrote config.proxy: force hard stop so soft-reuse cannot
-    # keep serving the previous --proxy-server. Clash mode is fine under soft
-    # reuse (selector switch is out-of-process).
-    if (
-        not force_recycle
-        and isinstance(rotate_result, dict)
-        and rotate_result.get("rotated")
-        and str(rotate_result.get("mode") or "") == "list"
-        and reg.TabPool.get_browser() is not None
-    ):
-        label = rotate_result.get("label") or rotate_result.get("proxy") or "?"
-        log(
-            worker_id,
-            f"[*] list 代理已轮换 → 硬回收浏览器以绑定新出口: {label}",
-        )
-        try:
-            reg.stop_browser()
-        except Exception:
-            pass
-
     if reg.TabPool.get_browser() is None:
         reg.start_browser(log_callback=lambda m: log(worker_id, m))
 
@@ -503,7 +484,8 @@ def classify_email_stage_failure(msg: str) -> str:
         )
     ):
         return "mail_miss"
-    # Chromium boot / interstitial: recycle browser, not mailbox.
+    # Chromium boot / interstitial / proxy path dead: recycle browser + force rotate.
+    # Do not burn mailbox quota as if signup UI logic failed.
     if (
         "browser_boot" in low
         or "chrome error page" in low
@@ -514,6 +496,27 @@ def classify_email_stage_failure(msg: str) -> str:
         or "浏览器启动失败" in text
         or "devtoolsactiveport" in low
         or "user data directory is already in use" in low
+        # Dead Clash / proxy path (observed batch50: ERR_CONNECTION_CLOSED on accounts.x.ai)
+        or "err_connection_closed" in low
+        or "err_connection_reset" in low
+        or "err_connection_refused" in low
+        or "err_connection_aborted" in low
+        or "err_connection_timed_out" in low
+        or "err_timed_out" in low
+        or "err_tunnel_connection_failed" in low
+        or "err_proxy_connection_failed" in low
+        or "err_socks_connection_failed" in low
+        or "err_name_not_resolved" in low
+        or "err_network_changed" in low
+        or "err_internet_disconnected" in low
+        or "err_address_unreachable" in low
+        or "err_ssl_protocol_error" in low
+        or "net::err_" in low
+        or "connection closed" in low
+        or "connection reset" in low
+        or "connection refused" in low
+        or "proxy connect" in low
+        or "tunnel connection failed" in low
         # Pre-email SPA stuck on「您正在登录」after「使用邮箱注册」— browser recycle +
         # slot retry (not reg_fail/other). Post-profile SSO mid-state uses different
         # wording (final-page-no-submit) and must NOT match here.
@@ -538,6 +541,34 @@ def classify_email_stage_failure(msg: str) -> str:
     ):
         return "browser_boot"
     return "other"
+
+
+
+def _force_rotate_path(worker_id: int, reason: str) -> dict:
+    """Immediately switch Clash/list egress — do not spin on a dead node.
+
+    Used on browser_boot / connection-closed. force=True bypasses rotate_every.
+    Safe no-op when mode=off. Failures are logged; never raise into register loop.
+    """
+    try:
+        result = maybe_rotate_proxy(
+            force=True,
+            log=lambda m: log(worker_id, m),
+            config=getattr(reg, "config", None),
+        )
+        rotated = bool((result or {}).get("rotated"))
+        label = (result or {}).get("label") or (result or {}).get("node") or "-"
+        prev = (result or {}).get("prev") or "-"
+        mode = (result or {}).get("mode") or "?"
+        log(
+            worker_id,
+            f"[*] fail-fast 换路 reason={reason!r} rotated={rotated} "
+            f"mode={mode} {prev} -> {label}",
+        )
+        return result if isinstance(result, dict) else {"rotated": False}
+    except Exception as exc:  # noqa: BLE001
+        log(worker_id, f"[!] fail-fast 换路失败(继续回收浏览器): {exc}")
+        return {"rotated": False, "error": str(exc)}
 
 
 def _soft_recycle_browser(worker_id: int) -> None:
@@ -674,6 +705,9 @@ def register_one(
                 _inc("reg_fail")
                 request_fatal_stop(fatal_msg)
                 raise FatalRegisterError(fatal_msg) from exc
+            # Non-fatal boot flake / proxy path: switch egress before returning fail
+            # so supervisor's next sub does not sit on the same dead Clash node.
+            _force_rotate_path(worker_id, reason=f"browser_start:{msg[:80]}")
             return {"ok": False, "error": f"browser start: {exc}", "idx": idx}
 
         mail_ok = False
@@ -732,10 +766,12 @@ def register_one(
                     _hard_recycle_browser(worker_id)
                     return {"ok": False, "error": msg, "idx": idx, "kind": "progress_fail"}
                 if kind == "browser_boot":
-                    # Chromium connection / chrome-error interstitial: recycle + slot retry
-                    # (do not burn mailbox quota as if signup UI logic failed).
-                    log(worker_id, f"! 浏览器启动/错误页({kind}): {msg}")
+                    # Chromium connection / chrome-error interstitial / dead Clash path:
+                    # force-rotate egress immediately, then slot retry (do not burn mailbox
+                    # quota as if signup UI logic failed; do not spin on same dead node).
+                    log(worker_id, f"! 浏览器启动/错误页/连接断开({kind}): {msg}")
                     _mark_email_stage_error(email, msg)
+                    _force_rotate_path(worker_id, reason=f"browser_boot:{msg[:80]}")
                     raise AccountRetryNeeded(f"browser_boot: {msg}") from exc
                 log(worker_id, f"! 邮箱阶段失败({kind}): {msg}")
                 _mark_email_stage_error(email, msg)
@@ -913,13 +949,16 @@ def register_one(
                     _mark_email_stage_error(email, str(exc))
                 last_slot_email = email
             slot_retry += 1
+            # Always switch path on stuck (even when slot budget is 0) so the *next*
+            # account / next process does not inherit a dead Clash node.
+            _force_rotate_path(worker_id, reason=f"slot_retry:{str(exc)[:80]}")
             if slot_retry <= max_slot_retry:
                 log(
                     worker_id,
-                    f"[!] 当前账号流程卡住，slot 重试 {slot_retry}/{max_slot_retry}: {exc}",
+                    f"[!] 当前账号流程卡住，已换路，slot 重试 {slot_retry}/{max_slot_retry}: {exc}",
                 )
                 _hard_recycle_browser(worker_id)
-                reg.sleep_with_cancel(1.5, cancel)
+                reg.sleep_with_cancel(1.0, cancel)
                 continue
             log(worker_id, f"! slot 重试耗尽 ({max_slot_retry}): {exc}")
             traceback.print_exc()
@@ -1325,7 +1364,7 @@ def main() -> int:
     # perf knobs
     reg.configure_perf(
         fast=fast,
-        sleep_scale=0.15 if fast else 1.0,
+        sleep_scale=0.1 if fast else 1.0,  # 1/10 human pace (Grok)
         skip_debug_io=fast,
         cookie_snapshot=bool(args.cookie_snapshot) or not fast,
         async_side_effects=True,
@@ -1526,11 +1565,26 @@ def main() -> int:
         exit_code = 0
     else:
         exit_code = 1
+        probe_chat_on = True
+        try:
+            raw_pc = cfg_exit.get("cpa_probe_chat", True)
+            if isinstance(raw_pc, bool):
+                probe_chat_on = raw_pc
+            else:
+                probe_chat_on = str(raw_pc).strip().lower() not in {
+                    "0", "false", "no", "off", "n", ""
+                }
+        except Exception:
+            probe_chat_on = True
+        if probe_chat_on:
+            criterion = "cpa_export 开启且 probe_chat 时需 chat_ok；remote_inject 还需 live"
+        else:
+            criterion = "disk-first (probe_chat=off) 需 mint_token_ok≥1（complete+refresh）"
         print(
-            "[!] 本批未达到产品可用 free Build 标准"
-            f"（reg={s.get('reg_success', 0)} chat_ok={s.get('chat_ok', 0)} "
-            f"live={s.get('remote_live_ok', 0)}；"
-            "cpa_export 开启时需 chat_ok，remote_inject 开启时还需 live 成功）",
+            "[!] 本批未达到当前产品标准"
+            f"（reg={s.get('reg_success', 0)} mint_token_ok={s.get('mint_token_ok', 0)} "
+            f"chat_ok={s.get('chat_ok', 0)} live={s.get('remote_live_ok', 0)}；"
+            f"{criterion}）",
             flush=True,
         )
     # Machine-readable fixed summary (ops/log parsers). Keep keys stable.

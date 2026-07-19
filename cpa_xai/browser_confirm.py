@@ -44,9 +44,42 @@ class BrowserConfirmError(RuntimeError):
     pass
 
 
-def _sleep(sec: float) -> None:
-    time.sleep(sec)
+def _sleep_scale() -> float:
+    """Share register --fast / PERF_FLAGS sleep_scale for mint browser waits.
 
+    Default 1.0 when register knobs not loaded. Env override:
+      GROK_SLEEP_SCALE / CPA_BROWSER_SLEEP_SCALE  (e.g. 0.1 for 1/10 human pace)
+    """
+    env = (os.environ.get("GROK_SLEEP_SCALE") or os.environ.get("CPA_BROWSER_SLEEP_SCALE") or "").strip()
+    if env:
+        try:
+            return max(0.0, float(env))
+        except ValueError:
+            pass
+    try:
+        from grok_register_ttk import PERF_FLAGS  # type: ignore
+
+        scale = float(PERF_FLAGS.get("sleep_scale", 1.0) or 1.0)
+        if PERF_FLAGS.get("fast"):
+            scale = min(scale, 0.15)
+        return max(0.0, scale)
+    except Exception:
+        return 1.0
+
+
+def _sleep(sec: float) -> None:
+    """UI settle sleep; scaled by --fast / GROK_SLEEP_SCALE (Grok does not need human pace)."""
+    try:
+        sec = float(sec or 0.0)
+    except (TypeError, ValueError):
+        sec = 0.0
+    if sec <= 0:
+        return
+    scale = _sleep_scale()
+    sec = max(0.0, sec * scale)
+    if sec <= 0:
+        return
+    time.sleep(sec)
 
 
 def _project_root() -> Path:
@@ -254,15 +287,32 @@ def _build_standalone_options(
             )
         log(f"headed browser DISPLAY={display!r}")
 
+    # Prefer the same Playwright Chromium register uses (more reliable debug-port
+    # handoff on this host). Distro /usr/bin/chromium is fallback only.
+    candidates: list[str] = []
+    pw_root = Path(
+        os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+        or "/personal/browsers/ms-playwright"
+    )
+    try:
+        for chrome in sorted(pw_root.glob("chromium-*/chrome-linux*/chrome")):
+            if chrome.is_file():
+                candidates.append(str(chrome))
+    except Exception:
+        pass
     for cand in (
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
     ):
+        if cand not in candidates:
+            candidates.append(cand)
+    for cand in candidates:
         if os.path.isfile(cand):
             try:
                 opts.set_browser_path(cand)
+                log(f"browser binary={cand}")
             except Exception:
                 pass
             break
@@ -331,6 +381,100 @@ def _hard_kill_browser_pid(browser: Any, log: LogFn | None = None) -> None:
         log(f"hard-kill pid={pid} failed: {e}")
 
 
+
+def _apply_mint_browser_connect_timeout(log: LogFn, seconds: float = 12.0) -> None:
+    """Cut DrissionPage browser_connect_timeout (default 30s) so a dead first
+    auto_port handoff fails fast instead of burning ~30s every mint.
+
+    Observed on pxed: attempt 1 times out empty after 30s while a zombie chrome
+    lingers; attempt 2 succeeds in ~1s. Shorter timeout + orphan cleanup recovers
+    without losing the successful second boot.
+    """
+    try:
+        from DrissionPage._functions.settings import Settings as _S  # type: ignore
+
+        sec = max(5.0, min(30.0, float(seconds)))
+        if hasattr(_S, "set_browser_connect_timeout"):
+            _S.set_browser_connect_timeout(sec)
+        else:
+            _S.browser_connect_timeout = sec
+        log(f"browser_connect_timeout={sec}s")
+    except Exception as e:  # noqa: BLE001
+        log(f"browser_connect_timeout set skipped: {e}")
+
+
+def _exc_text(exc: BaseException) -> str:
+    """BrowserConnectError sometimes stringifies empty — surface type + args."""
+    msg = str(exc).strip()
+    if msg:
+        return msg
+    args = getattr(exc, "args", ())
+    if args:
+        return f"{type(exc).__name__}: {args!r}"
+    return f"{type(exc).__name__} (empty message)"
+
+
+def _kill_stale_autoports(log: LogFn) -> None:
+    """Best-effort: remove stale autoPortData dirs left by failed boots.
+
+    Only removes empty-ish or lock-stuck dirs that have no live chrome process
+    using that port. Safe no-op on error.
+    """
+    try:
+        import subprocess
+
+        base = Path("/tmp/DrissionPage/autoPortData")
+        if not base.is_dir():
+            return
+        live_ports: set[str] = set()
+        try:
+            proc = subprocess.run(
+                ["ps", "-ax", "-o", "command="],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            for line in (proc.stdout or "").splitlines():
+                if "remote-debugging-port=" not in line:
+                    continue
+                if "autoPortData" not in line and "chrome" not in line.lower():
+                    continue
+                try:
+                    port = line.split("remote-debugging-port=", 1)[1].split(None, 1)[0].strip()
+                    if port.isdigit():
+                        live_ports.add(port)
+                except Exception:
+                    pass
+        except Exception:
+            return
+        removed = 0
+        for d in list(base.iterdir()):
+            if not d.is_dir() or not d.name.isdigit():
+                continue
+            if d.name in live_ports:
+                continue
+            # Only remove dirs with SingletonLock / incomplete boot markers or empty.
+            # Avoid wiping a still-initializing profile: require age > 60s if SingletonSocket exists.
+            try:
+                import time as _time
+
+                age = _time.time() - d.stat().st_mtime
+                if age < 60:
+                    continue
+                import shutil
+
+                shutil.rmtree(d, ignore_errors=True)
+                removed += 1
+            except Exception:
+                pass
+        if removed:
+            log(f"stale autoPortData removed={removed}")
+    except Exception as e:  # noqa: BLE001
+        log(f"stale autoPort cleanup skipped: {e}")
+
+
+
 def create_standalone_page(
     *,
     proxy: str | None = None,
@@ -365,6 +509,12 @@ def create_standalone_page(
 
     attempts = max(1, min(6, int(max_attempts or 4)))
     last_exc: BaseException | None = None
+    # Pre-clean BEFORE first attempt — leftover PPID=1 Drission chromes cause the
+    # observed "start failed (1/4)" then success on attempt 2 (~30s connect timeout).
+    _cleanup_orphans_best_effort(log)
+    _kill_stale_autoports(log)
+    # Default DP connect timeout is 30s; first-boot flake then costs a full half-minute.
+    _apply_mint_browser_connect_timeout(log, 12.0)
     for attempt in range(1, attempts + 1):
         bridge = None
         browser = None
@@ -378,6 +528,8 @@ def create_standalone_page(
             with chromium_start_lock():
                 browser = Chromium(opts)
             page = browser.latest_tab
+            if page is None:
+                raise BrowserConfirmError("chromium started but latest_tab is None")
             try:
                 setattr(browser, "_auth_proxy_bridge", bridge)
             except Exception:
@@ -389,7 +541,8 @@ def create_standalone_page(
             return browser, page
         except Exception as e:  # noqa: BLE001
             last_exc = e
-            log(f"standalone chromium start failed ({attempt}/{attempts}): {e}")
+            et = _exc_text(e)
+            log(f"standalone chromium start failed ({attempt}/{attempts}): {et}")
             if bridge is not None:
                 try:
                     bridge.stop()
@@ -401,23 +554,40 @@ def create_standalone_page(
                 except Exception:
                     _hard_kill_browser_pid(browser, log=log)
             # Always try orphan cleanup after a failed boot (connection fail or not).
+            # Also reap zombies from a connect-timeout spawn that DP abandoned.
             _cleanup_orphans_best_effort(log)
-            msg = str(e)
+            try:
+                # Reap any defunct chrome children of this process.
+                import os as _os
+
+                while True:
+                    try:
+                        pid, _st = _os.waitpid(-1, _os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if pid <= 0:
+                        break
+                    log(f"reaped zombie pid={pid}")
+            except Exception:
+                pass
+            msg = et
             # Missing DISPLAY is configuration, not flaky boot — do not retry spin.
             if (
                 isinstance(e, BrowserConfirmError)
                 and ("DISPLAY" in msg or "xvfb" in msg.lower())
             ) or ("headed mint 需要 DISPLAY" in msg):
                 raise BrowserConfirmError(
-                    f"standalone chromium start failed (no DISPLAY/xvfb): {e}"
+                    f"standalone chromium start failed (no DISPLAY/xvfb): {et}"
                 ) from e
             if attempt < attempts:
-                _sleep(min(1.0 * attempt, 3.0))
+                # Unscaled backoff: --fast sleep_scale must NOT collapse boot recovery.
+                # With 12s connect timeout, short pause is enough for port/profile recycle.
+                time.sleep(min(0.5 * attempt, 1.5))
                 continue
             break
 
     raise BrowserConfirmError(
-        f"standalone chromium start failed after {attempts} attempts: {last_exc}"
+        f"standalone chromium start failed after {attempts} attempts: {_exc_text(last_exc) if last_exc else last_exc}"
     ) from last_exc
 
 
@@ -570,14 +740,15 @@ def inject_cookies(page: Any, cookies: Any, log: LogFn | None = None) -> int:
     items = normalize_cookies(cookies)
     if not items or page is None:
         return 0
+    # Mint only needs accounts.x.ai session. Skip grok.com warm (saves a full
+    # proxied navigation that often costs tens of seconds on ordinary nodes).
     for url in (
         "https://accounts.x.ai/",
         "https://auth.x.ai/",
-        "https://grok.com/",
     ):
         try:
             page.get(url)
-            _sleep(0.4)
+            _sleep(0.25)
         except Exception:
             continue
 
@@ -1153,10 +1324,15 @@ def approve_device_code(
             log(f"auth error: {msg} — skip")
             raise BrowserConfirmError(f"auth failed: {msg}")
 
-        # Done page
+        # Done page — token poll thread is source of truth; spin lightly until stop_event.
         if "device/done" in url or "设备已授权" in text or "device authorized" in text.lower():
             log("device done page — waiting for token poll")
-            _sleep(1.5)
+            # Unscaled short waits so we exit promptly when poll SUCCESS sets stop_event.
+            for _ in range(10):
+                if stop_event is not None and stop_event.is_set():
+                    log("stop_event set — leave browser loop")
+                    return
+                time.sleep(0.2)
             continue
 
         if "Invalid action" in text:
@@ -1446,10 +1622,13 @@ def mint_with_browser(
 
         def _poll() -> None:
             try:
-                time.sleep(2)
+                # Brief unscaled head-start so browser can open device URL first.
+                time.sleep(0.5)
+                # xAI often returns interval=5; we still poll at 2s — server may
+                # slow_down us, but post-consent grant is detected much sooner.
                 tr = poll_device_token(
                     sess.device_code,
-                    interval=max(sess.interval, 5),
+                    interval=max(2, min(int(sess.interval or 5), 3)),
                     expires_in=min(sess.expires_in, int(browser_timeout_sec) + 60),
                     log=log,
                     cancel=cancel,

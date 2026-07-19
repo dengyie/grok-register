@@ -935,14 +935,22 @@ def export_cpa_xai_for_account(
     cookie_inject = _config_bool(cfg.get("cpa_mint_cookie_inject"), default=True)
     reuse_browser = _config_bool(cfg.get("cpa_mint_browser_reuse"), default=True)
     recycle_every = int(cfg.get("cpa_mint_browser_recycle_every", 15) or 0)
-    # Protocol (pure HTTP SSO device flow) first; browser only on failure.
-    prefer_protocol = _config_bool(cfg.get("cpa_prefer_protocol"), default=True)
+    # Protocol mint: PKCE currently dead (consent_action_missing 404 every account).
+    # Env CPA_PREFER_PROTOCOL always wins over config.json when set (ops/supervisor override).
+    # Default False → skip straight to browser residual.
+    # Set CPA_PREFER_PROTOCOL=true to re-enable HTTP PKCE when xAI action ids work again.
+    env_prefer = (os.environ.get("CPA_PREFER_PROTOCOL") or "").strip()
+    if env_prefer:
+        prefer_raw = env_prefer
+    else:
+        prefer_raw = cfg.get("cpa_prefer_protocol")
+    prefer_protocol = _config_bool(prefer_raw, default=False)
     protocol_only = _config_bool(cfg.get("cpa_protocol_only"), default=False)
     protocol_poll_timeout = float(cfg.get("cpa_protocol_poll_timeout_sec", 90) or 90)
-    # PKCE authorization-code flow (default) yields chat-usable tokens; legacy
-    # device-code flow is known to produce /models-ok-but-chat-403 tokens.
+    # PKCE authorization-code flow can yield chat-usable tokens when action ids work;
+    # legacy device-code flow is known to produce /models-ok-but-chat-403 tokens.
     protocol_flow = (str(cfg.get("cpa_protocol_flow") or "pkce")).strip().lower() or "pkce"
-    # Default true: PKCE CreateCookieSetterLink often fails; device-flow still local-mints.
+    # When prefer_protocol is re-enabled: default allow device residual after PKCE fail.
     # chat entitlement_denied remains hard-gated for remote inject (not remint-spin).
     allow_device_flow_fallback = _config_bool(
         cfg.get("cpa_allow_device_flow_fallback"), default=True
@@ -991,7 +999,7 @@ def export_cpa_xai_for_account(
         f"[cpa] mint OIDC for {email} -> {out_dir} proxy={proxy or '(none)'} "
         f"cookies={len(use_cookies) if isinstance(use_cookies, list) else (1 if use_cookies else 0)} "
         f"reuse={reuse_browser} protocol={prefer_protocol}"
-        f"{' only' if protocol_only else ''} sso={'yes' if sso_val else 'no'}"
+        f"{' only' if protocol_only else ''} flow={protocol_flow} sso={'yes' if sso_val else 'no'}"
     )
 
     def _log(msg: str) -> None:

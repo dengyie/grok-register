@@ -153,6 +153,12 @@ def test_classify_email_stage_browser_boot() -> None:
     assert classify("The browser connection fails") == "browser_boot"
     assert classify("standalone chromium start failed after 3 attempts: x") == "browser_boot"
     assert classify("浏览器启动失败，已重试4次: x") == "browser_boot"
+    # Dead Clash / proxy path (batch50 ordinary stall on accounts.x.ai)
+    assert classify("net::ERR_CONNECTION_CLOSED") == "browser_boot"
+    assert classify("ERR_CONNECTION_RESET at accounts.x.ai") == "browser_boot"
+    assert classify("ERR_PROXY_CONNECTION_FAILED") == "browser_boot"
+    assert classify("ERR_TUNNEL_CONNECTION_FAILED") == "browser_boot"
+    assert classify("chrome-error://chromewebdata/") == "browser_boot"
     # Pre-email SPA stuck on「您正在登录」must recycle as browser_boot (slot retry).
     assert (
         classify(

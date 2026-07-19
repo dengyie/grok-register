@@ -328,6 +328,53 @@ def test_clash_pin_node_from_config_on_start() -> None:
     print("PASS clash pin_node on_start")
 
 
+def test_clash_force_true_advances_even_on_first_call() -> None:
+    """Fail-fast path switch: force=True must leave current node even before _started.
+
+    Normal on_start keeps pin (smoke contract). force=True is used by register_cli
+    on ERR_CONNECTION_CLOSED / browser_boot — must not no-op with on_start_keep_current.
+    """
+    rot = pr.ProxyRotator()
+    rot.configure(
+        {
+            "proxy_rotate_mode": "clash",
+            "proxy_rotate_every": 1,
+            "proxy_rotate_on_start": True,
+            "clash_api": "unix:///tmp/fake.sock",
+            "clash_proxy_group": "🎯Grok注册",
+            "clash_donor_group": "宝可梦",
+            "clash_restore_on_exit": True,
+        }
+    )
+    rot.clash_setup_done = True
+    calls: list[str] = []
+    current = {"now": "GVPS-TUIC-googlevps"}
+
+    def fake_list_nodes(api, group, **k):
+        return (
+            ["GVPS-TUIC-googlevps", "GVPS-AnyTLS-googlevps"],
+            current["now"],
+            {},
+        )
+
+    def fake_switch(api, group, node, **k):
+        calls.append(node)
+        current["now"] = node
+
+    with patch.object(pr, "clash_list_nodes", side_effect=fake_list_nodes):
+        with patch.object(pr, "clash_switch_node", side_effect=fake_switch):
+            r0 = rot.maybe_rotate(force=True, log=None)
+            assert r0.get("rotated") is True, r0
+            assert r0.get("node") == "GVPS-AnyTLS-googlevps", r0
+            assert calls == ["GVPS-AnyTLS-googlevps"]
+            # second force continues advancing
+            r1 = rot.maybe_rotate(force=True, log=None)
+            assert r1.get("rotated") is True, r1
+            assert r1.get("node") == "GVPS-TUIC-googlevps", r1
+            assert calls[-1] == "GVPS-TUIC-googlevps"
+    print("PASS clash force=True advances on first call")
+
+
 def main() -> int:
     test_parse_proxy_list()
     test_parse_domain_list()
@@ -340,6 +387,7 @@ def main() -> int:
     test_off_mode()
     test_clash_on_start_keeps_current_node()
     test_clash_pin_node_from_config_on_start()
+    test_clash_force_true_advances_even_on_first_call()
     print("\nALL PASS (proxy_rotate)")
     return 0
 

@@ -52,6 +52,10 @@ def test_classify() -> None:
         ("IMAP SSL EOF", "other"),
         ("未找到邮箱输入框或注册按钮", "other"),
         ("浏览器启动失败", "browser_boot"),
+        ("net::ERR_CONNECTION_CLOSED", "browser_boot"),
+        ("ERR_CONNECTION_RESET at accounts.x.ai", "browser_boot"),
+        ("ERR_PROXY_CONNECTION_FAILED", "browser_boot"),
+        ("ERR_TUNNEL_CONNECTION_FAILED", "browser_boot"),
         ("打开注册页失败: page is None", "other"),
         (
             "Hotmail/Outlook 可用别名已耗尽：请增加 hotmail_max_aliases_per_account、"
@@ -210,7 +214,13 @@ def test_cli_product_exit_wiring() -> None:
     src = (ROOT / "register_cli.py").read_text(encoding="utf-8")
     assert "def product_batch_success" in src
     assert "product_batch_success(s, cfg_exit)" in src
-    assert "未达到产品可用 free Build 标准" in src
+    # disk-first: message names current product criterion (chat_ok or mint_token_ok)
+    assert (
+        "未达到产品可用 free Build 标准" in src
+        or "本批未达到当前产品标准" in src
+    )
+    assert "disk-first (probe_chat=off)" in src
+    assert "mint_token_ok" in src
     print("PASS cli product exit wiring")
 
 
