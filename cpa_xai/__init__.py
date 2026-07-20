@@ -20,7 +20,12 @@ from .protocol_mint import (
     extract_sso_from_cookies,
     mint_with_sso_protocol,
 )
-from .refresh import refresh_auth_file, refresh_xai_tokens
+from .refresh import (
+    access_token_usable,
+    ensure_auth_tokens,
+    refresh_auth_file,
+    refresh_xai_tokens,
+)
 from .schema import (
     CLIENT_ID,
     DEFAULT_BASE_URL,
@@ -75,6 +80,8 @@ __all__ = [
     "probe_mini_response",
     "probe_models",
     "record_entitlement_denied",
+    "access_token_usable",
+    "ensure_auth_tokens",
     "refresh_auth_file",
     "refresh_xai_tokens",
     "write_cpa_xai_auth",
