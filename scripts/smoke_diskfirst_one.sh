@@ -52,7 +52,7 @@ if [[ -f .env ]]; then
     val=${line#*=}
     # Only export known-safe keys; never clobber disk-first freeze below.
     case "$key" in
-      EMAIL_PROVIDER|PLAYWRIGHT_BROWSERS_PATH|PROXY|CPA_PROXY|GROK_NODE|DISPLAY)
+      EMAIL_PROVIDER|EMAIL_PROVIDERS|EMAIL_PROVIDER_STRATEGY|MAIL_TIMEOUT|PLAYWRIGHT_BROWSERS_PATH|PROXY|CPA_PROXY|GROK_NODE|DISPLAY)
         export "$key=$val"
         ;;
     esac
@@ -64,7 +64,12 @@ if [[ -f .venv/bin/activate ]]; then
   source .venv/bin/activate
 fi
 
-export EMAIL_PROVIDER=${EMAIL_PROVIDER:-cloudflare}
+# Smoke always pins Cloudflare Worker temp-mail (verified product path).
+# Override only with SMOKE_EMAIL_PROVIDER=... for deliberate channel experiments.
+# Multi-select EMAIL_PROVIDERS is cleared so duckmail/gmail RR cannot hijack.
+export EMAIL_PROVIDER=${SMOKE_EMAIL_PROVIDER:-cloudflare}
+unset EMAIL_PROVIDERS || true
+export MAIL_TIMEOUT=${MAIL_TIMEOUT:-20}
 export CPA_EXPORT_ENABLED=true
 export CPA_PROBE_CHAT=false
 export CPA_REMOTE_INJECT=false
@@ -106,7 +111,7 @@ PY
 {
   echo "=== smoke_diskfirst_one start $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
   echo "root=$ROOT"
-  echo "EMAIL_PROVIDER=$EMAIL_PROVIDER CPA_EXPORT=$CPA_EXPORT_ENABLED PROBE=$CPA_PROBE_CHAT INJECT=$CPA_REMOTE_INJECT PROXY=$PROXY"
+  echo "EMAIL_PROVIDER=$EMAIL_PROVIDER EMAIL_PROVIDERS=${EMAIL_PROVIDERS:-} MAIL_TIMEOUT=${MAIL_TIMEOUT:-} CPA_EXPORT=$CPA_EXPORT_ENABLED PROBE=$CPA_PROBE_CHAT INJECT=$CPA_REMOTE_INJECT PROXY=$PROXY"
   echo "SKIP_CLASH_PREFLIGHT=$SKIP_CLASH_PREFLIGHT CPA_PREFER_PROTOCOL=$CPA_PREFER_PROTOCOL timeout=$SMOKE_TIMEOUT"
   echo "success criterion: +1 complete xai-*.json with access+refresh (not chat_ok)"
 

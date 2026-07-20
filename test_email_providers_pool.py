@@ -69,14 +69,14 @@ def test_parse_email_providers_list() -> None:
         assert "def parse_email_providers_list" in src
         print("PASS parse (source contract)")
         return
-    assert m.parse_email_providers_list("duckmail, gmail;cloudflare") == [
+    assert m.parse_email_providers_list("duckmail, cloudmail;cloudflare") == [
         "duckmail",
-        "gmail",
+        "cloudmail",
         "cloudflare",
     ]
-    assert m.parse_email_providers_list(["outlookmail", "google", "duckmail", "duckmail"]) == [
+    assert m.parse_email_providers_list(["outlookmail", "cf", "duckmail", "duckmail"]) == [
         "hotmail",
-        "gmail",
+        "cloudflare",
         "duckmail",
     ]
     assert m.parse_email_providers_list("") == []
@@ -91,6 +91,13 @@ def test_parse_email_providers_list() -> None:
         raise AssertionError("expected fixed to fail")
     except Exception as exc:
         assert "fixed" in str(exc).lower()
+    # gmail intentionally not in multi-select pool (still valid as EMAIL_PROVIDER single)
+    try:
+        m.parse_email_providers_list("gmail,cloudflare")
+        raise AssertionError("expected gmail in EMAIL_PROVIDERS to fail")
+    except Exception as exc:
+        assert "gmail" in str(exc).lower() or "未知" in str(exc)
+    assert "gmail" not in m._EMAIL_PROVIDER_POOL_KNOWN
     print("PASS parse_email_providers_list")
 
 
@@ -104,17 +111,17 @@ def test_round_robin_and_bind() -> None:
     try:
         os.environ.pop("FIXED_EMAIL", None)
         os.environ.pop("MIMO_FIXED_EMAIL", None)
-        os.environ["EMAIL_PROVIDERS"] = "duckmail,gmail,cloudflare"
+        os.environ["EMAIL_PROVIDERS"] = "duckmail,cloudmail,cloudflare"
         os.environ["EMAIL_PROVIDER_STRATEGY"] = "round_robin"
         m.config = dict(old_cfg)
         m.config["email_provider"] = "hotmail"
         _reset_pool_state(m)
 
         pool = m.get_email_providers_pool()
-        assert pool == ["duckmail", "gmail", "cloudflare"]
+        assert pool == ["duckmail", "cloudmail", "cloudflare"]
 
         picks = [m.select_email_provider_from_pool(pool, strategy="round_robin", bind=True) for _ in range(4)]
-        assert picks == ["duckmail", "gmail", "cloudflare", "duckmail"]
+        assert picks == ["duckmail", "cloudmail", "cloudflare", "duckmail"]
         # last bind still cloudflare? no — last select was duckmail
         assert m.get_bound_email_provider() == "duckmail"
         assert m.get_email_provider() == "duckmail"
@@ -144,13 +151,13 @@ def test_failover_advance() -> None:
     try:
         os.environ.pop("FIXED_EMAIL", None)
         os.environ.pop("MIMO_FIXED_EMAIL", None)
-        os.environ["EMAIL_PROVIDERS"] = "gmail,duckmail"
+        os.environ["EMAIL_PROVIDERS"] = "cloudflare,duckmail"
         os.environ["EMAIL_PROVIDER_STRATEGY"] = "failover"
         m.config = dict(old_cfg)
         _reset_pool_state(m)
 
         a = m.select_email_provider_from_pool(strategy="failover", bind=True)
-        assert a == "gmail"
+        assert a == "cloudflare"
         m.advance_email_provider_failover()
         b = m.select_email_provider_from_pool(strategy="failover", bind=True)
         assert b == "duckmail"
@@ -257,18 +264,18 @@ def test_failover_resets_between_accounts() -> None:
     try:
         os.environ.pop("FIXED_EMAIL", None)
         os.environ.pop("MIMO_FIXED_EMAIL", None)
-        os.environ["EMAIL_PROVIDERS"] = "gmail,duckmail,cloudflare"
+        os.environ["EMAIL_PROVIDERS"] = "cloudflare,duckmail,cloudmail"
         os.environ["EMAIL_PROVIDER_STRATEGY"] = "failover"
         m.config = dict(old_cfg)
         _reset_pool_state(m)
 
-        assert m.select_email_provider_from_pool(strategy="failover", bind=True) == "gmail"
+        assert m.select_email_provider_from_pool(strategy="failover", bind=True) == "cloudflare"
         m.advance_email_provider_failover()
         assert m.select_email_provider_from_pool(strategy="failover", bind=True) == "duckmail"
         # Simulate next account start (register_cli / GUI reset)
         m.reset_email_provider_failover()
         m.clear_email_provider_bind()
-        assert m.select_email_provider_from_pool(strategy="failover", bind=True) == "gmail"
+        assert m.select_email_provider_from_pool(strategy="failover", bind=True) == "cloudflare"
         print("PASS failover_resets_between_accounts")
     finally:
         m.config = old_cfg
@@ -289,12 +296,15 @@ def test_env_overlay_includes_providers() -> None:
         return
     old = os.environ.get("EMAIL_PROVIDERS")
     old_s = os.environ.get("EMAIL_PROVIDER_STRATEGY")
+    old_mt = os.environ.get("MAIL_TIMEOUT")
     try:
-        os.environ["EMAIL_PROVIDERS"] = "gmail,duckmail"
+        os.environ["EMAIL_PROVIDERS"] = "cloudflare,duckmail"
         os.environ["EMAIL_PROVIDER_STRATEGY"] = "random"
+        os.environ["MAIL_TIMEOUT"] = "20"
         out = m.apply_env_config_overrides({})
-        assert out["email_providers"] == "gmail,duckmail"
+        assert out["email_providers"] == "cloudflare,duckmail"
         assert out["email_provider_strategy"] == "random"
+        assert str(out.get("mail_timeout")) == "20"
         print("PASS env_overlay_includes_providers")
     finally:
         if old is None:
@@ -305,6 +315,10 @@ def test_env_overlay_includes_providers() -> None:
             os.environ.pop("EMAIL_PROVIDER_STRATEGY", None)
         else:
             os.environ["EMAIL_PROVIDER_STRATEGY"] = old_s
+        if old_mt is None:
+            os.environ.pop("MAIL_TIMEOUT", None)
+        else:
+            os.environ["MAIL_TIMEOUT"] = old_mt
 
 
 def test_duckmail_api_key_env_wins() -> None:

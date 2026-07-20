@@ -127,9 +127,16 @@ DEFAULT_CONFIG = {
     "cpa_allow_device_flow_fallback": True,
     # Email channel: single email_provider, or multi-select email_providers pool.
     # Empty email_providers → fall back to email_provider. Env EMAIL_PROVIDERS wins.
-    "email_provider": "duckmail",
+    # Production default: Cloudflare Worker temp-mail (verified path). Gmail IMAP
+    # is NOT in the multi-select pool (mail_miss RCA 2026-07-20).
+    "email_provider": "cloudflare",
     "email_providers": [],
     "email_provider_strategy": "round_robin",  # round_robin | random | failover
+    # OTP inbox poll total seconds. Keep short: fail-fast and retry channel/slot.
+    "mail_timeout": 20,
+    "mail_poll_interval": 2,
+    # After email submit, wait this long for OTP form before treating as no-send.
+    "email_submit_confirm_timeout": 12,
 }
 
 config = DEFAULT_CONFIG.copy()
@@ -157,9 +164,12 @@ _EMAIL_PROVIDER_ALIASES = {
     "cf": "cloudflare",
     "cloudflare_worker": "cloudflare",
 }
-# Channels implemented by get_email_and_token / get_oai_code (not register_core-only).
+# Channels allowed in multi-select EMAIL_PROVIDERS pool.
+# gmail IMAP is intentionally excluded (2026-07-20 mail_miss RCA: CF catch-all
+# → Gmail inbox often has no same-day xAI OTP). Explicit EMAIL_PROVIDER=gmail
+# still works for one-off ops via get_email_provider / dispatch.
 _EMAIL_PROVIDER_POOL_KNOWN = frozenset(
-    {"duckmail", "yyds", "cloudflare", "cloudmail", "hotmail", "gmail"}
+    {"duckmail", "yyds", "cloudflare", "cloudmail", "hotmail"}
 )
 _EMAIL_PROVIDER_STRATEGIES = frozenset({"round_robin", "random", "failover"})
 _hotmail_token_map = {}
@@ -379,6 +389,9 @@ _ENV_CONFIG_OVERLAYS = (
     ("EMAIL_PROVIDER", "email_provider"),
     ("EMAIL_PROVIDERS", "email_providers"),
     ("EMAIL_PROVIDER_STRATEGY", "email_provider_strategy"),
+    ("MAIL_TIMEOUT", "mail_timeout"),
+    ("MAIL_POLL_INTERVAL", "mail_poll_interval"),
+    ("EMAIL_SUBMIT_CONFIRM_TIMEOUT", "email_submit_confirm_timeout"),
     ("DUCKMAIL_API_KEY", "duckmail_api_key"),
     ("YYDS_API_KEY", "yyds_api_key"),
     ("YYDS_JWT", "yyds_jwt"),
@@ -440,6 +453,9 @@ def apply_env_config_overrides(cfg: dict | None = None) -> dict:
         ("CPA_PROBE_CHAT", "cpa_probe_chat", "bool"),
         ("CPA_PROBE_CHAT_REQUIRED", "cpa_probe_chat_required", "bool"),
         ("CPA_AUTH_PRIORITY", "cpa_auth_priority", "int"),
+        ("MAIL_TIMEOUT", "mail_timeout", "int"),
+        ("MAIL_POLL_INTERVAL", "mail_poll_interval", "float"),
+        ("EMAIL_SUBMIT_CONFIRM_TIMEOUT", "email_submit_confirm_timeout", "int"),
         ("GMAIL_IMAP_PORT", "gmail_imap_port", "int"),
         ("PROXY_ROTATE_EVERY", "proxy_rotate_every", "int"),
         ("PROXY_ROTATE_ON_START", "proxy_rotate_on_start", "bool"),
@@ -456,6 +472,11 @@ def apply_env_config_overrides(cfg: dict | None = None) -> dict:
         elif kind == "int":
             try:
                 out[cfg_key] = int(raw)
+            except ValueError:
+                pass
+        elif kind == "float":
+            try:
+                out[cfg_key] = float(raw)
             except ValueError:
                 pass
     return out
@@ -4547,6 +4568,112 @@ def wait_for_profile_form(timeout=20, log_callback=None, cancel_callback=None):
     return False
 
 
+def _page_has_code_form(page) -> bool:
+    """True when OTP / one-time-code inputs are visible (post email-submit)."""
+    if page is None:
+        return False
+    try:
+        snap = _page_form_snapshot(page)
+        if isinstance(snap, dict) and snap.get("hasCode"):
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(
+            page.run_js(
+                r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const sels = [
+  'input[data-input-otp="true"]',
+  'input[name="code"]',
+  'input[autocomplete="one-time-code"]',
+  'input[inputmode="numeric"]',
+  'input[data-testid*="code" i]',
+  'input[placeholder*="code" i]',
+  'input[placeholder*="验证码"]',
+];
+return Array.from(document.querySelectorAll(sels.join(','))).some(
+  (n) => isVisible(n) && !n.disabled
+);
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def wait_for_code_form_after_email_submit(
+    timeout=12, log_callback=None, cancel_callback=None
+) -> bool:
+    """Confirm email submit advanced to OTP page (or profile) so mail was likely sent.
+
+    Returning early after click alone caused mail_miss on channels that never
+    received a server-side send (still stuck on email form / intermediate CTA).
+    """
+    page = _get_page()
+    if page is None:
+        if log_callback:
+            log_callback("[Debug] post-submit 确认失败: 页面未就绪")
+        return False
+    try:
+        confirm_timeout = float(timeout or 12)
+    except (TypeError, ValueError):
+        confirm_timeout = 12.0
+    if isinstance(config, dict):
+        try:
+            cfg_t = float(config.get("email_submit_confirm_timeout") or 0)
+            if cfg_t > 0:
+                confirm_timeout = max(confirm_timeout, cfg_t)
+        except (TypeError, ValueError):
+            pass
+    deadline = time.time() + max(4.0, confirm_timeout)
+    last_log = 0.0
+    last_click_at = 0.0
+    while time.time() < deadline:
+        raise_if_cancelled(cancel_callback)
+        if _page_has_code_form(page):
+            if log_callback:
+                log_callback("[*] 邮箱提交后已进入验证码页")
+            return True
+        try:
+            if has_profile_form(log_callback=None):
+                if log_callback:
+                    log_callback("[*] 邮箱提交后已进入资料页（跳过验证码）")
+                return True
+        except Exception:
+            pass
+        # Intermediate CTA (continue / next) may sit between email and OTP.
+        now = time.time()
+        if now - last_click_at >= 2.0:
+            try:
+                clicked = page.run_js(_JS_CLICK_INTERMEDIATE_CTA)
+                if clicked:
+                    last_click_at = now
+                    if log_callback:
+                        log_callback(f"[*] post-submit 中间步骤已点击: {clicked}")
+            except Exception:
+                pass
+        if log_callback and now - last_log >= 3.5:
+            snap = _page_form_snapshot(page)
+            log_callback(
+                f"[Debug] 等待验证码页... url={snap.get('url','?')} "
+                f"hasCode={snap.get('hasCode')} hasProfile={snap.get('hasProfile')} "
+                f"hasCf={snap.get('hasCf')} emailReady={_email_input_ready(page)}"
+            )
+            last_log = now
+        human_sleep(0.5, cancel_callback, min_seconds=0.2)
+    if log_callback:
+        snap = _page_form_snapshot(page)
+        log_callback(f"[Debug] post-submit 未进入验证码页: {snap}")
+    return False
+
+
 def fill_email_and_submit(timeout=15, log_callback=None, cancel_callback=None):
     page = _get_page()
     raise_if_cancelled(cancel_callback)
@@ -4667,6 +4794,15 @@ return true;
                 log_callback(f"[*] 已填写邮箱并点击注册: {email}")
             dump_state(page, "email-submitted")
             take_screenshot(page, "email-submitted")
+            # Gate: do not start OTP poll until page shows code form.
+            if not wait_for_code_form_after_email_submit(
+                timeout=12,
+                log_callback=log_callback,
+                cancel_callback=cancel_callback,
+            ):
+                raise AccountRetryNeeded(
+                    "邮箱提交后未进入验证码页（服务端可能未发信 / SPA 卡住）"
+                )
             return email, dev_token
         human_sleep(0.5, cancel_callback)
     raise Exception("未找到邮箱输入框或注册按钮")
@@ -4690,14 +4826,18 @@ return false;
             """
         )
 
+    # Default OTP poll 20s (fail-fast). Caller timeout arg is fallback only when
+    # config omits mail_timeout; do not inherit fill_code's long form timeout.
     try:
-        mail_timeout = int(config.get("mail_timeout", timeout) or timeout)
+        mail_timeout = int(config.get("mail_timeout", 20) or 20)
     except Exception:
-        mail_timeout = timeout
+        mail_timeout = 20
+    if mail_timeout <= 0:
+        mail_timeout = 20
     try:
-        mail_poll_interval = float(config.get("mail_poll_interval", 3) or 3)
+        mail_poll_interval = float(config.get("mail_poll_interval", 2) or 2)
     except Exception:
-        mail_poll_interval = 3
+        mail_poll_interval = 2
 
     code = get_oai_code(
         dev_token,
