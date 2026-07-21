@@ -153,12 +153,12 @@
     if (btn) btn.classList.add("active");
 
     if (name === "register") {
-      // Home: form + progress summary only (no log fetch).
+      // Home: form + progress only (no log fetch).
       loadRegisterForm({ force: false });
       refreshRegister({ reloadForm: false, withLogs: false });
     }
-    if (name === "runs") {
-      // Professional runs module: status + full log + timeline + history.
+    if (name === "logs") {
+      // Logs page: path chips + tail + history.
       refreshRegister({ reloadForm: false, withLogs: true });
       refreshRunHistory();
     }
@@ -380,12 +380,26 @@
       const chipsEl = $("#run-header-chips");
       if (chipsEl) chipsEl.innerHTML = chipsHtml;
     }
-    // Runs page summary bar (same live data)
-    const runsEl = $("#runs-summary");
-    if (runsEl) {
-      runsEl.dataset.state = state;
-      if ($("#runs-status-word")) $("#runs-status-word").textContent = wordText;
-      if ($("#runs-header-chips")) $("#runs-header-chips").innerHTML = chipsHtml;
+    // Logs page summary bar (same live data)
+    const logsEl = $("#logs-summary");
+    if (logsEl) {
+      logsEl.dataset.state = state;
+      if ($("#logs-status-word")) $("#logs-status-word").textContent = wordText;
+      const logChips = [];
+      if (run && run.pid != null) logChips.push(`<span class="chip mini">pid=${escapeHtml(run.pid)}</span>`);
+      if (tag) logChips.push(`<span class="chip mini">tag=${escapeHtml(tag)}</span>`);
+      if (run && run.mode) logChips.push(`<span class="chip mini">${escapeHtml(run.mode)}</span>`);
+      if (stuck) logChips.push(`<span class="chip mini danger">stuck</span>`);
+      if ($("#logs-header-chips")) {
+        $("#logs-header-chips").innerHTML = (logChips.length ? logChips : chips).join("");
+      }
+    }
+    const pathsEl = $("#logs-paths");
+    if (pathsEl) {
+      const parts = [];
+      if (run && run.worker_log) parts.push(`worker: ${run.worker_log}`);
+      if (run && run.supervisor_log) parts.push(`supervisor: ${run.supervisor_log}`);
+      pathsEl.textContent = parts.length ? parts.join("  ·  ") : "path: —";
     }
   }
 
@@ -580,8 +594,8 @@
    */
   async function refreshRegister(opts = {}) {
     const reloadForm = !!(opts && opts.reloadForm);
-    const onRuns = !!$("#page-runs")?.classList.contains("active");
-    const withLogs = opts.withLogs != null ? !!opts.withLogs : onRuns;
+    const onLogs = !!$("#page-logs")?.classList.contains("active");
+    const withLogs = opts.withLogs != null ? !!opts.withLogs : onLogs;
     try {
       if (reloadForm) await loadRegisterForm({ force: true });
       const cur = await api("/api/runs/current", { headers: headers() });
@@ -1362,12 +1376,12 @@
   $("#btn-refresh")?.addEventListener("click", () =>
     refreshRegister({ reloadForm: true, withLogs: false }),
   );
-  $("#btn-goto-runs")?.addEventListener("click", () => showPage("runs"));
+  $("#btn-goto-logs")?.addEventListener("click", () => showPage("logs"));
   document.querySelectorAll("[data-goto]").forEach((b) => {
     b.addEventListener("click", () => showPage(b.dataset.goto));
   });
-  $("#btn-runs-to-register")?.addEventListener("click", () => showPage("register"));
-  $("#btn-runs-refresh")?.addEventListener("click", () =>
+  $("#btn-logs-to-register")?.addEventListener("click", () => showPage("register"));
+  $("#btn-logs-refresh")?.addEventListener("click", () =>
     refreshRegister({ reloadForm: false, withLogs: true }),
   );
   $("#log-which")?.addEventListener("change", refreshLogsOnly);
@@ -1474,12 +1488,12 @@
     }
   });
 
-  // auto-refresh: home = progress only; runs page = progress + logs (if follow)
+  // auto-refresh: home = progress only; logs page = progress + logs (if follow)
   logTimer = setInterval(() => {
     if ($("#app-shell")?.classList.contains("hidden")) return;
     if ($("#page-register")?.classList.contains("active")) {
       refreshRegister({ reloadForm: false, withLogs: false });
-    } else if ($("#page-runs")?.classList.contains("active")) {
+    } else if ($("#page-logs")?.classList.contains("active")) {
       if ($("#log-follow")?.checked !== false) {
         refreshRegister({ reloadForm: false, withLogs: true });
       }

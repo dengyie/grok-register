@@ -241,7 +241,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .card.ok { border-color: rgba(91, 212, 154, 0.35); }
 .card.danger { border-color: rgba(212, 91, 91, 0.45); }
 
-/* ── Register split ────────────────────────────────────── */
+/* ── Register split (console8: form | progress, no log) ── */
 .split {
   display: grid;
   grid-template-columns: minmax(320px, 0.95fr) minmax(360px, 1.05fr);
@@ -250,14 +250,31 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .form-panel { max-height: calc(100vh - 7.5rem); overflow: auto; }
+.progress-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: calc(100vh - 7.5rem);
+  min-height: 0;
+  overflow: auto; /* right column scrolls as a unit */
+  position: relative;
+}
 .log-panel {
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
   max-height: calc(100vh - 7.5rem);
   min-height: 0;
-  overflow: hidden; /* children scroll; don't let log paint over progress */
+  overflow: hidden;
 }
+.form-foot-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border);
+}
+.progress-log-hint { margin: 0; }
 
 .stack-form { display: flex; flex-direction: column; gap: 0.85rem; }
 
@@ -496,8 +513,14 @@ table.data td.ops {
     flex-wrap: wrap;
   }
   .side-nav button { width: auto; }
-  .split { grid-template-columns: 1fr; }
-  .form-panel, .log-panel { max-height: none; }
+  .split {
+    grid-template-columns: 1fr;
+    /* narrow: progress first, form below */
+    display: flex;
+    flex-direction: column;
+  }
+  .split > .progress-panel { order: -1; }
+  .form-panel, .progress-panel, .log-panel { max-height: none; }
 }
 
 @media (max-width: 640px) {
@@ -506,7 +529,7 @@ table.data td.ops {
   .main-wrap { padding: 0.75rem; }
 }
 
-/* ── Run progress stack (console7: home summary, no log) ─ */
+/* ── Run progress stack (console8: right column of split) ─ */
 .run-progress {
   display: flex;
   flex-direction: column;
@@ -514,31 +537,8 @@ table.data td.ops {
   flex: 0 0 auto;
   max-height: none;
   overflow: visible;
-  padding-right: 0;
+  padding-right: 0.1rem;
   min-height: 0;
-}
-
-/* Register home: progress on top, form below — never dual-column fight */
-.home-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 0.9rem;
-}
-.home-progress {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 0.75rem 0.85rem;
-}
-.home-form {
-  max-height: none;
-  overflow: visible;
-}
-.home-runs-hint { margin: 0.15rem 0 0; }
-.compact-status .status-body {
-  max-height: 4.5rem;
-  overflow: auto;
-  font-size: 0.8rem;
 }
 
 button.linkish {
@@ -553,33 +553,29 @@ button.linkish {
 }
 button.linkish:hover { color: var(--accent-2, var(--accent)); }
 
-/* Runs professional module */
-.runs-log-panel {
+/* Logs professional page */
+.logs-paths {
+  margin: 0.15rem 0 0.5rem;
+  word-break: break-all;
+  font-size: 0.78rem;
+}
+.logs-log-panel {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  margin-top: 0.75rem;
+  margin-top: 0.5rem;
   min-height: 0;
 }
-.runs-log {
+.logs-log {
   min-height: 22rem;
-  max-height: calc(100vh - 18rem);
+  max-height: calc(100vh - 16rem);
   flex: 1 1 auto;
   overflow: auto;
 }
-.runs-side-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-}
-@media (max-width: 900px) {
-  .runs-side-grid { grid-template-columns: 1fr; }
-}
-#runs-summary {
+#logs-summary {
   margin-top: 0.25rem;
 }
-#page-runs .log-toolbar {
+#page-logs .log-toolbar {
   position: static;
   flex: 0 0 auto;
 }

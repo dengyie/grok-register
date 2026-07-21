@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI 注册机 · Control Plane</title>
-  <link rel="stylesheet" href="/assets/app.css?v=console7" />
+  <link rel="stylesheet" href="/assets/app.css?v=console8" />
 </head>
 <body>
   <div id="login-gate" class="login-gate hidden">
@@ -35,7 +35,7 @@
       </div>
       <nav id="nav" class="side-nav">
         <button type="button" data-page="register" class="active"><span class="nav-dot"></span>注册</button>
-        <button type="button" data-page="runs"><span class="nav-dot"></span>运行</button>
+        <button type="button" data-page="logs"><span class="nav-dot"></span>日志</button>
         <button type="button" data-page="accounts"><span class="nav-dot"></span>账号池</button>
         <button type="button" data-page="mail"><span class="nav-dot"></span>邮箱接码</button>
         <button type="button" data-page="nodes"><span class="nav-dot"></span>节点池</button>
@@ -49,47 +49,23 @@
     </aside>
 
     <div class="main-wrap">
-      <!-- 注册：启动参数 + 进度摘要（日志在「运行」页） -->
+      <!-- 注册：左表单 + 右进度（日志在侧栏「日志」） -->
       <section id="page-register" class="page active">
         <header class="page-head">
           <div>
             <h1>协议注册</h1>
-            <p class="hint">启动参数与进度摘要。完整日志 / 时间线 / 历史 → 侧栏「运行」。</p>
+            <p class="hint">左启动参数 · 右实时进度。完整 worker/supervisor 日志 → 侧栏「日志」。</p>
           </div>
           <div class="toolbar">
-            <button type="button" id="btn-save-cfg" class="ghost">保存</button>
-            <button type="button" id="btn-selfcheck" class="ghost">自检</button>
-            <button type="button" id="btn-test-proxy" class="ghost">测代理</button>
             <button type="button" id="btn-start" class="primary">开始</button>
             <button type="button" id="btn-stop" class="danger">停止</button>
             <button type="button" id="btn-refresh" class="ghost">刷新</button>
-            <button type="button" id="btn-goto-runs" class="ghost">运行详情 →</button>
+            <button type="button" id="btn-goto-logs" class="ghost">日志 →</button>
           </div>
         </header>
 
-        <div class="home-stack">
-          <div id="run-progress" class="run-progress home-progress">
-            <div id="run-header" class="run-header" data-state="idle">
-              <span class="status-dot" aria-hidden="true"></span>
-              <span class="status-word">idle</span>
-              <span class="meta-chips" id="run-header-chips"></span>
-            </div>
-            <div id="run-kpi" class="kpi-grid"></div>
-            <div id="run-bars" class="bars"></div>
-            <div id="run-steps" class="step-rail"></div>
-            <div id="run-status-card" class="status-card compact-status">
-              <div class="status-title" id="run-status-title">任务状态: —</div>
-              <div class="status-body" id="run-status-body">尚未加载任务。</div>
-            </div>
-            <div id="run-writes" class="run-writes hidden"></div>
-            <p class="hint home-runs-hint">
-              时间线 · 完整日志 · 历史运行已迁至
-              <button type="button" class="linkish" data-goto="runs">运行</button>
-              页，避免挡住进度。
-            </p>
-          </div>
-
-          <div class="panel form-panel home-form">
+        <div class="split">
+          <div class="panel form-panel">
             <form id="reg-form" class="stack-form">
               <div class="field-grid">
                 <label>邮箱服务
@@ -127,32 +103,30 @@
               </div>
 
               <div class="info-box" id="reg-concurrency-hint">
-                默认 disk-first：中途不 tebi 注入。日志与时间线在「运行」页。
+                默认 disk-first：中途不 tebi 注入。完整日志在「日志」页。
               </div>
 
-              <details class="advanced" id="reg-batch-opts" open>
-                <summary>批参数 · chunk / 批边界导入</summary>
-                <div class="field-grid">
-                  <label>SUPERVISOR_CHUNK
-                    <input name="SUPERVISOR_CHUNK" id="reg-chunk" type="number" value="3" min="1" max="20" />
-                  </label>
-                  <label>Turnstile 卡住超时 (秒)
-                    <input name="turnstile_stuck_timeout" id="reg-turnstile" type="number" value="150" min="5" />
-                  </label>
-                  <label class="check muted" title="Supervisor 硬编码 CPA_PROBE_CHAT=false">
-                    <input type="checkbox" id="reg-probe-chat" disabled /> 注册后 chat 探针（强制关）
-                  </label>
-                  <label class="check" title="中途 mint 不 tebi 注入">
-                    <input type="checkbox" id="reg-sso-only" checked /> 只产落盘 auth（默认）
-                  </label>
-                  <label class="check" title="仅批边界 CPA_BATCH_END_INJECT">
-                    <input type="checkbox" id="reg-batch-end-inject" /> 批边界自动导入 CPA
-                  </label>
-                  <label>批边界账号数
-                    <input name="CPA_BATCH_IMPORT_EVERY" id="reg-import-every" type="number" value="100" min="1" />
-                  </label>
-                </div>
-              </details>
+              <!-- 中间态：批参数平铺展开 -->
+              <div class="field-grid" id="reg-batch-opts">
+                <label>SUPERVISOR_CHUNK
+                  <input name="SUPERVISOR_CHUNK" id="reg-chunk" type="number" value="3" min="1" max="20" />
+                </label>
+                <label>Turnstile 卡住超时 (秒)
+                  <input name="turnstile_stuck_timeout" id="reg-turnstile" type="number" value="150" min="5" />
+                </label>
+                <label class="check muted" title="Supervisor 硬编码 CPA_PROBE_CHAT=false">
+                  <input type="checkbox" id="reg-probe-chat" disabled /> 注册后 chat 探针（强制关）
+                </label>
+                <label class="check" title="中途 mint 不 tebi 注入">
+                  <input type="checkbox" id="reg-sso-only" checked /> 只产落盘 auth（默认）
+                </label>
+                <label class="check" title="仅批边界 CPA_BATCH_END_INJECT">
+                  <input type="checkbox" id="reg-batch-end-inject" /> 批边界自动导入 CPA
+                </label>
+                <label>批边界账号数
+                  <input name="CPA_BATCH_IMPORT_EVERY" id="reg-import-every" type="number" value="100" min="1" />
+                </label>
+              </div>
 
               <details class="advanced" id="reg-proxy-opts">
                 <summary>代理 · proxy_rotate / PROXY_LIST</summary>
@@ -221,35 +195,69 @@
                   <button type="button" id="btn-cleanup" class="ghost">清理过盾残留</button>
                 </div>
               </details>
+
+              <!-- 次要按钮：表单底部工具条 -->
+              <div class="form-foot-toolbar">
+                <button type="button" id="btn-save-cfg" class="ghost">保存</button>
+                <button type="button" id="btn-selfcheck" class="ghost">自检</button>
+                <button type="button" id="btn-test-proxy" class="ghost">测代理</button>
+              </div>
             </form>
             <pre id="reg-action-result" class="log compact"></pre>
+          </div>
+
+          <div class="panel progress-panel">
+            <div id="run-progress" class="run-progress">
+              <div id="run-header" class="run-header" data-state="idle">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span class="status-word">idle</span>
+                <span class="meta-chips" id="run-header-chips"></span>
+              </div>
+              <div id="run-kpi" class="kpi-grid"></div>
+              <div id="run-bars" class="bars"></div>
+              <div id="run-steps" class="step-rail"></div>
+              <div id="run-status-card" class="status-card">
+                <div class="status-title" id="run-status-title">任务状态: —</div>
+                <div class="status-body" id="run-status-body">尚未加载任务。</div>
+              </div>
+              <div id="run-writes" class="run-writes hidden"></div>
+              <details id="run-timeline-wrap" class="timeline-wrap" open>
+                <summary>时间线</summary>
+                <ol id="run-timeline" class="timeline"></ol>
+              </details>
+            </div>
+            <p class="hint progress-log-hint">
+              worker / supervisor 完整 tail 与历史 →
+              <button type="button" class="linkish" data-goto="logs">日志</button>
+            </p>
           </div>
         </div>
       </section>
 
-      <!-- 运行：日志 / 时间线 / 历史（专业模块，不挤注册首页） -->
-      <section id="page-runs" class="page">
+      <!-- 日志：排查专用（which / tail / path / 历史） -->
+      <section id="page-logs" class="page">
         <header class="page-head">
           <div>
-            <h1>运行</h1>
-            <p class="hint">完整日志、时间线与历史 supervisor。状态摘要与启动在「注册」页。</p>
+            <h1>日志</h1>
+            <p class="hint">当前 run 的 worker / supervisor tail、路径摘要与历史 supervisor。启动与进度在「注册」。</p>
           </div>
           <div class="toolbar">
-            <button type="button" id="btn-runs-refresh" class="ghost">刷新</button>
-            <button type="button" id="btn-runs-to-register" class="ghost">← 注册</button>
+            <button type="button" id="btn-logs-refresh" class="ghost">刷新</button>
+            <button type="button" id="btn-logs-to-register" class="ghost">← 注册</button>
             <label class="inline"><input type="checkbox" id="log-follow" checked /> 自动刷新</label>
           </div>
         </header>
 
-        <div id="runs-summary" class="run-header" data-state="idle">
+        <div id="logs-summary" class="run-header" data-state="idle">
           <span class="status-dot" aria-hidden="true"></span>
-          <span class="status-word" id="runs-status-word">idle</span>
-          <span class="meta-chips" id="runs-header-chips"></span>
+          <span class="status-word" id="logs-status-word">idle</span>
+          <span class="meta-chips" id="logs-header-chips"></span>
         </div>
+        <div id="logs-paths" class="logs-paths hint mono">path: —</div>
 
-        <div class="panel runs-log-panel">
+        <div class="panel logs-log-panel">
           <div class="log-toolbar">
-            <h2>运行日志</h2>
+            <h2>当前 tail</h2>
             <label class="inline">来源
               <select id="log-which">
                 <option value="auto">auto</option>
@@ -267,19 +275,13 @@
             </label>
             <span id="log-path" class="hint mono"></span>
           </div>
-          <pre id="run-log" class="log runs-log mono"></pre>
+          <pre id="run-log" class="log logs-log mono"></pre>
         </div>
 
-        <div class="runs-side-grid">
-          <details id="run-timeline-wrap" class="card timeline-wrap" open>
-            <summary>时间线</summary>
-            <ol id="run-timeline" class="timeline"></ol>
-          </details>
-          <details id="run-history-wrap" class="card" open>
-            <summary>最近运行（supervisor logs）</summary>
-            <div id="run-history" class="hint">加载中…</div>
-          </details>
-        </div>
+        <details id="run-history-wrap" class="card" open>
+          <summary>最近 supervisor 历史</summary>
+          <div id="run-history" class="hint">加载中…</div>
+        </details>
       </section>
 
       <!-- 账号池 -->
@@ -586,6 +588,6 @@
       </section>
     </div>
   </div>
-  <script src="/assets/app.js?v=console7"></script>
+  <script src="/assets/app.js?v=console8"></script>
 </body>
 </html>
