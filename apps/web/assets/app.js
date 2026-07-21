@@ -68,9 +68,80 @@
     return v == null || v === "" ? "—" : String(v);
   }
 
-  function setResult(el, data) {
+  function setResult(el, data, kind) {
     if (!el) return;
     el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    el.classList.remove("ok", "err", "info", "warn");
+    if (kind) el.classList.add(kind);
+  }
+
+  /** Always-visible op feedback: sticky banner + toast + ops log. Never silent. */
+  const opsLog = [];
+  const OPS_LOG_MAX = 40;
+  function pushOpsLog(message, kind = "info") {
+    const now = new Date();
+    const t = now.toTimeString().slice(0, 8);
+    opsLog.unshift({ t, kind: kind || "info", m: String(message || "") });
+    if (opsLog.length > OPS_LOG_MAX) opsLog.length = OPS_LOG_MAX;
+    const list = $("#ops-log");
+    const count = $("#ops-log-count");
+    if (count) count.textContent = String(opsLog.length);
+    if (!list) return;
+    list.innerHTML = opsLog
+      .map(
+        (it) =>
+          `<li><span class="t">${escapeHtml(it.t)}</span><span class="k ${escapeHtml(it.kind)}">${escapeHtml(it.kind)}</span><span class="m">${escapeHtml(it.m)}</span></li>`,
+      )
+      .join("");
+  }
+  function showOpsFeedback(message, kind = "info", { toast = true, sticky = true, log = true } = {}) {
+    const text = String(message || "").trim() || "(无消息)";
+    const banner = $("#ops-feedback");
+    if (sticky && banner) {
+      banner.textContent = text;
+      banner.classList.remove("hidden", "ok", "err", "info", "warn");
+      banner.classList.add(kind || "info");
+    }
+    setResult($("#reg-action-result"), text, kind);
+    if (log) pushOpsLog(text, kind);
+    if (!toast) return;
+    const host = $("#ops-toast-host");
+    if (!host) return;
+    const node = document.createElement("div");
+    node.className = `ops-toast ${kind || "info"}`;
+    node.textContent = text.length > 220 ? text.slice(0, 217) + "…" : text;
+    host.appendChild(node);
+    const ms = kind === "err" ? 6500 : 3200;
+    setTimeout(() => {
+      node.remove();
+    }, ms);
+  }
+
+  function setBusy(btn, on, labelWhenBusy) {
+    if (!btn) return;
+    if (on) {
+      if (!btn.dataset.label) btn.dataset.label = btn.textContent || "";
+      btn.disabled = true;
+      btn.classList.add("busy");
+      if (labelWhenBusy) btn.textContent = labelWhenBusy;
+    } else {
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      if (btn.dataset.label != null) btn.textContent = btn.dataset.label;
+    }
+  }
+
+  function formatApiError(e) {
+    if (!e) return "未知错误";
+    const msg = String(e.message || e);
+    if (e.status === 409) {
+      // Batch already running (common when CLI supervisor holds flock).
+      return `已有任务在跑（${msg}）。首页会显示当前 progress；如需停请用「停止」（会杀外部 supervisor）。`;
+    }
+    if (e.status === 401) return "未登录或会话过期，请重新登录。";
+    if (e.status === 422) return `参数校验失败: ${msg}`;
+    if (e.status) return `HTTP ${e.status}: ${msg}`;
+    return msg;
   }
 
   function healthBadge(h) {
@@ -296,12 +367,15 @@
       if (force) regFormDirty = false;
     } catch (e) {
       if (e.status === 401) return showGate(true);
-      setResult($("#reg-action-result"), String(e.message || e));
+      // Only surface when user forced reload; silent poll must not toast form noise.
+      if (force) showOpsFeedback(`加载配置失败: ${formatApiError(e)}`, "err");
+      else setResult($("#reg-action-result"), String(e.message || e), "err");
     }
   }
 
-  async function saveRegisterCfg() {
-    const pre = $("#reg-action-result");
+  async function saveRegisterCfg({ silent = false } = {}) {
+    const btn = silent ? null : $("#btn-save-cfg");
+    if (btn) setBusy(btn, true, "保存中…");
     try {
       const provider = $("#reg-email-provider").value;
       const partial = {
@@ -324,12 +398,24 @@
       const keyField = providerKeyField(provider);
       if (key && keyField) partial[keyField] = key;
       const data = await putConfig(partial);
-      setResult(pre, data);
       cfgCache = data.config || cfgCache;
       regFormDirty = false;
       regFormLoaded = true;
+      if (!silent) {
+        const prov = partial.email_provider || "—";
+        const dom = partial.defaultDomains || "—";
+        showOpsFeedback(`配置已保存 · provider=${prov} · domains=${dom}`, "ok");
+      }
+      return data;
     } catch (e) {
-      setResult(pre, String(e.message || e));
+      if (e.status === 401) {
+        showGate(true);
+        throw e;
+      }
+      if (!silent) showOpsFeedback(`保存失败: ${formatApiError(e)}`, "err");
+      throw e;
+    } finally {
+      if (btn) setBusy(btn, false);
     }
   }
 
@@ -594,8 +680,18 @@
    */
   async function refreshRegister(opts = {}) {
     const reloadForm = !!(opts && opts.reloadForm);
+    const explicit = !!(opts && opts.explicit);
     const onLogs = !!$("#page-logs")?.classList.contains("active");
     const withLogs = opts.withLogs != null ? !!opts.withLogs : onLogs;
+    // Prefer the button the user actually clicked (home 刷新 vs 日志页刷新).
+    const btn =
+      opts.btn ||
+      (explicit
+        ? onLogs
+          ? $("#btn-logs-refresh")
+          : $("#btn-refresh")
+        : null);
+    if (btn) setBusy(btn, true, "刷新中…");
     try {
       if (reloadForm) await loadRegisterForm({ force: true });
       const cur = await api("/api/runs/current", { headers: headers() });
@@ -608,9 +704,26 @@
         renderRunStatus(run, lastProductOk, null);
       }
       if (withLogs) await refreshLogsOnly();
+      if (explicit) {
+        const phase = (run && (run.phase_title || run.phase)) || "—";
+        const alive = !!(run && run.alive);
+        const sub = run && run.sub != null ? ` sub=${run.sub}` : "";
+        const complete =
+          run && run.complete != null ? ` complete=${run.complete}` : "";
+        const worker = run && run.worker_log ? ` · worker=${String(run.worker_log).split(/[\\/]/).pop()}` : "";
+        showOpsFeedback(
+          `已刷新 · ${alive ? "运行中" : "空闲"} · ${phase}${sub}${complete}${worker}`,
+          "ok",
+          { toast: true, sticky: true },
+        );
+      }
     } catch (e) {
       if (e.status === 401) return showGate(true);
-      setResult($("#reg-action-result"), String(e.message || e));
+      // Poll failures must not spam toasts every 4s.
+      if (explicit) showOpsFeedback(formatApiError(e), "err");
+      else setResult($("#reg-action-result"), formatApiError(e), "err");
+    } finally {
+      if (btn) setBusy(btn, false);
     }
   }
 
@@ -669,12 +782,18 @@
   }
 
   async function startRun() {
-    const pre = $("#reg-action-result");
-    // save protocol bits first (best-effort)
+    const btn = $("#btn-start");
+    setBusy(btn, true, "启动中…");
+    showOpsFeedback("正在保存配置并启动…", "info", { toast: false, sticky: true });
+    // save protocol bits first (best-effort; silent=true → no busy on 保存按钮)
     try {
-      await saveRegisterCfg();
-    } catch {
-      /* continue start */
+      await saveRegisterCfg({ silent: true });
+    } catch (e) {
+      // Config save failed — still try start, but surface the save error.
+      showOpsFeedback(`配置保存失败（仍尝试启动）: ${formatApiError(e)}`, "warn", {
+        toast: true,
+        sticky: true,
+      });
     }
 
     const kind = $("#reg-kind")?.value || "grok_supervisor";
@@ -728,55 +847,114 @@
         headers: headers(true),
         body: JSON.stringify(body),
       });
-      setResult(pre, data);
+      const pid = data && data.run && data.run.pid;
+      const detail = (data && data.detail) || "started";
+      showOpsFeedback(
+        `已启动 · ${detail}${pid != null ? ` pid=${pid}` : ""} · tag=${body.tag}`,
+        "ok",
+      );
       await refreshRegister({ reloadForm: false });
     } catch (e) {
-      setResult(pre, String(e.message || e));
+      if (e.status === 401) {
+        showGate(true);
+        return;
+      }
+      showOpsFeedback(formatApiError(e), "err");
+      // 409: already running — still refresh progress so user sees live state.
+      if (e.status === 409) {
+        try {
+          await refreshRegister({ reloadForm: false });
+        } catch {
+          /* ignore */
+        }
+      }
+    } finally {
+      setBusy(btn, false);
     }
   }
 
   async function stopRun() {
-    const pre = $("#reg-action-result");
+    const btn = $("#btn-stop");
+    // Confirm: stop_run kills lock-held external supervisors too (batch_dc1k_ns).
+    const ok = window.confirm(
+      "确认停止当前任务？\n\n会结束 control 启动的进程组，也会尝试停止外部 supervisor（flock pid）。\n生产 batch 若在跑会被杀掉。",
+    );
+    if (!ok) {
+      showOpsFeedback("已取消停止", "info", { toast: true, sticky: false });
+      return;
+    }
+    setBusy(btn, true, "停止中…");
+    showOpsFeedback("正在停止…", "warn", { toast: false, sticky: true });
     try {
       const data = await api("/api/runs/stop", { method: "POST", headers: headers() });
-      setResult(pre, data);
+      const detail = (data && data.detail) || (data && data.ok ? "stopped" : "no active run");
+      const pid = data && data.pid;
+      showOpsFeedback(
+        `${data && data.ok ? "已停止" : "停止未生效"} · ${detail}${pid != null ? ` pid=${pid}` : ""}`,
+        data && data.ok ? "ok" : "warn",
+      );
       await refreshRegister({ reloadForm: false });
     } catch (e) {
-      setResult(pre, String(e.message || e));
+      if (e.status === 401) return showGate(true);
+      showOpsFeedback(formatApiError(e), "err");
+    } finally {
+      setBusy(btn, false);
     }
   }
 
-  async function runSelfcheck(targetPre) {
-    const pre = targetPre || $("#reg-action-result");
+  async function runSelfcheck() {
+    const btn = $("#btn-selfcheck");
+    setBusy(btn, true, "检查中…");
+    showOpsFeedback("正在自检…", "info", { toast: false, sticky: true });
     try {
-      setResult(pre, "selfcheck…");
       const data = await api("/api/ops/selfcheck", { headers: headers() });
-      setResult(pre, data);
+      const ok = data && (data.ok === true || data.ok == null);
+      const detail =
+        (data && (data.detail || data.summary)) ||
+        (typeof data === "object" ? JSON.stringify(data).slice(0, 180) : String(data));
+      showOpsFeedback(`自检${ok ? "完成" : "有问题"} · ${detail}`, ok ? "ok" : "warn");
+      setResult($("#reg-action-result"), data, ok ? "ok" : "warn");
     } catch (e) {
-      setResult(pre, String(e.message || e));
+      if (e.status === 401) return showGate(true);
+      showOpsFeedback(`自检失败: ${formatApiError(e)}`, "err");
+    } finally {
+      setBusy(btn, false);
     }
   }
 
-  async function runCleanup(targetPre) {
-    const pre = targetPre || $("#reg-action-result");
+  async function runCleanup() {
+    const btn = $("#btn-cleanup");
+    const ok = window.confirm("确认清理孤儿进程/残留？\n\n不会停止正常持有 flock 的 batch supervisor。");
+    if (!ok) {
+      showOpsFeedback("已取消清理", "info", { toast: true, sticky: false });
+      return;
+    }
+    setBusy(btn, true, "清理中…");
+    showOpsFeedback("正在清理孤儿…", "warn", { toast: false, sticky: true });
     try {
-      setResult(pre, "cleanup…");
       const data = await api("/api/ops/cleanup-orphans?dry_run=false", {
         method: "POST",
         headers: headers(),
       });
-      setResult(pre, data);
+      const detail = (data && (data.detail || data.summary)) || JSON.stringify(data).slice(0, 180);
+      showOpsFeedback(`清理完成 · ${detail}`, "ok");
+      setResult($("#reg-action-result"), data, "ok");
     } catch (e) {
-      setResult(pre, String(e.message || e));
+      if (e.status === 401) return showGate(true);
+      showOpsFeedback(`清理失败: ${formatApiError(e)}`, "err");
+    } finally {
+      setBusy(btn, false);
     }
   }
 
   async function testProxy() {
-    const pre = $("#reg-action-result");
+    const btn = $("#btn-test-proxy");
+    setBusy(btn, true, "测代理…");
+    showOpsFeedback("正在测代理…", "info", { toast: false, sticky: true });
     try {
-      setResult(pre, "测代理…");
       // Prefer Clash pool test if available; fall back to catalog sample.
       let data;
+      let via = "clash";
       try {
         data = await api("/api/nodes/clash/test", {
           method: "POST",
@@ -784,15 +962,36 @@
           body: JSON.stringify({ limit: 8 }),
         });
       } catch {
+        via = "catalog";
         data = await api("/api/nodes/test", {
           method: "POST",
           headers: headers(true),
           body: JSON.stringify({ limit: 8 }),
         });
       }
-      setResult(pre, data);
+      const healthy =
+        data && (data.healthy != null
+          ? data.healthy
+          : data.ok_count != null
+            ? data.ok_count
+            : null);
+      const total =
+        data && (data.total != null
+          ? data.total
+          : data.tested != null
+            ? data.tested
+            : null);
+      const summary =
+        healthy != null && total != null
+          ? `healthy=${healthy}/${total}`
+          : (data && data.detail) || "done";
+      showOpsFeedback(`代理测试完成 (${via}) · ${summary}`, "ok");
+      setResult($("#reg-action-result"), data, "ok");
     } catch (e) {
-      setResult(pre, String(e.message || e));
+      if (e.status === 401) return showGate(true);
+      showOpsFeedback(`测代理失败: ${formatApiError(e)}`, "err");
+    } finally {
+      setBusy(btn, false);
     }
   }
 
@@ -1359,30 +1558,44 @@
     b.addEventListener("click", () => showPage(b.dataset.page));
   });
 
-  // register toolbar
-  $("#btn-save-cfg")?.addEventListener("click", saveRegisterCfg);
-  $("#btn-selfcheck")?.addEventListener("click", () => runSelfcheck($("#reg-action-result")));
-  $("#btn-start-turnstile")?.addEventListener("click", () => {
-    setResult($("#reg-action-result"), {
-      ok: false,
-      detail: "WIP：过盾浏览器池尚未接入 control plane；mint 仍由 register_cli/tab_pool 自管。",
+  // register toolbar + form actions (all surface via toast/banner, never silent)
+  $("#btn-save-cfg")?.addEventListener("click", () => {
+    saveRegisterCfg().catch(() => {
+      /* error already toast'd */
     });
   });
-  $("#btn-cleanup")?.addEventListener("click", () => runCleanup($("#reg-action-result")));
+  $("#btn-selfcheck")?.addEventListener("click", () => runSelfcheck());
+  $("#btn-start-turnstile")?.addEventListener("click", () => {
+    showOpsFeedback(
+      "WIP：过盾浏览器池尚未接入 control plane；mint 仍由 register_cli/tab_pool 自管。",
+      "warn",
+    );
+  });
+  $("#btn-cleanup")?.addEventListener("click", () => runCleanup());
   $("#btn-test-proxy")?.addEventListener("click", testProxy);
   $("#btn-start")?.addEventListener("click", startRun);
   $("#btn-stop")?.addEventListener("click", stopRun);
-  // Explicit 刷新: form + progress summary (no log on home)
-  $("#btn-refresh")?.addEventListener("click", () =>
-    refreshRegister({ reloadForm: true, withLogs: false }),
+  // Explicit 刷新: form + progress summary (no log on home) + visible feedback
+  $("#btn-refresh")?.addEventListener("click", (ev) =>
+    refreshRegister({
+      reloadForm: true,
+      withLogs: false,
+      explicit: true,
+      btn: ev.currentTarget,
+    }),
   );
   $("#btn-goto-logs")?.addEventListener("click", () => showPage("logs"));
   document.querySelectorAll("[data-goto]").forEach((b) => {
     b.addEventListener("click", () => showPage(b.dataset.goto));
   });
   $("#btn-logs-to-register")?.addEventListener("click", () => showPage("register"));
-  $("#btn-logs-refresh")?.addEventListener("click", () =>
-    refreshRegister({ reloadForm: false, withLogs: true }),
+  $("#btn-logs-refresh")?.addEventListener("click", (ev) =>
+    refreshRegister({
+      reloadForm: false,
+      withLogs: true,
+      explicit: true,
+      btn: ev.currentTarget,
+    }),
   );
   $("#log-which")?.addEventListener("change", refreshLogsOnly);
   $("#log-tail")?.addEventListener("change", refreshLogsOnly);

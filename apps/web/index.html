@@ -4,9 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI 注册机 · Control Plane</title>
-  <link rel="stylesheet" href="/assets/app.css?v=console8" />
+  <link rel="stylesheet" href="/assets/app.css?v=console9" />
 </head>
 <body>
+  <!-- Fixed toasts: top-bar actions must never feel dead. -->
+  <div id="ops-toast-host" class="ops-toast-host" aria-live="polite" aria-relevant="additions"></div>
   <div id="login-gate" class="login-gate hidden">
     <form id="login-form" class="login-card" autocomplete="on">
       <h1>登录 Control Plane</h1>
@@ -63,6 +65,12 @@
             <button type="button" id="btn-goto-logs" class="ghost">日志 →</button>
           </div>
         </header>
+        <!-- Always-visible op feedback (top-bar 开始/刷新 used to write only to buried form footer). -->
+        <div id="ops-feedback" class="ops-feedback hidden" role="status"></div>
+        <details id="ops-log-wrap" class="ops-log-wrap">
+          <summary>操作日志 <span id="ops-log-count" class="hint">0</span></summary>
+          <ol id="ops-log" class="ops-log" aria-live="polite"></ol>
+        </details>
 
         <div class="split">
           <div class="panel form-panel">
@@ -588,6 +596,6 @@
       </section>
     </div>
   </div>
-  <script src="/assets/app.js?v=console8"></script>
+  <script src="/assets/app.js?v=console9"></script>
 </body>
 </html>
