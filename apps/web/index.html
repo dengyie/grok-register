@@ -3,16 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI 注册机 · Control Plane</title>
-  <link rel="stylesheet" href="/assets/app.css" />
+  <title>Grok 注册机 · Control Plane</title>
+  <link rel="stylesheet" href="/assets/app.css?v=console5" />
 </head>
 <body>
   <div id="login-gate" class="login-gate hidden">
     <form id="login-form" class="login-card" autocomplete="on">
       <h1>登录 Control Plane</h1>
       <p class="hint">需要操作员账密。脚本仍可用 Bearer token。</p>
-      <label>用户名 <input id="login-user" name="username" autocomplete="username" required /></label>
-      <label>密码 <input id="login-pass" name="password" type="password" autocomplete="current-password" required /></label>
+      <p class="hint brand-line">
+        开源项目
+        <a href="https://github.com/dengyie/ai-register-machine" target="_blank" rel="noopener noreferrer">github.com/dengyie/ai-register-machine</a>
+      </p>
+      <label>用户名 <input id="login-user" name="username" autocomplete="username" placeholder="admin" required /></label>
+      <label>密码 <input id="login-pass" name="password" type="password" autocomplete="current-password" placeholder="admin123" required /></label>
       <div class="actions">
         <button type="submit">登录</button>
       </div>
@@ -20,120 +24,481 @@
     </form>
   </div>
 
-  <div id="app-shell" class="hidden">
-    <header class="top">
-      <div class="brand">AI 注册机 · Control Plane</div>
-      <nav id="nav">
-        <button type="button" data-page="overview" class="active">Overview</button>
-        <button type="button" data-page="config">Config</button>
-        <button type="button" data-page="import">Import</button>
-        <button type="button" data-page="runs">Runs</button>
-      </nav>
-      <div class="token-box">
-        <span id="whoami" class="hint"></span>
-        <label class="token-label">API Token <input id="token" type="password" placeholder="optional bearer" autocomplete="off" /></label>
-        <button type="button" id="saveToken">Save token</button>
-        <button type="button" id="logoutBtn" class="danger">Logout</button>
+  <div id="app-shell" class="hidden app-shell">
+    <aside class="sidebar">
+      <div class="side-brand">
+        <div class="logo-dot" aria-hidden="true"></div>
+        <div>
+          <div class="side-title">Grok 注册机</div>
+          <a class="side-link" href="https://github.com/dengyie/ai-register-machine" target="_blank" rel="noopener noreferrer">开源仓库</a>
+        </div>
       </div>
-    </header>
-    <main>
-      <section id="page-overview" class="page active">
-        <h1>Overview</h1>
-        <div id="overview-status" class="card muted">Loading…</div>
-        <pre id="overview-json" class="log"></pre>
+      <nav id="nav" class="side-nav">
+        <button type="button" data-page="register" class="active"><span class="nav-dot"></span>注册</button>
+        <button type="button" data-page="accounts"><span class="nav-dot"></span>账号池</button>
+        <button type="button" data-page="mail"><span class="nav-dot"></span>邮箱接码</button>
+        <button type="button" data-page="nodes"><span class="nav-dot"></span>节点池</button>
+        <button type="button" data-page="import"><span class="nav-dot"></span>导入</button>
+        <button type="button" data-page="settings"><span class="nav-dot"></span>设置</button>
+      </nav>
+      <div class="side-foot">
+        <div id="whoami" class="hint"></div>
+        <button type="button" id="logoutBtn" class="danger small">Logout</button>
+      </div>
+    </aside>
+
+    <div class="main-wrap">
+      <!-- 注册 -->
+      <section id="page-register" class="page active">
+        <header class="page-head">
+          <div>
+            <h1>协议注册</h1>
+            <p class="hint">邮箱、过盾、代理与批量参数。右侧为运行日志与任务状态。</p>
+          </div>
+          <div class="toolbar">
+            <button type="button" id="btn-save-cfg" class="ghost">保存</button>
+            <button type="button" id="btn-selfcheck" class="ghost">自检</button>
+            <button type="button" id="btn-start-turnstile" class="ghost" title="WIP：过盾浏览器池未接入 control plane" disabled>启动过盾 (WIP)</button>
+            <button type="button" id="btn-cleanup" class="ghost">清理过盾残留</button>
+            <button type="button" id="btn-test-proxy" class="ghost">测代理</button>
+            <button type="button" id="btn-start" class="primary">开始</button>
+            <button type="button" id="btn-stop" class="danger">停止</button>
+            <button type="button" id="btn-refresh" class="ghost">刷新</button>
+          </div>
+        </header>
+
+        <div class="split">
+          <div class="panel form-panel">
+            <form id="reg-form" class="stack-form">
+              <div class="field-grid">
+                <label>邮箱服务
+                  <select name="email_provider" id="reg-email-provider">
+                    <option value="cloudflare">cloudflare</option>
+                    <option value="cloudmail">cloudmail</option>
+                    <option value="duckmail">duckmail</option>
+                    <option value="yyds">YYDS</option>
+                    <option value="gmail">gmail</option>
+                    <option value="hotmail">hotmail</option>
+                    <option value="outlookmail">outlookmail</option>
+                  </select>
+                </label>
+                <label>API KEY / 凭证
+                  <input name="mail_api_key" id="reg-mail-key" type="password" placeholder="按邮箱服务写入对应 key" autocomplete="off" />
+                </label>
+                <label class="span2">域名
+                  <input name="defaultDomains" id="reg-domains" placeholder="多域名用英文逗号，如 a.com,b.com" />
+                </label>
+                <label>数量 target
+                  <input name="target" id="reg-target" type="number" value="100" min="1" />
+                </label>
+                <label>线程 threads
+                  <input name="threads" id="reg-threads" type="number" value="1" min="1" max="32" />
+                </label>
+                <label>模式
+                  <select name="mode" id="reg-mode">
+                    <option value="ordinary">ordinary · Clash 机房</option>
+                    <option value="residential">residential · 家宽</option>
+                  </select>
+                </label>
+                <label>tag
+                  <input name="tag" id="reg-tag" value="batch_web" />
+                </label>
+              </div>
+
+              <div class="info-box" id="reg-concurrency-hint">
+                强力模式：线程 / 过盾 / 节点由设置页与 NODE_SCORE 控制。本页保存只写协议相关配置。
+              </div>
+
+              <div class="field-grid">
+                <label>Turnstile 卡住超时 (秒)
+                  <input name="turnstile_stuck_timeout" id="reg-turnstile" type="number" value="150" min="5" />
+                </label>
+                <label>SUPERVISOR_CHUNK
+                  <input name="SUPERVISOR_CHUNK" id="reg-chunk" type="number" value="3" min="1" max="20" />
+                </label>
+                <label class="check muted" title="Supervisor 硬编码 CPA_PROBE_CHAT=false；勾选仅对非 supervisor 单次路径有意义">
+                  <input type="checkbox" id="reg-probe-chat" disabled /> 注册后 chat 探针（supervisor 路径强制关）
+                </label>
+                <label class="check" title="中途 mint 不 tebi 注入；与批边界导入无关">
+                  <input type="checkbox" id="reg-sso-only" checked /> 只产落盘 auth（默认，不中途 tebi 注入）
+                </label>
+              </div>
+
+              <div class="field-grid">
+                <label>代理策略 proxy_rotate_mode
+                  <select name="proxy_rotate_mode" id="reg-proxy-mode">
+                    <option value="clash">clash · 内置节点池轮换</option>
+                    <option value="list">list · PROXY_LIST / proxy_list</option>
+                    <option value="off">off · 固定出口</option>
+                  </select>
+                </label>
+                <label>固定 proxy URL
+                  <input name="proxy" id="reg-proxy" placeholder="http://127.0.0.1:7897" />
+                </label>
+                <label class="span2">代理池 proxy_list / PROXY_LIST
+                  <textarea name="proxy_list" id="reg-proxy-list" rows="5" placeholder="每行一个代理，支持超过 15 个；可留空走 Clash"></textarea>
+                </label>
+                <label class="check span2 muted" title="WIP：过盾池尚未接入 control plane；mint 仍由 register_cli/tab_pool 自管">
+                  <input type="checkbox" id="reg-turnstile-same-proxy" checked disabled /> 过盾走代理池（WIP · 未接线）
+                </label>
+                <label class="check" title="仅批边界 CPA_BATCH_END_INJECT；不写 config cpa_remote_inject">
+                  <input type="checkbox" id="reg-batch-end-inject" /> 批边界自动导入 CPA (CPA_BATCH_END_INJECT)
+                </label>
+                <label>批边界账号数
+                  <input name="CPA_BATCH_IMPORT_EVERY" id="reg-import-every" type="number" value="100" min="1" />
+                </label>
+              </div>
+            </form>
+            <pre id="reg-action-result" class="log compact"></pre>
+          </div>
+
+          <div class="panel log-panel">
+            <div id="run-progress" class="run-progress">
+              <div id="run-header" class="run-header" data-state="idle">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span class="status-word">idle</span>
+                <span class="meta-chips" id="run-header-chips"></span>
+              </div>
+              <div id="run-kpi" class="kpi-grid"></div>
+              <div id="run-bars" class="bars"></div>
+              <div id="run-steps" class="step-rail"></div>
+              <div id="run-status-card" class="status-card">
+                <div class="status-title" id="run-status-title">任务状态: —</div>
+                <div class="status-body" id="run-status-body">尚未加载任务。</div>
+              </div>
+              <div id="run-writes" class="run-writes hidden"></div>
+              <details id="run-timeline-wrap" class="timeline-wrap" open>
+                <summary>时间线</summary>
+                <ol id="run-timeline" class="timeline"></ol>
+              </details>
+            </div>
+            <div class="log-toolbar">
+              <h2>运行日志</h2>
+              <label class="inline">来源
+                <select id="log-which">
+                  <option value="auto">auto</option>
+                  <option value="worker">worker</option>
+                  <option value="supervisor">supervisor</option>
+                  <option value="both">both</option>
+                </select>
+              </label>
+              <label class="inline">行数
+                <select id="log-tail">
+                  <option value="100">100</option>
+                  <option value="200" selected>200</option>
+                  <option value="500">500</option>
+                </select>
+              </label>
+              <label class="inline"><input type="checkbox" id="log-follow" checked /> 自动刷新</label>
+            </div>
+            <p id="log-path" class="hint mono"></p>
+            <pre id="run-log" class="log tall mono"></pre>
+          </div>
+        </div>
       </section>
 
-      <section id="page-config" class="page">
-        <h1>Config</h1>
-        <p class="hint">Secrets show masked; empty or *** values keep the previous secret on save.</p>
+      <!-- 账号池 -->
+      <section id="page-accounts" class="page">
+        <header class="page-head">
+          <div>
+            <h1>账号池</h1>
+            <p class="hint">cpa_auths 落盘 complete（access+refresh）。注册主链路止于磁盘；导入 tebi 另走 Import。</p>
+          </div>
+          <div class="toolbar">
+            <button type="button" id="acc-refresh" class="ghost">刷新</button>
+          </div>
+        </header>
+        <div class="card filter-bar">
+          <label class="inline">搜索 <input id="acc-q" placeholder="email / 文件名" /></label>
+          <label class="inline">完整度
+            <select id="acc-complete">
+              <option value="">全部</option>
+              <option value="1">仅 complete</option>
+              <option value="0">仅 incomplete</option>
+            </select>
+          </label>
+          <label class="inline">每页
+            <select id="acc-page-size">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <button type="button" id="acc-prev" class="small">上一页</button>
+          <button type="button" id="acc-next" class="small">下一页</button>
+          <span id="acc-page-info" class="hint"></span>
+        </div>
+        <div id="acc-summary" class="card muted">—</div>
+        <div class="card table-wrap">
+          <table class="data" id="acc-table">
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>email</th>
+                <th>mtime</th>
+                <th>priority</th>
+                <th>kind</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <pre id="acc-result" class="log compact"></pre>
+      </section>
+
+      <!-- 邮箱接码 -->
+      <section id="page-mail" class="page">
+        <header class="page-head">
+          <div>
+            <h1>邮箱接码服务</h1>
+            <p class="hint">独立配置邮箱通道与域名；Hotmail 凭证可在此导入。新注册禁用 plus-alias 农场。</p>
+          </div>
+          <div class="toolbar">
+            <button type="button" id="mail-reload" class="ghost">重载</button>
+            <button type="button" id="mail-save" class="primary">保存邮箱配置</button>
+          </div>
+        </header>
+        <form id="mail-form" class="card grid">
+          <label>email_provider
+            <select name="email_provider">
+              <option value="cloudflare">cloudflare</option>
+              <option value="cloudmail">cloudmail</option>
+              <option value="duckmail">duckmail</option>
+              <option value="yyds">yyds</option>
+              <option value="gmail">gmail</option>
+              <option value="hotmail">hotmail</option>
+              <option value="outlookmail">outlookmail</option>
+            </select>
+          </label>
+          <label>email_provider_strategy
+            <select name="email_provider_strategy">
+              <option value="round_robin">round_robin</option>
+              <option value="random">random</option>
+              <option value="failover">failover</option>
+            </select>
+          </label>
+          <label class="span2">defaultDomains
+            <input name="defaultDomains" placeholder="a.com,b.com" />
+          </label>
+          <label>cloudflare_api_base <input name="cloudflare_api_base" /></label>
+          <label>cloudflare_api_key <input name="cloudflare_api_key" type="password" placeholder="leave empty to keep" /></label>
+          <label>duckmail_api_key <input name="duckmail_api_key" type="password" placeholder="leave empty to keep" /></label>
+          <label>yyds_api_key <input name="yyds_api_key" type="password" placeholder="leave empty to keep" /></label>
+          <label>cloudmail_url <input name="cloudmail_url" /></label>
+          <label>cloudmail_admin_email <input name="cloudmail_admin_email" /></label>
+          <label>cloudmail_password <input name="cloudmail_password" type="password" placeholder="leave empty to keep" /></label>
+          <label>gmail_imap_user <input name="gmail_imap_user" /></label>
+          <label>hotmail_accounts_file <input name="hotmail_accounts_file" placeholder="mail_credentials.txt" /></label>
+          <label class="check"><input type="checkbox" name="hotmail_allow_plus_alias" id="mail-plus-alias" /> hotmail_allow_plus_alias（生产勿开）</label>
+        </form>
+        <div class="card">
+          <h2>Hotmail / Outlook 凭证导入</h2>
+          <p class="hint">每行: email----password----clientId----refresh_token</p>
+          <textarea id="mail-cred-text" rows="6" placeholder="email----password----clientId----refresh_token"></textarea>
+          <label class="inline">mode
+            <select id="mail-cred-mode"><option value="append">append</option><option value="replace">replace</option></select>
+          </label>
+          <button type="button" id="mail-cred-go" class="ghost">导入凭证</button>
+        </div>
+        <pre id="mail-result" class="log"></pre>
+      </section>
+
+      <!-- 节点池 -->
+      <section id="page-nodes" class="page">
+        <header class="page-head">
+          <div>
+            <h1>节点池</h1>
+            <p class="hint">注册池优先 Clash/mihomo 叶子；catalog 为项目 nodes.json。</p>
+          </div>
+        </header>
+        <div class="card">
+          <div class="tabrow">
+            <button type="button" class="tab active" data-nodes-tab="clash">内置 Clash / mihomo</button>
+            <button type="button" class="tab" data-nodes-tab="catalog">项目 catalog</button>
+          </div>
+        </div>
+        <div id="nodes-clash" class="nodes-panel">
+          <div class="card actions-bar">
+            <button type="button" id="clash-refresh" class="ghost">刷新 Clash</button>
+            <button type="button" id="clash-test-pool" class="ghost">测活注册池</button>
+            <button type="button" id="clash-test-all" class="ghost">测活（前 40）</button>
+            <label class="inline">筛选
+              <select id="clash-filter">
+                <option value="pool">仅注册池</option>
+                <option value="all">全部叶子</option>
+                <option value="ok">仅可用</option>
+                <option value="fail">仅失败</option>
+              </select>
+            </label>
+            <label class="inline">搜索 <input id="clash-q" placeholder="名称关键字" /></label>
+            <span id="clash-summary" class="hint"></span>
+          </div>
+          <div class="card">
+            <h2>策略组</h2>
+            <div id="clash-groups" class="chip-row"></div>
+          </div>
+          <div class="card table-wrap">
+            <table class="data" id="clash-leaves-table">
+              <thead>
+                <tr>
+                  <th>健康</th><th>名称</th><th>类型</th><th>延迟</th><th>优先级分</th><th>注册池</th><th>所属组</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <pre id="nodes-clash-result" class="log compact"></pre>
+        </div>
+        <div id="nodes-catalog" class="nodes-panel hidden">
+          <div class="card grid">
+            <label>proxy URL <input id="node-url" placeholder="http://user:pass@host:port" /></label>
+            <label>label <input id="node-label" /></label>
+            <label>tags <input id="node-tags" placeholder="residential,us" /></label>
+            <label>tier
+              <select id="node-tier">
+                <option value="0">0 datacenter</option>
+                <option value="1">1 residential</option>
+              </select>
+            </label>
+            <div class="actions">
+              <button type="button" id="node-add" class="ghost">添加节点</button>
+              <button type="button" id="node-test-all" class="ghost">测活（enabled≤50）</button>
+              <button type="button" id="node-refresh" class="ghost">刷新</button>
+            </div>
+          </div>
+          <div class="card filter-bar">
+            <label class="inline">搜索 <input id="cat-q" /></label>
+            <label class="inline">健康
+              <select id="cat-health">
+                <option value="">全部</option>
+                <option value="ok">可用</option>
+                <option value="fail">失败</option>
+                <option value="unknown">未测</option>
+              </select>
+            </label>
+            <label class="inline">tier
+              <select id="cat-tier">
+                <option value="">全部</option>
+                <option value="0">机房 0</option>
+                <option value="1">住宅 1</option>
+              </select>
+            </label>
+            <label class="inline">每页
+              <select id="cat-page-size">
+                <option value="25">25</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <button type="button" id="cat-prev" class="small">上一页</button>
+            <button type="button" id="cat-next" class="small">下一页</button>
+            <span id="cat-page-info" class="hint"></span>
+          </div>
+          <div id="nodes-catalog-summary" class="card muted">—</div>
+          <div class="card table-wrap">
+            <table class="data" id="nodes-catalog-table">
+              <thead>
+                <tr>
+                  <th>状态</th><th>label</th><th>tier</th><th>延迟</th><th>IP</th><th>优先级</th><th>失败</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <pre id="nodes-catalog-result" class="log compact"></pre>
+        </div>
+      </section>
+
+      <!-- 导入 -->
+      <section id="page-import" class="page">
+        <header class="page-head">
+          <div>
+            <h1>导入</h1>
+            <p class="hint">节点文件 / 邮件凭证 / auth 包 / config pack。默认 auth 导入不远程 tebi。</p>
+          </div>
+        </header>
+        <div class="card">
+          <h2>Nodes / proxies 文件</h2>
+          <input type="file" id="nodes-file" />
+          <label class="check"><input type="checkbox" id="nodes-dry" checked /> dry-run</label>
+          <label class="check"><input type="checkbox" id="nodes-replace" /> replace</label>
+          <button type="button" id="nodes-go" class="ghost">Import nodes</button>
+        </div>
+        <div class="card">
+          <h2>Mail credentials</h2>
+          <textarea id="mail-text" rows="5" placeholder="email----password----clientId----refresh_token"></textarea>
+          <label class="inline">mode
+            <select id="mail-mode"><option value="append">append</option><option value="replace">replace</option></select>
+          </label>
+          <button type="button" id="mail-go" class="ghost">Import mail</button>
+        </div>
+        <div class="card">
+          <h2>Account / token dumps</h2>
+          <input type="file" id="auths-file" />
+          <label class="check"><input type="checkbox" id="auths-remote" /> allow remote CPA inject</label>
+          <button type="button" id="auths-go" class="ghost">Import auths</button>
+        </div>
+        <div class="card">
+          <h2>Config pack (zip)</h2>
+          <input type="file" id="pack-file" />
+          <label class="check"><input type="checkbox" id="pack-apply" /> apply</label>
+          <button type="button" id="pack-go" class="ghost">Import pack</button>
+        </div>
+        <pre id="import-result" class="log"></pre>
+      </section>
+
+      <!-- 设置 -->
+      <section id="page-settings" class="page">
+        <header class="page-head">
+          <div>
+            <h1>设置</h1>
+            <p class="hint">Secrets 显示为掩码；空或 *** 保存时保留旧值。Bearer 仅脚本用。</p>
+          </div>
+          <div class="toolbar">
+            <button type="button" id="config-reload" class="ghost">Reload</button>
+            <button type="button" id="config-save" class="primary">Save</button>
+          </div>
+        </header>
         <form id="config-form" class="card grid">
           <label>email_provider <input name="email_provider" /></label>
           <label>defaultDomains <input name="defaultDomains" /></label>
           <label>proxy <input name="proxy" /></label>
           <label>proxy_rotate_mode <input name="proxy_rotate_mode" /></label>
+          <label>proxy_list <textarea name="proxy_list" rows="3"></textarea></label>
           <label>turnstile_stuck_timeout <input name="turnstile_stuck_timeout" type="number" step="1" /></label>
-          <label>cpa_probe_chat <select name="cpa_probe_chat"><option value="">(unchanged)</option><option value="false">false</option><option value="true">true</option></select></label>
-          <label>cpa_remote_inject (intent) <select name="cpa_remote_inject"><option value="">(unchanged)</option><option value="false">false</option><option value="true">true</option></select></label>
-          <label>cloudflare_api_key <input name="cloudflare_api_key" placeholder="leave empty to keep" /></label>
-          <div class="actions">
-            <button type="button" id="config-reload">Reload</button>
-            <button type="submit">Save</button>
-          </div>
+          <label>cpa_probe_chat
+            <select name="cpa_probe_chat">
+              <option value="">(unchanged)</option>
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </label>
+          <label>cpa_remote_inject (intent)
+            <select name="cpa_remote_inject">
+              <option value="">(unchanged)</option>
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </label>
+          <label>cloudflare_api_key <input name="cloudflare_api_key" type="password" placeholder="leave empty to keep" /></label>
+          <label>duckmail_api_key <input name="duckmail_api_key" type="password" placeholder="leave empty to keep" /></label>
+          <label>yyds_api_key <input name="yyds_api_key" type="password" placeholder="leave empty to keep" /></label>
         </form>
-        <pre id="config-result" class="log"></pre>
+        <div class="card">
+          <h2>脚本 Bearer token（可选）</h2>
+          <label class="inline">API Token <input id="token" type="password" placeholder="optional bearer" autocomplete="off" /></label>
+          <button type="button" id="saveToken" class="ghost">Save token</button>
+        </div>
+        <div class="card">
+          <h2>运维自检</h2>
+          <button type="button" id="settings-selfcheck" class="ghost">运行自检</button>
+          <button type="button" id="settings-cleanup" class="ghost">清理过盾残留</button>
+          <pre id="config-result" class="log"></pre>
+        </div>
       </section>
-
-      <section id="page-import" class="page">
-        <h1>Import</h1>
-        <div class="card">
-          <h2>Nodes / proxies</h2>
-          <input type="file" id="nodes-file" />
-          <label><input type="checkbox" id="nodes-dry" checked /> dry-run</label>
-          <label><input type="checkbox" id="nodes-replace" /> replace</label>
-          <button type="button" id="nodes-go">Import nodes</button>
-        </div>
-        <div class="card">
-          <h2>Mail credentials</h2>
-          <textarea id="mail-text" rows="5" placeholder="email----password----clientId----refresh_token per line"></textarea>
-          <label>mode
-            <select id="mail-mode"><option value="append">append</option><option value="replace">replace</option></select>
-          </label>
-          <button type="button" id="mail-go">Import mail</button>
-        </div>
-        <div class="card">
-          <h2>Account / token dumps</h2>
-          <p class="hint">Zip of xai-*.json or single json. Default local-only (--no-remote).</p>
-          <input type="file" id="auths-file" />
-          <label><input type="checkbox" id="auths-remote" /> allow remote CPA inject</label>
-          <button type="button" id="auths-go">Import auths</button>
-        </div>
-        <div class="card">
-          <h2>Config pack (zip)</h2>
-          <input type="file" id="pack-file" />
-          <label><input type="checkbox" id="pack-apply" /> apply (else plan only)</label>
-          <button type="button" id="pack-go">Import pack</button>
-        </div>
-        <pre id="import-result" class="log"></pre>
-      </section>
-
-      <section id="page-runs" class="page">
-        <h1>Runs</h1>
-        <form id="run-form" class="card grid">
-          <label>kind
-            <select name="kind">
-              <option value="grok_supervisor">grok_supervisor</option>
-              <option value="register_sh">register_sh</option>
-            </select>
-          </label>
-          <label>product
-            <select name="product">
-              <option value="grok">grok</option>
-              <option value="mimo">mimo</option>
-              <option value="chatgpt">chatgpt</option>
-            </select>
-          </label>
-          <label>mode
-            <select name="mode">
-              <option value="ordinary">ordinary</option>
-              <option value="residential">residential</option>
-            </select>
-          </label>
-          <label>target <input name="target" type="number" value="100" min="1" /></label>
-          <label>threads <input name="threads" type="number" value="1" min="1" max="32" /></label>
-          <label>tag <input name="tag" value="batch_web" /></label>
-          <label>SKIP_CLASH_PREFLIGHT <input name="SKIP_CLASH_PREFLIGHT" placeholder="0 or 1" /></label>
-          <div class="actions">
-            <button type="submit">Start</button>
-            <button type="button" id="run-stop" class="danger">Stop</button>
-            <button type="button" id="run-refresh">Refresh</button>
-          </div>
-        </form>
-        <pre id="run-status" class="log"></pre>
-        <h2>Log tail</h2>
-        <pre id="run-log" class="log tall"></pre>
-      </section>
-    </main>
+    </div>
   </div>
-  <script src="/assets/app.js"></script>
+  <script src="/assets/app.js?v=console5"></script>
 </body>
 </html>
