@@ -20,6 +20,7 @@ def test_settings_reads_env(tmp_path, monkeypatch):
 def test_health_ok_without_token_when_unset(tmp_path, monkeypatch):
     monkeypatch.setenv("REGISTER_PROJECT_ROOT", str(tmp_path))
     monkeypatch.delenv("CONTROL_API_TOKEN", raising=False)
+    monkeypatch.setenv("CONTROL_API_PASSWORD_LOGIN", "0")
     from apps.control_api.settings import clear_settings_cache
     from apps.control_api.app import create_app
     from fastapi.testclient import TestClient
@@ -28,7 +29,9 @@ def test_health_ok_without_token_when_unset(tmp_path, monkeypatch):
     client = TestClient(create_app())
     r = client.get("/api/health")
     assert r.status_code == 200
-    assert r.json()["ok"] is True
+    body = r.json()
+    assert body["ok"] is True
+    assert body["auth_required"] is False
 
 
 def test_protected_route_401_without_bearer(tmp_path, monkeypatch):

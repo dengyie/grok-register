@@ -59,9 +59,11 @@ bash scripts/setup_simple.sh
 ./register.sh core run -p mimo -n 1
 
 # 3b) Web control plane（配置 / 导入 / 启停 batch + 状态日志）
-export CONTROL_API_TOKEN="$(openssl rand -hex 32)"
+export CONTROL_API_SESSION_SECRET="$(openssl rand -hex 32)"
+export CONTROL_API_TOKEN="$(openssl rand -hex 32)"   # 可选，给 curl/脚本
+uv run python scripts/control_api_user.py set admin  # 创建操作员账密
 ./scripts/run_control_api.sh
-# 浏览器打开 http://127.0.0.1:8787
+# 浏览器打开 http://127.0.0.1:8787 → 登录
 
 # 4) 看结果
 ls accounts_cli.txt cpa_auths/                 # Grok
@@ -81,18 +83,20 @@ bash scripts/doctor_secrets.sh
 | 失败策略 | 容易空转重试 | **fail-fast**；超时杀进程组 |
 | 产物契约 | 常混 SSO / token / sk | Grok→xai OIDC+chat 门禁；MiMo→OpenAI-compat `sk-`，文档写清 |
 | 安全 | 密钥易进仓 | doctor、gitignore、public 脱敏、sink 0600 |
-| UI | 多为纯 CLI | **项目内 Web 控制面**：Config / Import / Runs（启停 supervisor + 日志 tail），默认 `127.0.0.1` + token |
+| UI | 多为纯 CLI | **项目内 Web 控制面**：账密登录 + Config / Import / Runs，默认 `127.0.0.1` |
 
 ### Web control plane（配置 / 导入 / 启停）
 
 ```bash
-export CONTROL_API_TOKEN="$(openssl rand -hex 32)"
+export CONTROL_API_SESSION_SECRET="$(openssl rand -hex 32)"
+uv run python scripts/control_api_user.py set admin
 ./scripts/run_control_api.sh
-# http://127.0.0.1:8787
+# http://127.0.0.1:8787 → 用户名/密码登录
 ```
 
 FastAPI + 静态页（`apps/control_api` + `apps/web`）：
 
+- **登录**：操作员账密（scrypt + HttpOnly session）；脚本可用 Bearer token
 - **Overview**：product_ok 计数、当前 batch 状态
 - **Config**：编辑 `config.json`（备份后写；密钥脱敏）
 - **Import**：节点/代理、邮箱凭证、auth dump、配置包

@@ -11,6 +11,9 @@ class HealthOut(BaseModel):
     ok: bool = True
     project_root: str
     token_required: bool
+    password_login_enabled: bool = False
+    users_configured: bool = False
+    auth_required: bool = False
 
 
 class OverviewOut(BaseModel):
@@ -60,3 +63,22 @@ class ImportResultOut(BaseModel):
     ok: bool
     detail: str = ""
     result: dict[str, Any] = Field(default_factory=dict)
+
+
+class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class LoginOut(BaseModel):
+    ok: bool
+    username: str | None = None
+
+
+class MeOut(BaseModel):
+    authenticated: bool
+    username: str | None = None
+    auth_required: bool = True
+    password_login_enabled: bool = True
+    token_auth_enabled: bool = False
+    users_configured: bool = False

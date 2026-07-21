@@ -7,116 +7,133 @@
   <link rel="stylesheet" href="/assets/app.css" />
 </head>
 <body>
-  <header class="top">
-    <div class="brand">AI 注册机 · Control Plane</div>
-    <nav id="nav">
-      <button type="button" data-page="overview" class="active">Overview</button>
-      <button type="button" data-page="config">Config</button>
-      <button type="button" data-page="import">Import</button>
-      <button type="button" data-page="runs">Runs</button>
-    </nav>
-    <div class="token-box">
-      <label>Token <input id="token" type="password" placeholder="CONTROL_API_TOKEN" autocomplete="off" /></label>
-      <button type="button" id="saveToken">Save</button>
-    </div>
-  </header>
-  <main>
-    <section id="page-overview" class="page active">
-      <h1>Overview</h1>
-      <div id="overview-status" class="card muted">Loading…</div>
-      <pre id="overview-json" class="log"></pre>
-    </section>
+  <div id="login-gate" class="login-gate hidden">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <h1>登录 Control Plane</h1>
+      <p class="hint">需要操作员账密。脚本仍可用 Bearer token。</p>
+      <label>用户名 <input id="login-user" name="username" autocomplete="username" required /></label>
+      <label>密码 <input id="login-pass" name="password" type="password" autocomplete="current-password" required /></label>
+      <div class="actions">
+        <button type="submit">登录</button>
+      </div>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </div>
 
-    <section id="page-config" class="page">
-      <h1>Config</h1>
-      <p class="hint">Secrets show masked; empty or *** values keep the previous secret on save.</p>
-      <form id="config-form" class="card grid">
-        <label>email_provider <input name="email_provider" /></label>
-        <label>defaultDomains <input name="defaultDomains" /></label>
-        <label>proxy <input name="proxy" /></label>
-        <label>proxy_rotate_mode <input name="proxy_rotate_mode" /></label>
-        <label>turnstile_stuck_timeout <input name="turnstile_stuck_timeout" type="number" step="1" /></label>
-        <label>cpa_probe_chat <select name="cpa_probe_chat"><option value="">(unchanged)</option><option value="false">false</option><option value="true">true</option></select></label>
-        <label>cpa_remote_inject (intent) <select name="cpa_remote_inject"><option value="">(unchanged)</option><option value="false">false</option><option value="true">true</option></select></label>
-        <label>cloudflare_api_key <input name="cloudflare_api_key" placeholder="leave empty to keep" /></label>
-        <div class="actions">
-          <button type="button" id="config-reload">Reload</button>
-          <button type="submit">Save</button>
+  <div id="app-shell" class="hidden">
+    <header class="top">
+      <div class="brand">AI 注册机 · Control Plane</div>
+      <nav id="nav">
+        <button type="button" data-page="overview" class="active">Overview</button>
+        <button type="button" data-page="config">Config</button>
+        <button type="button" data-page="import">Import</button>
+        <button type="button" data-page="runs">Runs</button>
+      </nav>
+      <div class="token-box">
+        <span id="whoami" class="hint"></span>
+        <label class="token-label">API Token <input id="token" type="password" placeholder="optional bearer" autocomplete="off" /></label>
+        <button type="button" id="saveToken">Save token</button>
+        <button type="button" id="logoutBtn" class="danger">Logout</button>
+      </div>
+    </header>
+    <main>
+      <section id="page-overview" class="page active">
+        <h1>Overview</h1>
+        <div id="overview-status" class="card muted">Loading…</div>
+        <pre id="overview-json" class="log"></pre>
+      </section>
+
+      <section id="page-config" class="page">
+        <h1>Config</h1>
+        <p class="hint">Secrets show masked; empty or *** values keep the previous secret on save.</p>
+        <form id="config-form" class="card grid">
+          <label>email_provider <input name="email_provider" /></label>
+          <label>defaultDomains <input name="defaultDomains" /></label>
+          <label>proxy <input name="proxy" /></label>
+          <label>proxy_rotate_mode <input name="proxy_rotate_mode" /></label>
+          <label>turnstile_stuck_timeout <input name="turnstile_stuck_timeout" type="number" step="1" /></label>
+          <label>cpa_probe_chat <select name="cpa_probe_chat"><option value="">(unchanged)</option><option value="false">false</option><option value="true">true</option></select></label>
+          <label>cpa_remote_inject (intent) <select name="cpa_remote_inject"><option value="">(unchanged)</option><option value="false">false</option><option value="true">true</option></select></label>
+          <label>cloudflare_api_key <input name="cloudflare_api_key" placeholder="leave empty to keep" /></label>
+          <div class="actions">
+            <button type="button" id="config-reload">Reload</button>
+            <button type="submit">Save</button>
+          </div>
+        </form>
+        <pre id="config-result" class="log"></pre>
+      </section>
+
+      <section id="page-import" class="page">
+        <h1>Import</h1>
+        <div class="card">
+          <h2>Nodes / proxies</h2>
+          <input type="file" id="nodes-file" />
+          <label><input type="checkbox" id="nodes-dry" checked /> dry-run</label>
+          <label><input type="checkbox" id="nodes-replace" /> replace</label>
+          <button type="button" id="nodes-go">Import nodes</button>
         </div>
-      </form>
-      <pre id="config-result" class="log"></pre>
-    </section>
-
-    <section id="page-import" class="page">
-      <h1>Import</h1>
-      <div class="card">
-        <h2>Nodes / proxies</h2>
-        <input type="file" id="nodes-file" />
-        <label><input type="checkbox" id="nodes-dry" checked /> dry-run</label>
-        <label><input type="checkbox" id="nodes-replace" /> replace</label>
-        <button type="button" id="nodes-go">Import nodes</button>
-      </div>
-      <div class="card">
-        <h2>Mail credentials</h2>
-        <textarea id="mail-text" rows="5" placeholder="email----password----clientId----refresh_token per line"></textarea>
-        <label>mode
-          <select id="mail-mode"><option value="append">append</option><option value="replace">replace</option></select>
-        </label>
-        <button type="button" id="mail-go">Import mail</button>
-      </div>
-      <div class="card">
-        <h2>Account / token dumps</h2>
-        <p class="hint">Zip of xai-*.json or single json. Default local-only (--no-remote).</p>
-        <input type="file" id="auths-file" />
-        <label><input type="checkbox" id="auths-remote" /> allow remote CPA inject</label>
-        <button type="button" id="auths-go">Import auths</button>
-      </div>
-      <div class="card">
-        <h2>Config pack (zip)</h2>
-        <input type="file" id="pack-file" />
-        <label><input type="checkbox" id="pack-apply" /> apply (else plan only)</label>
-        <button type="button" id="pack-go">Import pack</button>
-      </div>
-      <pre id="import-result" class="log"></pre>
-    </section>
-
-    <section id="page-runs" class="page">
-      <h1>Runs</h1>
-      <form id="run-form" class="card grid">
-        <label>kind
-          <select name="kind">
-            <option value="grok_supervisor">grok_supervisor</option>
-            <option value="register_sh">register_sh</option>
-          </select>
-        </label>
-        <label>product
-          <select name="product">
-            <option value="grok">grok</option>
-            <option value="mimo">mimo</option>
-            <option value="chatgpt">chatgpt</option>
-          </select>
-        </label>
-        <label>mode
-          <select name="mode">
-            <option value="ordinary">ordinary</option>
-            <option value="residential">residential</option>
-          </select>
-        </label>
-        <label>target <input name="target" type="number" value="100" min="1" /></label>
-        <label>threads <input name="threads" type="number" value="1" min="1" max="32" /></label>
-        <label>tag <input name="tag" value="batch_web" /></label>
-        <label>SKIP_CLASH_PREFLIGHT <input name="SKIP_CLASH_PREFLIGHT" placeholder="0 or 1" /></label>
-        <div class="actions">
-          <button type="submit">Start</button>
-          <button type="button" id="run-stop" class="danger">Stop</button>
-          <button type="button" id="run-refresh">Refresh</button>
+        <div class="card">
+          <h2>Mail credentials</h2>
+          <textarea id="mail-text" rows="5" placeholder="email----password----clientId----refresh_token per line"></textarea>
+          <label>mode
+            <select id="mail-mode"><option value="append">append</option><option value="replace">replace</option></select>
+          </label>
+          <button type="button" id="mail-go">Import mail</button>
         </div>
-      </form>
-      <pre id="run-status" class="log"></pre>
-      <h2>Log tail</h2>
-      <pre id="run-log" class="log tall"></pre>
-    </section>
-  </main>
+        <div class="card">
+          <h2>Account / token dumps</h2>
+          <p class="hint">Zip of xai-*.json or single json. Default local-only (--no-remote).</p>
+          <input type="file" id="auths-file" />
+          <label><input type="checkbox" id="auths-remote" /> allow remote CPA inject</label>
+          <button type="button" id="auths-go">Import auths</button>
+        </div>
+        <div class="card">
+          <h2>Config pack (zip)</h2>
+          <input type="file" id="pack-file" />
+          <label><input type="checkbox" id="pack-apply" /> apply (else plan only)</label>
+          <button type="button" id="pack-go">Import pack</button>
+        </div>
+        <pre id="import-result" class="log"></pre>
+      </section>
+
+      <section id="page-runs" class="page">
+        <h1>Runs</h1>
+        <form id="run-form" class="card grid">
+          <label>kind
+            <select name="kind">
+              <option value="grok_supervisor">grok_supervisor</option>
+              <option value="register_sh">register_sh</option>
+            </select>
+          </label>
+          <label>product
+            <select name="product">
+              <option value="grok">grok</option>
+              <option value="mimo">mimo</option>
+              <option value="chatgpt">chatgpt</option>
+            </select>
+          </label>
+          <label>mode
+            <select name="mode">
+              <option value="ordinary">ordinary</option>
+              <option value="residential">residential</option>
+            </select>
+          </label>
+          <label>target <input name="target" type="number" value="100" min="1" /></label>
+          <label>threads <input name="threads" type="number" value="1" min="1" max="32" /></label>
+          <label>tag <input name="tag" value="batch_web" /></label>
+          <label>SKIP_CLASH_PREFLIGHT <input name="SKIP_CLASH_PREFLIGHT" placeholder="0 or 1" /></label>
+          <div class="actions">
+            <button type="submit">Start</button>
+            <button type="button" id="run-stop" class="danger">Stop</button>
+            <button type="button" id="run-refresh">Refresh</button>
+          </div>
+        </form>
+        <pre id="run-status" class="log"></pre>
+        <h2>Log tail</h2>
+        <pre id="run-log" class="log tall"></pre>
+      </section>
+    </main>
+  </div>
   <script src="/assets/app.js"></script>
 </body>
 </html>
