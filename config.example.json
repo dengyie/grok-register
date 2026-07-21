@@ -159,7 +159,7 @@
   "turnstile_retry_limit": 3,
   "// turnstile_stuck_timeout": "Turnstile 卡住判定超时（秒）",
   "turnstile_stuck_timeout": 150,
-  "// turnstile_fatal_streak": "连续 Turnstile 卡住（profile/最终页）次数达此值才 process-fatal；headed 时先换路+slot 重试。env TURNSTILE_FATAL_STREAK 可覆盖。",
+  "// turnstile_fatal_streak": "连续 Turnstile *slot 耗尽账号*（每个 idx 计 1，非 mid-slot ARN）达此值才 process-fatal；headed/DISPLAY 时先换路+slot 重试。env TURNSTILE_FATAL_STREAK 可覆盖。",
   "turnstile_fatal_streak": 6,
   "// sso_timeout_base / sso_timeout_max / sso_progress_extension": "等待 sso cookie 的基础/上限/有进度时延长（秒）",
   "sso_timeout_base": 240,

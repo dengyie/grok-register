@@ -376,12 +376,13 @@ def is_turnstile_stuck_error(msg: str) -> bool:
 
     These used to be process-fatal and killed the whole chunk after 0–1 gains.
     Headed + DISPLAY ready: demote to AccountRetryNeeded + force rotate.
-    Still process-fatal when headless has no DISPLAY, or consecutive streak
-    exhausts (fail-fast, no empty spin).
+    Still process-fatal when headless has no DISPLAY, or consecutive
+    *account-slot* streak exhausts (fail-fast, no empty spin).
     """
     text = str(msg or "")
     if not text:
         return False
+    # Explicit hard-stuck / token-fail markers from profile + final page.
     if "Turnstile 卡住 fail-fast" in text:
         return True
     if "Turnstile 获取 token 失败" in text:
@@ -390,6 +391,13 @@ def is_turnstile_stuck_error(msg: str) -> bool:
         return True
     if "Turnstile retries exhausted" in text:
         return True
+    # ARN demote prefix from register_one (profile path).
+    if text.startswith("turnstile:") or "turnstile:" in text[:32].lower():
+        # Only when payload still looks like Turnstile stuck, not arbitrary.
+        rest = text.split(":", 1)[-1] if ":" in text else text
+        if "Turnstile" in rest or "token_len" in rest or "turnstile" in rest.lower():
+            return True
+    # Narrow token-empty / retry-exhaust co-occurrence (avoid bare "Turnstile" alone).
     if "Turnstile" in text and (
         "token_len=0" in text
         or "token_len = 0" in text
@@ -431,17 +439,18 @@ def headed_display_ready() -> bool:
         return bool((os.environ.get("DISPLAY") or "").strip())
 
 
-# Process-wide consecutive Turnstile fails without reg_ok — fail-fast gate.
+# Process-wide consecutive *account* Turnstile fails without reg_ok — fail-fast.
+# Counted once per failed idx (slot-exhausted), not per mid-slot ARN attempt.
 _turnstile_fail_streak_lock = threading.Lock()
 _turnstile_fail_streak = 0
 
 
 def _turnstile_fatal_streak_limit(config: dict | None = None) -> int:
-    """How many consecutive Turnstile stuck outcomes before process-fatal.
+    """How many consecutive Turnstile *slot-exhausted accounts* before process-fatal.
 
-    Default 6: with chunk=3 + account_slot_retry=2 allows ~one full sub of
-    pure Turnstile rotates before stop; not infinite spin on dead pool.
-    Env TURNSTILE_FATAL_STREAK overrides config.
+    Default 6 failed accounts (not mid-slot attempts). With chunk=3 that is up to
+    ~two pure-Turnstile subs before stop; mid-slot ARN (account_slot_retry) does
+    not burn the process counter. Env TURNSTILE_FATAL_STREAK overrides config.
     """
     env = (os.environ.get("TURNSTILE_FATAL_STREAK") or "").strip()
     if env:
@@ -461,7 +470,11 @@ def _turnstile_fatal_streak_limit(config: dict | None = None) -> int:
 
 
 def note_turnstile_streak(*, ok: bool) -> int:
-    """Update consecutive Turnstile-fail counter. ok=True resets. Returns streak."""
+    """Update consecutive Turnstile-account-fail counter. ok=True resets. Returns streak.
+
+    Call ok=False only when a Turnstile ARN chain exhausts the account slot
+    (one count per failed idx), not on every mid-slot retry.
+    """
     global _turnstile_fail_streak
     with _turnstile_fail_streak_lock:
         if ok:
@@ -469,6 +482,23 @@ def note_turnstile_streak(*, ok: bool) -> int:
             return 0
         _turnstile_fail_streak += 1
         return _turnstile_fail_streak
+
+
+def turnstile_slot_exhausted(*, slot_retry: int, max_slot_retry: int) -> bool:
+    """True when the next ARN would exceed account_slot_retry budget.
+
+    Pure helper for streak gating + tests: streak increments only when this
+    is True for a Turnstile-class ARN (not on mid-slot rotates).
+    """
+    try:
+        sr = int(slot_retry)
+    except Exception:
+        sr = 0
+    try:
+        mx = int(max_slot_retry)
+    except Exception:
+        mx = 0
+    return sr > max(0, mx)
 
 
 
@@ -546,11 +576,12 @@ def is_fatal_register_error(msg: str) -> bool:
         "Invalid credentials",
         # Turnstile 卡住 itself is NOT process-fatal when headed+DISPLAY ready:
         # demoted to AccountRetryNeeded + force rotate (slot budget). Still fatal:
-        # headless without DISPLAY, or consecutive streak (see note_turnstile_streak).
+        # no DISPLAY demote path, headless without DISPLAY, or slot-streak exhaust.
         # Bare --headless on Linux without DISPLAY: refuse headed upgrade and stop batch
         "Turnstile headless 失败且无可用 DISPLAY",
+        "Turnstile 卡住且无可用 DISPLAY",
         "headed 需要 DISPLAY/xvfb-run",
-        # Streak-exhaust message (raised after demote budget / process streak)
+        # Streak-exhaust message (raised after N slot-exhausted Turnstile accounts)
         "Turnstile 连续失败 fail-fast",
     )
     return any(m in text for m in markers)
@@ -1149,14 +1180,30 @@ def register_one(
                             reg.sleep_with_cancel(1.0, cancel)
                             continue
                         # slot budget exhausted after upgrade — fall through demote/fatal below
-                # Profile Turnstile stuck: demote to slot-retry+rotate when headed/DISPLAY
-                # ready. Process-fatal only for true unrecoverable or consecutive streak.
+                # Profile Turnstile stuck: demote to slot-retry+rotate when DISPLAY
+                # ready. Process-fatal only for true unrecoverable or account-slot streak.
                 if is_turnstile_stuck_error(msg):
                     # Headless without DISPLAY already fatal in upgrade path above.
-                    # With DISPLAY (or non-Linux): demote to AccountRetryNeeded;
-                    # streak counted once in ARN handler (also final-page from ttk).
-                    # Scoring: ARN → _force_rotate_path(reason contains turnstile).
+                    # If still headless but DISPLAY ready (one-shot upgrade already
+                    # consumed, or auto-headed disabled): force headed + hard recycle
+                    # then ARN so demote does not spin headless until streak.
                     if headed_display_ready():
+                        if bool(
+                            (getattr(reg, "config", {}) or {}).get(
+                                "browser_headless", False
+                            )
+                        ):
+                            log(
+                                worker_id,
+                                "[!] Turnstile demote: force headed + recycle before slot retry "
+                                f"DISPLAY={os.environ.get('DISPLAY', '')!r}",
+                            )
+                            reg.config["browser_headless"] = False
+                            try:
+                                reg.stop_browser()
+                            except Exception:
+                                pass
+                            _hard_recycle_browser(worker_id)
                         log(
                             worker_id,
                             f"[!] Turnstile 卡住，换路 slot 重试: {msg[:120]}",
@@ -1198,7 +1245,14 @@ def register_one(
                     raise FatalRegisterError(msg) from profile_exc
                 raise
             log(worker_id, f"资料已填: {profile.get('given_name')} {profile.get('family_name')}")
-            # Profile submit implies Turnstile passed on this egress.
+            log(worker_id, "5. 等待 sso cookie")
+            sso = reg.wait_for_sso_cookie(
+                log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
+            )
+            from cpa_xai.accounts import format_account_line, normalize_sso_cookie
+
+            sso = normalize_sso_cookie(sso)
+            # Score reg_ok + reset Turnstile streak only after SSO (disk product line).
             try:
                 note_egress_outcome(
                     "reg_ok",
@@ -1211,13 +1265,6 @@ def register_one(
                 note_turnstile_streak(ok=True)
             except Exception:
                 pass
-            log(worker_id, "5. 等待 sso cookie")
-            sso = reg.wait_for_sso_cookie(
-                log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
-            )
-            from cpa_xai.accounts import format_account_line, normalize_sso_cookie
-
-            sso = normalize_sso_cookie(sso)
             password = profile.get("password", "") or ""
             line = format_account_line(email, password, sso)
             with open(accounts_file, "a", encoding="utf-8") as f:
@@ -1302,12 +1349,39 @@ def register_one(
                     _mark_email_stage_error(email, str(exc))
                 last_slot_email = email
             # Final-page Turnstile already raises AccountRetryNeeded from ttk;
-            # profile path also raises ARN after demote. Count process streak
-            # so dead pools still fail-fast after consecutive Turnstile, not spin.
+            # profile path also raises ARN after demote. Streak is per *account*
+            # (slot-exhausted), not per mid-slot ARN — so slot_retry=2 does not
+            # burn 3 process-streak units on one idx.
             exc_text = str(exc)
-            if is_turnstile_stuck_error(exc_text) or exc_text.startswith("turnstile:"):
+            is_turnstile_arn = is_turnstile_stuck_error(exc_text) or exc_text.startswith(
+                "turnstile:"
+            )
+            # Always switch path on stuck (even when slot budget is 0) so the *next*
+            # account / next process does not inherit a dead Clash node.
+            rotate_reason = (
+                f"slot_retry:turnstile:{exc_text[:60]}"
+                if is_turnstile_arn
+                else f"slot_retry:{exc_text[:80]}"
+            )
+            slot_retry += 1
+            _force_rotate_path(worker_id, reason=rotate_reason)
+            if slot_retry <= max_slot_retry:
+                log(
+                    worker_id,
+                    f"[!] 当前账号流程卡住，已换路，slot 重试 {slot_retry}/{max_slot_retry}: {exc}",
+                )
+                _hard_recycle_browser(worker_id)
+                reg.sleep_with_cancel(1.0, cancel)
+                continue
+            # Slot exhausted for this idx.
+            if is_turnstile_arn:
                 streak = note_turnstile_streak(ok=False)
                 limit = _turnstile_fatal_streak_limit(getattr(reg, "config", None))
+                log(
+                    worker_id,
+                    f"[!] Turnstile slot 耗尽计 streak={streak}/{limit} "
+                    f"(per-account, not mid-slot)",
+                )
                 if streak >= limit:
                     fatal_msg = (
                         f"Turnstile 连续失败 fail-fast streak={streak}/{limit}: "
@@ -1325,18 +1399,6 @@ def register_one(
                         pass
                     request_fatal_stop(fatal_msg)
                     raise FatalRegisterError(fatal_msg) from exc
-            slot_retry += 1
-            # Always switch path on stuck (even when slot budget is 0) so the *next*
-            # account / next process does not inherit a dead Clash node.
-            _force_rotate_path(worker_id, reason=f"slot_retry:{str(exc)[:80]}")
-            if slot_retry <= max_slot_retry:
-                log(
-                    worker_id,
-                    f"[!] 当前账号流程卡住，已换路，slot 重试 {slot_retry}/{max_slot_retry}: {exc}",
-                )
-                _hard_recycle_browser(worker_id)
-                reg.sleep_with_cancel(1.0, cancel)
-                continue
             log(worker_id, f"! slot 重试耗尽 ({max_slot_retry}): {exc}")
             traceback.print_exc()
             _inc("reg_fail")
