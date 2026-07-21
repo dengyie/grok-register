@@ -28,9 +28,9 @@ run = "uv run python -u register_cli.py"
 description = "再注册 10 个账号"
 run = "uv run python -u register_cli.py --extra 10 --threads 1 --no-headless --fast"
 
-[tasks.gui]
-run = "uv run python grok_register_ttk.py"
-description = "启动 GUI（需桌面会话）"
+[tasks.control-api]
+run = "bash scripts/run_control_api.sh"
+description = "启动 Web control plane（默认 127.0.0.1:8787）"
 
 [tasks.mail-debug]
 run = "uv run python cf_mail_debug.py"

@@ -254,28 +254,21 @@ def test_cli_mint_token_ok_honesty() -> None:
     print("PASS cli mint_token_ok honesty metrics")
 
 
-def test_gui_product_batch_summary() -> None:
-    """GUI must track free Build product counters and end-of-batch product_ok."""
-    src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+def test_desktop_gui_removed_cli_keeps_product_counters() -> None:
+    """Desktop TTK GUI removed; product counters live in register_cli + control plane."""
+    ttk = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    assert "class GrokRegisterGUI" not in ttk
+    assert "import tkinter" not in ttk
+    assert "Desktop GUI removed" in ttk or "apps.control_api" in ttk
+    cli = (ROOT / "register_cli.py").read_text(encoding="utf-8")
     for needle in (
-        "self.cpa_token_ok_count = 0",
-        "self.cpa_product_ok_count = 0",
-        "self.cpa_chat_ok_count = 0",
-        "self.cpa_chat_denied_count = 0",
-        "self.cpa_remote_live_ok_count = 0",
-        "self.cpa_remote_inject_skip_count = 0",
-        "self.cpa_token_ok_count += 1",
-        "self.cpa_product_ok_count += 1",
-        "self.cpa_chat_ok_count += 1",
-        "free Build 产品",
-        "product_ok=",
-        "from register_cli import product_batch_success",
-        "注册成功",  # end summary must not conflate register with product
+        "product_batch_success",
+        "mint_token_ok",
+        "chat_ok",
     ):
-        assert needle in src, f"missing GUI product marker: {needle}"
-    # batch start must reset product counters (not only __init__)
-    assert src.count("self.cpa_token_ok_count = 0") >= 2
-    print("PASS gui free Build product batch summary")
+        assert needle in cli, f"missing CLI product marker: {needle}"
+    assert (ROOT / "apps" / "control_api" / "app.py").is_file()
+    print("PASS desktop GUI removed; CLI/control_api own product surface")
 
 
 def test_run_register_preserves_product_exit() -> None:
@@ -301,7 +294,7 @@ def main() -> int:
     test_alias_kill_switch_source()
     test_cli_product_exit_wiring()
     test_cli_mint_token_ok_honesty()
-    test_gui_product_batch_summary()
+    test_desktop_gui_removed_cli_keeps_product_counters()
     test_run_register_preserves_product_exit()
     print("\nALL PASS")
     return 0

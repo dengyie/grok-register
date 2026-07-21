@@ -11,60 +11,14 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parent
 
 
-def _stub_tkinter() -> None:
-    class _Dummy:
-        def __getattr__(self, name):
-            return _Dummy()
-
-        def __call__(self, *a, **k):
-            return _Dummy()
-
-    class _TkModule(types.ModuleType):
-        def __init__(self):
-            super().__init__("tkinter")
-
-        def __getattr__(self, name):
-            if name in ("ttk", "messagebox", "scrolledtext"):
-                return _Dummy()
-            if name in ("StringVar", "IntVar", "BooleanVar", "DoubleVar"):
-                return type(
-                    name,
-                    (),
-                    {
-                        "__init__": lambda *a, **k: None,
-                        "get": lambda self: "",
-                        "set": lambda self, v: None,
-                    },
-                )
-            return type(
-                name,
-                (),
-                {
-                    "__init__": lambda *a, **k: None,
-                    "pack": lambda *a, **k: None,
-                    "grid": lambda *a, **k: None,
-                    "bind": lambda *a, **k: None,
-                    "configure": lambda *a, **k: None,
-                    "after": lambda *a, **k: None,
-                    "title": lambda *a, **k: None,
-                    "geometry": lambda *a, **k: None,
-                    "mainloop": lambda *a, **k: None,
-                    "protocol": lambda *a, **k: None,
-                    "destroy": lambda *a, **k: None,
-                    "winfo_exists": lambda *a, **k: 0,
-                },
-            )()
-
-    sys.modules["tkinter"] = _TkModule()
-    sys.modules["tkinter.ttk"] = _Dummy()
-    sys.modules["tkinter.messagebox"] = _Dummy()
-    sys.modules["tkinter.scrolledtext"] = _Dummy()
-
-
 def _load_reg():
-    _stub_tkinter()
-    # DrissionPage / curl_cffi may be present; if not, light stubs.
-    if "DrissionPage" not in sys.modules:
+    """Import engine module. Prefer real deps; no tkinter (desktop GUI removed)."""
+    sys.path.insert(0, str(ROOT))
+    # Only stub missing optional browser deps; never replace real proxy_rotate.
+    try:
+        import DrissionPage  # noqa: F401
+        from DrissionPage.errors import PageDisconnectedError  # noqa: F401
+    except Exception:
         dp = types.ModuleType("DrissionPage")
         dp.Chromium = object
         dp.ChromiumOptions = object
@@ -72,27 +26,15 @@ def _load_reg():
         err = types.ModuleType("DrissionPage.errors")
         err.PageDisconnectedError = type("PageDisconnectedError", (Exception,), {})
         sys.modules["DrissionPage.errors"] = err
-    if "curl_cffi" not in sys.modules:
+        dp.errors = err
+    try:
+        from curl_cffi import requests as _r  # noqa: F401
+    except Exception:
         curl = types.ModuleType("curl_cffi")
         req = types.ModuleType("curl_cffi.requests")
         curl.requests = req
         sys.modules["curl_cffi"] = curl
         sys.modules["curl_cffi.requests"] = req
-    if "proxy_bridge" not in sys.modules:
-        pb = types.ModuleType("proxy_bridge")
-        pb.resolve_browser_proxy = lambda *a, **k: None
-        pb.proxy_log_label = lambda p: str(p or "")
-        pb.proxy_has_auth = lambda p: False
-        pb.strip_proxy_auth = lambda p: str(p or "")
-        sys.modules["proxy_bridge"] = pb
-    if "proxy_rotate" not in sys.modules:
-        pr = types.ModuleType("proxy_rotate")
-        pr.configure_proxy_rotation = lambda *a, **k: None
-        pr.maybe_rotate_proxy = lambda *a, **k: {"rotated": False, "mode": "off"}
-        pr.restore_proxy_rotation = lambda *a, **k: False
-        pr.current_proxy_override = lambda *a, **k: ""
-        sys.modules["proxy_rotate"] = pr
-    sys.path.insert(0, str(ROOT))
     import grok_register_ttk as reg  # noqa: E402
 
     return reg

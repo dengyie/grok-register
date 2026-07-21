@@ -4,13 +4,13 @@ Production-oriented multi-provider register monorepo. Inspired by:
 
 - [ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register) — `register/<product>` + shared `util`
 - LiteLLM / LangChain — explicit layers, registry, partner/provider packages, Makefile + ARCHITECTURE
-- Our additions — fail-fast, this-run attribution, black-box honesty, CPA OIDC/OpenAI gates, desktop UI
+- Our additions — fail-fast, this-run attribution, black-box honesty, CPA OIDC/OpenAI gates, web control plane
 
 ## Goals
 
 | Goal | Meaning |
 |------|---------|
-| **Usable** | One hub (`./register.sh`), one layered CLI (`python -m register_core`), desktop GUI |
+| **Usable** | One hub (`./register.sh`), one layered CLI (`python -m register_core`), web control plane |
 | **Honest** | Success = this-run delta / RESULT_JSON; never historical tail alone |
 | **Layered** | email / providers / verify / sink / pipeline contracts |
 | **Product-local stacks** | Grok Python+Drission; MiMo Node+Playwright; ChatGPT in-process curl_cffi+EmailSource |
@@ -29,7 +29,9 @@ ai-register-machine/
 ├── apps/
 │   ├── README.md               # entrypoints map
 │   ├── cli/                    # thin docs for CLI paths
-│   └── gui/                    # thin docs for TTK GUI
+│   ├── control_api/            # FastAPI project control plane
+│   ├── web/                    # static operator UI (Overview/Config/Import/Runs)
+│   └── gui/                    # removed desktop TTK — pointer only
 ├── register_core/              # shared layers (contracts → pipeline)
 │   ├── contracts.py
 │   ├── errors.py
@@ -59,14 +61,15 @@ ai-register-machine/
 │   └── unit/                   # layer unit tests live here when added
 ├── cpa_xai/                    # Grok OIDC mint / chat probe (Grok product lib)
 ├── register_cli.py             # Grok CLI production entry (legacy root path)
-├── grok_register_ttk.py        # Desktop GUI production entry
+├── grok_register_ttk.py        # Grok engine + mail channels (no desktop GUI)
+├── scripts/run_control_api.sh  # start web control plane
 └── turnstilePatch/             # browser extension for Grok path
 ```
 
 ## Layer dependency (one way)
 
 ```text
-hub / GUI / apps
+hub / web control plane / apps
         │
         ▼
    register_core.pipeline
@@ -214,4 +217,5 @@ New products: implement adapter → register factory → optional verifier → d
 - Mass account farm / alias email expansion
 - Unifying browser stacks into one framework
 - Silent production CPA config mutation
-- Web UI (desktop TTK is the mature UI for Grok today)
+- Desktop TTK GUI (removed; use `apps/control_api` + `apps/web`)
+- Full multi-host fleet scheduler (control plane is one project root per process)

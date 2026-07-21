@@ -1,12 +1,12 @@
 # AI 通用注册机（ai-register-machine）
 
-在常见「多模型注册脚本合集」之上，做成 **可维护、可验收、可 UI 操作** 的 monorepo：分层编排 + 多 provider 生产路径 + 桌面 UI（进度 / 表单输入 / 日志）。
+在常见「多模型注册脚本合集」之上，做成 **可维护、可验收、可 UI 操作** 的 monorepo：分层编排 + 多 provider 生产路径 + **Web control plane**（配置 / 导入 / 启停与状态）。
 
-对标开源 [ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register) 一类项目：**方向相同，实现更偏生产可用性**——本轮结果归因、fail-fast、契约脱敏、CPA/OIDC 门禁诚实、统一 hub、成熟 TTK 界面，而不是只堆脚本。
+对标开源 [ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register) 一类项目：**方向相同，实现更偏生产可用性**——本轮结果归因、fail-fast、契约脱敏、CPA/OIDC 门禁诚实、统一 hub、项目内 Web 控制面，而不是只堆脚本。
 
 | Provider | 入口 | 栈 | 产物方向 |
 |----------|------|----|----------|
-| **Grok / xAI** | `./register.sh grok` · **GUI** | Python + DrissionPage + turnstilePatch | SSO 账本 → CPA OIDC mint → chat 探针（可选远端 live） |
+| **Grok / xAI** | `./register.sh grok` · **Web UI** | Python + DrissionPage + turnstilePatch | SSO 账本 → CPA OIDC mint → chat 探针（可选远端 live） |
 | **Xiaomi MiMo** | `./register.sh mimo` | Node + Playwright | `sk-` API Key（TTS 等）；CPA 侧按 **OpenAI-compat** 导入，非 xai auth |
 | **分层编排** | `./register.sh core` | `register_core/` | 邮箱 / 注册 / 验证 / 落盘 编排（不替代产品内核） |
 
@@ -30,7 +30,7 @@
 | [register_core/README.md](register_core/README.md) | 分层通用框架 |
 | [providers/README.md](providers/README.md) | 产品包一览 |
 | [providers/mimo/README.md](providers/mimo/README.md) | MiMo TTS Key 注册 |
-| [apps/README.md](apps/README.md) | CLI / GUI 入口图 |
+| [apps/README.md](apps/README.md) | CLI / Web control plane 入口图 |
 | `Makefile` | `make test` / `syntax` / `doctor` / `example` |
 | `config.simple.example.json` | **Grok 简易配置**（推荐新人） |
 | `config.example.json` | Grok 全量字段 + 注释 |
@@ -58,8 +58,10 @@ bash scripts/setup_simple.sh
 ./register.sh core list
 ./register.sh core run -p mimo -n 1
 
-# 3b) 桌面 UI（推荐日常操作：表单输入 + 状态 + 滚动日志）
-uv run python grok_register_ttk.py
+# 3b) Web control plane（配置 / 导入 / 启停 batch + 状态日志）
+export CONTROL_API_TOKEN="$(openssl rand -hex 32)"
+./scripts/run_control_api.sh
+# 浏览器打开 http://127.0.0.1:8787
 
 # 4) 看结果
 ls accounts_cli.txt cpa_auths/                 # Grok
@@ -74,34 +76,36 @@ bash scripts/doctor_secrets.sh
 | 维度 | 常见 ai-register 脚本合集 | **ai-register-machine** |
 |------|---------------------------|-------------------------|
 | 架构 | 多脚本并列，边界模糊 | `register_core` 分层：email / providers / verify / sink / pipeline |
-| 入口 | 各产品各敲命令 | `./register.sh` 统一 hub + CLI + **TTK GUI** |
+| 入口 | 各产品各敲命令 | `./register.sh` 统一 hub + CLI + **Web control plane** |
 | 成功判定 | 易用历史日志/exit 0 误判 | **本轮归因**（ledger 增量 / `RESULT_JSON` / 文件 offset） |
 | 失败策略 | 容易空转重试 | **fail-fast**；超时杀进程组 |
 | 产物契约 | 常混 SSO / token / sk | Grok→xai OIDC+chat 门禁；MiMo→OpenAI-compat `sk-`，文档写清 |
 | 安全 | 密钥易进仓 | doctor、gitignore、public 脱敏、sink 0600 |
-| UI | 多为纯 CLI | **成熟桌面页**：数量/线程/邮箱/代理等表单、开始停止、状态、实时日志、内置教程 |
+| UI | 多为纯 CLI | **项目内 Web 控制面**：Config / Import / Runs（启停 supervisor + 日志 tail），默认 `127.0.0.1` + token |
 
-### 桌面 UI（进度与输入）
+### Web control plane（配置 / 导入 / 启停）
 
 ```bash
-uv run python grok_register_ttk.py
+export CONTROL_API_TOKEN="$(openssl rand -hex 32)"
+./scripts/run_control_api.sh
+# http://127.0.0.1:8787
 ```
 
-`GrokRegisterGUI`（Tk/ttk）支持：
+FastAPI + 静态页（`apps/control_api` + `apps/web`）：
 
-- **表单输入**：注册数量、并发线程、邮箱服务商、代理、DuckMail/CF/CloudMail/Hotmail 凭证路径、NSFW 开关、grok2api 入池等
-- **看进度**：状态栏 + 滚动日志（注册/收码/mint/探针全过程）
-- **操作**：开始注册 / 停止 / 清空日志 / 内置教程弹窗
-- 与 CLI 共用同一套注册与 CPA 链路，不是演示壳
+- **Overview**：product_ok 计数、当前 batch 状态
+- **Config**：编辑 `config.json`（备份后写；密钥脱敏）
+- **Import**：节点/代理、邮箱凭证、auth dump、配置包
+- **Runs**：`launch_batch_supervisor` / `./register.sh` 启停 + 日志 tail
 
-> MiMo 当前以 `./register.sh mimo` 生产路径为主；GUI 先覆盖 Grok 全链路（最重、字段最多）。hub 可继续扩展。
+与 CLI 共用同一套注册与 CPA 链路；桌面 TTK 已移除。详见 [apps/README.md](apps/README.md)。
 
 ### Monorepo 骨架
 
 对标 [ThinkerWen/ai-register](https://github.com/ThinkerWen/ai-register) 的 `register/<product>` + 共享 util，以及 LiteLLM 式 **ARCHITECTURE / Makefile / registry**，本仓固定为：
 
 ```text
-apps/                 入口图（CLI/GUI）
+apps/                 入口图（CLI / control_api / web）
 register_core/        分层库：email → providers → verify → sink → pipeline
 providers/            产品包：mimo（生产）、grok（说明）、_template（复制起步）
 docs/ examples/ tests/ scripts/
@@ -111,9 +115,11 @@ register.sh Makefile ARCHITECTURE.md
 ```text
 ./register.sh
      │
-     ├─ grok  → register_cli / grok_register_ttk / cpa_xai   （生产权威，暂根目录）
+     ├─ grok  → register_cli / grok_register_ttk(engine) / cpa_xai   （生产权威，暂根目录）
      ├─ mimo  → providers/mimo/run-register.sh               （生产权威）
      └─ core  → python -m register_core                      （编排 + 本轮归因）
+
+./scripts/run_control_api.sh → apps/control_api + apps/web   （项目内 Web 控制面）
 ```
 
 | 层 | 包路径 | 说明 |
@@ -135,7 +141,7 @@ register.sh Makefile ARCHITECTURE.md
 | 你想… | 看哪里 |
 |--------|--------|
 | 从零跑通本地链路 | [最短路径上手](#最短路径上手对外简易模式) |
-| **UI 看进度 / 表单输入** | [桌面 UI](#桌面-ui进度与输入) · `uv run python grok_register_ttk.py` |
+| **UI 配置 / 导入 / 启停** | [Web control plane](#web-control-plane配置--导入--启停) · `./scripts/run_control_api.sh` |
 | 成功/失败怎么判断 | [什么叫「成功」](#什么叫成功) |
 | Hotmail 四段凭证 | [邮箱：Hotmail / Outlook](#邮箱hotmail--outlook) |
 | 全量配置项 | [配置说明](#配置说明) · `config.example.json` |
@@ -291,7 +297,7 @@ uv run python -u register_cli.py --extra 1 --threads 1 --no-headless --fast
 ls accounts_cli.txt cpa_auths/
 ```
 
-GUI：`uv run python grok_register_ttk.py`
+Web UI：`./scripts/run_control_api.sh` → http://127.0.0.1:8787
 
 ### 什么叫「成功」
 
@@ -687,7 +693,10 @@ uv run python register_cli.py -h
 ```
 grok-register/
   register_cli.py                 # CLI 批量注册
-  grok_register_ttk.py            # 注册核心 + GUI + 邮箱通道
+  grok_register_ttk.py            # 注册核心 + 邮箱通道（无桌面 GUI）
+  apps/control_api/               # Web control plane API
+  apps/web/                       # 静态控制台
+  scripts/run_control_api.sh
   cpa_export.py                   # 成功 hook：mint / 远端注入 / 备份
   account_backup.py               # 本地 backups/ 快照
   cpa_xai/

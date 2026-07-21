@@ -1,12 +1,12 @@
 [project]
 name = "ai-register-machine"
 version = "1.3.0"
-description = "AI register machine: multi-provider hub, layered core, desktop UI — higher usability than script packs (Grok/xAI, MiMo, register_core)"
+description = "AI register machine: multi-provider hub, layered core, web control plane (Grok/xAI, MiMo, ChatGPT)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.13,<3.14"
 authors = [{ name = "dengyie" }]
-keywords = ["ai-register", "register-machine", "automation", "grok", "xai", "mimo", "oidc", "cpa", "gui"]
+keywords = ["ai-register", "register-machine", "automation", "grok", "xai", "mimo", "oidc", "cpa", "web"]
 dependencies = [
     "DrissionPage>=4.1",
     "curl_cffi>=0.7",
