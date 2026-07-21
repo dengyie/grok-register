@@ -575,6 +575,30 @@
     }
   }
 
+  function applyKindVisibility() {
+    const kind = $("#reg-kind")?.value || "grok_supervisor";
+    const isSupervisor = kind === "grok_supervisor";
+    const productSel = $("#reg-product");
+    if (productSel) {
+      productSel.disabled = isSupervisor;
+      if (isSupervisor) productSel.value = "grok";
+    }
+    // Supervisor-only knobs: hide when switching to register_sh single-shot.
+    const supervisorOnly = [
+      "#reg-chunk",
+      "#reg-batch-end-inject",
+      "#reg-import-every",
+      "#reg-import-size",
+      "#reg-import-pause",
+    ];
+    supervisorOnly.forEach((sel) => {
+      const el = $(sel);
+      if (!el) return;
+      const wrap = el.closest("label");
+      if (wrap) wrap.style.display = isSupervisor ? "" : "none";
+    });
+  }
+
   async function startRun() {
     const pre = $("#reg-action-result");
     // save protocol bits first (best-effort)
@@ -583,19 +607,46 @@
     } catch {
       /* continue start */
     }
+
+    const kind = $("#reg-kind")?.value || "grok_supervisor";
+    const product =
+      kind === "grok_supervisor" ? "grok" : $("#reg-product")?.value || "grok";
     const extra_env = {};
-    const chunk = ($("#reg-chunk")?.value || "").trim();
-    if (chunk) extra_env.SUPERVISOR_CHUNK = chunk;
-    // Supervisor hard-forces false again; still send false for honesty / non-supervisor paths.
+
+    // Supervisor-only knobs
+    if (kind === "grok_supervisor") {
+      const chunk = ($("#reg-chunk")?.value || "").trim();
+      if (chunk) extra_env.SUPERVISOR_CHUNK = chunk;
+      extra_env.CPA_BATCH_END_INJECT = $("#reg-batch-end-inject")?.checked
+        ? "true"
+        : "false";
+      const every = ($("#reg-import-every")?.value || "").trim();
+      if (every) extra_env.CPA_BATCH_IMPORT_EVERY = every;
+      const size = ($("#reg-import-size")?.value || "").trim();
+      if (size) extra_env.CPA_BATCH_IMPORT_SIZE = size;
+      const pause = ($("#reg-import-pause")?.value || "").trim();
+      if (pause !== "") extra_env.CPA_BATCH_IMPORT_PAUSE = pause;
+    }
+
+    // Universal: probe-off (supervisor hard-forces false again; register_sh honors)
     extra_env.CPA_PROBE_CHAT = "false";
-    // mid-mint always disk-first; batch-end inject is separate knob (run env only).
-    extra_env.CPA_BATCH_END_INJECT = $("#reg-batch-end-inject")?.checked ? "true" : "false";
-    const every = ($("#reg-import-every")?.value || "").trim();
-    if (every) extra_env.CPA_BATCH_IMPORT_EVERY = every;
+
+    // Advanced knobs
+    if ($("#reg-skip-preflight")?.checked) extra_env.SKIP_CLASH_PREFLIGHT = "1";
+    const nodeScore = ($("#reg-node-score")?.value || "").trim();
+    if (nodeScore !== "") extra_env.NODE_SCORE = nodeScore;
+
+    // Sync mail env → extra_env (avoid register_sh not reading config)
+    if ($("#reg-sync-mail-env")?.checked) {
+      const prov = ($("#reg-email-provider")?.value || "").trim();
+      const dom = ($("#reg-domains")?.value || "").trim();
+      if (prov) extra_env.EMAIL_PROVIDER = prov;
+      if (dom) extra_env.DEFAULT_DOMAINS = dom;
+    }
 
     const body = {
-      kind: "grok_supervisor",
-      product: "grok",
+      kind,
+      product,
       mode: $("#reg-mode")?.value || "ordinary",
       target: Number($("#reg-target")?.value || 100),
       threads: Number($("#reg-threads")?.value || 1),
@@ -1244,6 +1295,9 @@
   $("#log-which")?.addEventListener("change", refreshLogsOnly);
   $("#log-tail")?.addEventListener("change", refreshLogsOnly);
   wireRegFormDirtyOnce();
+  // Advanced start: toggle supervisor vs register_sh field visibility
+  $("#reg-kind")?.addEventListener("change", applyKindVisibility);
+  applyKindVisibility();
 
   // accounts
   $("#acc-refresh")?.addEventListener("click", refreshAccounts);

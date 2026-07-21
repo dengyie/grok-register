@@ -148,6 +148,44 @@
                   <input name="CPA_BATCH_IMPORT_EVERY" id="reg-import-every" type="number" value="100" min="1" />
                 </label>
               </div>
+
+              <details class="advanced" id="reg-advanced">
+                <summary>高级启动 · kind / product / SKIP_CLASH / NODE_SCORE / batch-end 波次</summary>
+                <div class="field-grid">
+                  <label>kind
+                    <select id="reg-kind" name="kind">
+                      <option value="grok_supervisor" selected>grok_supervisor · 批量监督</option>
+                      <option value="register_sh">register_sh · 单次外壳</option>
+                    </select>
+                  </label>
+                  <label id="reg-product-row">product
+                    <select id="reg-product" name="product" disabled>
+                      <option value="grok" selected>grok</option>
+                      <option value="mimo">mimo</option>
+                      <option value="chatgpt">chatgpt</option>
+                    </select>
+                  </label>
+                  <label class="check" title="SKIP_CLASH_PREFLIGHT=1 会跳过 Clash 批前测活；默认关">
+                    <input type="checkbox" id="reg-skip-preflight" /> 跳过 Clash 批前测活 (SKIP_CLASH_PREFLIGHT)
+                  </label>
+                  <label>NODE_SCORE
+                    <select id="reg-node-score">
+                      <option value="" selected>(不传，吃环境)</option>
+                      <option value="1">1 · 打分排序</option>
+                      <option value="0">0 · 关闭打分</option>
+                    </select>
+                  </label>
+                  <label>CPA_BATCH_IMPORT_SIZE
+                    <input type="number" id="reg-import-size" min="1" placeholder="100" />
+                  </label>
+                  <label>CPA_BATCH_IMPORT_PAUSE
+                    <input type="number" id="reg-import-pause" min="0" placeholder="3" />
+                  </label>
+                  <label class="check span2" title="启动时把当前邮箱表单同步进 extra_env，避免 register_sh 不读 config">
+                    <input type="checkbox" id="reg-sync-mail-env" checked /> 同步 EMAIL_PROVIDER / DEFAULT_DOMAINS 到 extra_env
+                  </label>
+                </div>
+              </details>
             </form>
             <pre id="reg-action-result" class="log compact"></pre>
           </div>
