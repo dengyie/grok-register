@@ -1,0 +1,159 @@
+/* Resources page (nodes / mail / import) */
+
+.page-resources .card {
+  margin-top: var(--space-3);
+}
+
+.resources-tab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.actions-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+}
+
+.actions-bar .grow {
+  flex: 1 1 16rem;
+  min-width: 12rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 0.35rem 0.55rem;
+  font: inherit;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.chip.hot {
+  color: var(--accent);
+  border-color: rgba(91, 159, 212, 0.5);
+}
+
+.badge.pool {
+  color: var(--accent);
+  border-color: rgba(91, 159, 212, 0.45);
+}
+
+.badge.unknown {
+  color: var(--muted);
+}
+
+.import-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.import-grid .card {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.import-grid h2,
+.resources-tab h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+
+.import-grid textarea,
+.mail-tab textarea {
+  width: 100%;
+  min-height: 5rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  resize: vertical;
+}
+
+.mail-form.grid,
+.nodes-tab .grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem 0.85rem;
+}
+
+.mail-form label,
+.nodes-tab .grid > label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.mail-form input,
+.nodes-tab .grid input,
+.nodes-tab .grid select,
+.resources-tab label.inline input,
+.resources-tab label.inline select {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+
+.mail-form .span2,
+.nodes-tab .grid .span2,
+.nodes-tab .grid .actions {
+  grid-column: 1 / -1;
+}
+
+.nodes-tab .grid .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.mail-toolbar {
+  margin-bottom: 0;
+}
+
+.resources-tab label.check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.resources-tab label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.card.ok {
+  border-color: rgba(91, 212, 154, 0.35);
+}
+
+.card.muted {
+  color: var(--muted);
+}
+
+@media (max-width: 800px) {
+  .import-grid,
+  .mail-form.grid,
+  .nodes-tab .grid {
+    grid-template-columns: 1fr;
+  }
+}
