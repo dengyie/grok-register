@@ -75,7 +75,10 @@ def create_app() -> FastAPI:
     except ImportError:
         pass
 
-    web_dir = Path(__file__).resolve().parents[1] / "web"
+    web_root = Path(__file__).resolve().parents[1] / "web"
+    web_dist = web_root / "dist"
+    # Prefer Vite build (console10); fall back to flat static root / legacy.
+    web_dir = web_dist if (web_dist / "index.html").is_file() else web_root
     if web_dir.is_dir() and (web_dir / "index.html").is_file():
         app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web")
 

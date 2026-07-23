@@ -29,7 +29,7 @@ uv run python scripts/control_api_user.py set admin
 Open `http://127.0.0.1:8787` → **login form** (username/password). Session is HttpOnly cookie.
 
 - API: `/api/health`, `/api/auth/*`, `/api/overview`, `/api/config`, `/api/import/*`, `/api/runs/*`
-- UI: static files under `apps/web/` served by FastAPI
+- UI: **console10** Preact SPA — `cd apps/web && npm run build` (or `./scripts/build_web_console.sh`) writes `apps/web/dist`; FastAPI prefers `apps/web/dist` then falls back to flat `apps/web/`. Deploy dist only via `./scripts/deploy_web_console10.sh` (manual scp; does not stop batch). Dev: `cd apps/web && npm run dev` proxies `/api` → `:8787`.
 - Auth (either):
   - **Browser:** password login → signed cookie `control_session`
   - **Scripts:** `Authorization: Bearer <CONTROL_API_TOKEN>` or `X-Control-Token`
