@@ -1,0 +1,94 @@
+/* Accounts page */
+
+.page-accounts .filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 0.75rem;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+.page-accounts label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.page-accounts label.inline input[type="search"],
+.page-accounts label.inline input[type="text"] {
+  min-width: 10rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+}
+
+.page-accounts .acc-summary {
+  margin-bottom: var(--space-3);
+}
+
+.table-wrap {
+  overflow: auto;
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+table.data th,
+table.data td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.45rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+table.data th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.78rem;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+table.data td.ops {
+  white-space: nowrap;
+}
+
+.badge {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.08rem 0.45rem;
+  font-size: 0.74rem;
+}
+
+.badge.ok {
+  color: var(--ok);
+  border-color: rgba(91, 212, 154, 0.45);
+}
+
+.badge.fail {
+  color: var(--danger);
+  border-color: rgba(212, 91, 91, 0.45);
+}
+
+.err-text {
+  color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .page-accounts label.inline input[type="search"] {
+    min-width: 8rem;
+  }
+  table.data {
+    font-size: 0.78rem;
+  }
+}
