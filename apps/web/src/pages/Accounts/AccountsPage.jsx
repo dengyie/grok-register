@@ -84,12 +84,6 @@ export function AccountsPage() {
     load({ page: 1 });
   }, [load]);
 
-  // complete / pageSize change → reset page
-  useEffect(() => {
-    // skip first paint double-fetch: only when filters change after mount
-    // handled by explicit handlers below for complete/pageSize
-  }, []);
-
   // Debounced search (skip mount — initial load handles first paint)
   useEffect(() => {
     if (qFirst.current) {

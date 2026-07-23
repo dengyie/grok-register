@@ -17,12 +17,7 @@
 import { useEffect, useState, useCallback } from "preact/hooks";
 import * as api from "../../api/client.js";
 import { session } from "../../store/session.js";
-import {
-  showOpsFeedback,
-  stickyBanner,
-  opsLog,
-  clearStickyBanner,
-} from "../../store/feedback.js";
+import { showOpsFeedback } from "../../store/feedback.js";
 import {
   currentRunState,
   overviewState,
@@ -113,7 +108,6 @@ export function RegisterPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [busyKey, setBusyKey] = useState(null); // 'start' | 'stop' | 'save' | 'proxy' | 'refresh'
   const [actionResult, setActionResult] = useState("");
-  const [opsLogOpen, setOpsLogOpen] = useState(false);
   const [loadedOnce, setLoadedOnce] = useState(false);
 
   // Load form from /api/config exactly once (and on explicit refresh).
@@ -432,9 +426,6 @@ export function RegisterPage() {
     }
   }
 
-  const banner = stickyBanner.value;
-  const logItems = opsLog.value;
-
   return (
     <section class="page">
       <header class="page-head">
@@ -477,34 +468,7 @@ export function RegisterPage() {
         </div>
       </header>
 
-      {banner ? (
-        <div
-          class={`ops-feedback ${banner.kind || "info"}`}
-          role="status"
-          onClick={clearStickyBanner}
-          title="点击清除横幅"
-        >
-          {banner.message}
-        </div>
-      ) : null}
-      <details
-        class="ops-log-wrap"
-        open={opsLogOpen}
-        onToggle={(e) => setOpsLogOpen(e.currentTarget.open)}
-      >
-        <summary>
-          操作日志 <span class="hint">{logItems.length}</span>
-        </summary>
-        <ol class="ops-log" aria-live="polite">
-          {logItems.map((it, i) => (
-            <li key={i}>
-              <span class="t">{it.t}</span>
-              <span class={`k ${it.kind}`}>{it.kind}</span>
-              <span class="m">{it.m}</span>
-            </li>
-          ))}
-        </ol>
-      </details>
+      {/* Sticky banner + ops log live in App shell OpsFeedbackBar (all pages). */}
 
       <div class="split">
         <div class="panel form-panel">

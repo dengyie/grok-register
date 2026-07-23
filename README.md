@@ -94,7 +94,7 @@ uv run python scripts/control_api_user.py set admin
 # http://127.0.0.1:8787 → 用户名/密码登录
 ```
 
-FastAPI + 静态页（`apps/control_api` + `apps/web`）：
+FastAPI + console10 SPA（`apps/control_api` + `apps/web` Vite/Preact；`npm run build` → `apps/web/dist`）：
 
 - **登录**：操作员账密（scrypt + HttpOnly session）；脚本可用 Bearer token
 - **Overview**：product_ok 计数、当前 batch 状态
@@ -699,7 +699,7 @@ grok-register/
   register_cli.py                 # CLI 批量注册
   grok_register_ttk.py            # 注册核心 + 邮箱通道（无桌面 GUI）
   apps/control_api/               # Web control plane API
-  apps/web/                       # 静态控制台
+  apps/web/                       # console10 SPA (Vite+Preact; dist preferred)
   scripts/run_control_api.sh
   cpa_export.py                   # 成功 hook：mint / 远端注入 / 备份
   account_backup.py               # 本地 backups/ 快照

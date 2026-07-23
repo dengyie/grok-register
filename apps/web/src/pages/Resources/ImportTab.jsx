@@ -93,6 +93,7 @@ export function ImportTab() {
 
         <div class="card">
           <h2>Mail credentials</h2>
+          <p class="hint">与「资源 → 邮箱」凭证导入同源 API；完整 hotmail 表单见邮箱 Tab。</p>
           <textarea
             rows={5}
             value={mailText}

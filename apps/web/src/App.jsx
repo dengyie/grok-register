@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { session } from "./store/session.js";
 import * as api from "./api/client.js";
 import { ToastHost } from "./ui/ToastHost.jsx";
+import { OpsFeedbackBar } from "./ui/OpsFeedbackBar.jsx";
 import { LoginGate } from "./pages/LoginGate.jsx";
 import { RegisterPage } from "./pages/Register/RegisterPage.jsx";
 import { LogsPage } from "./pages/RunLogs/LogsPage.jsx";
@@ -127,6 +128,7 @@ export function App() {
           </div>
         </aside>
         <div class="main-wrap">
+          <OpsFeedbackBar />
           <Page />
         </div>
       </div>

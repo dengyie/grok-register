@@ -178,12 +178,16 @@ export function RegForm({ value, onChange, advancedOpen, onToggleAdvanced }) {
           >
             <input type="checkbox" checked={false} disabled /> 注册后 chat 探针（强制关）
           </label>
-          <label class="check" title="中途 mint 不 tebi 注入">
+          <label
+            class="check"
+            title="信息项：中途 mint 永不 tebi 注入（disk-first 产品契约）；取消勾选不会开启 mid-mint inject"
+          >
             <input
               type="checkbox"
               checked={v.ssoOnly}
               onChange={(e) => set({ ssoOnly: e.currentTarget.checked })}
-            /> 只产落盘 auth（默认）
+            />{" "}
+            只产落盘 auth（默认 · 信息项）
           </label>
           <label class="check" title="仅批边界 CPA_BATCH_END_INJECT">
             <input

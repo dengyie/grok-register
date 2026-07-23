@@ -5,16 +5,18 @@ export function Button({
   type = "button",
   class: cls = "",
   children,
+  disabled,
   ...rest
 }) {
   return (
     <button
       type={type}
       class={`btn btn-${variant} btn-${size} ${busy ? "busy" : ""} ${cls}`}
-      disabled={busy || rest.disabled}
+      disabled={busy || !!disabled}
+      aria-busy={busy || undefined}
       {...rest}
     >
-      {busy ? "…" : children}
+      {children}
     </button>
   );
 }

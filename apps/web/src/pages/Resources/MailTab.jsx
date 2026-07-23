@@ -108,10 +108,22 @@ export function MailTab() {
   async function save() {
     setBusy("save");
     try {
-      const partial = { ...form };
-      for (const k of SECRET_KEYS) {
-        const v = String(partial[k] || "");
-        if (v === "" || v.startsWith("***")) delete partial[k];
+      // Mirror legacy collectForm: skip empty secrets + skip empty non-bool fields
+      // so we never wipe stored keys with "".
+      const partial = {};
+      for (const [k, raw] of Object.entries(form)) {
+        if (SECRET_KEYS.includes(k)) {
+          const v = String(raw || "");
+          if (v === "" || v.startsWith("***")) continue;
+          partial[k] = v;
+          continue;
+        }
+        if (k === "hotmail_allow_plus_alias") {
+          partial[k] = !!raw;
+          continue;
+        }
+        if (raw === "" || raw == null) continue;
+        partial[k] = raw;
       }
       const data = await api.putConfig({ config: partial });
       setResult(pretty(data));

@@ -63,7 +63,7 @@ export function LoginGate() {
             name="password"
             type="password"
             autocomplete="current-password"
-            placeholder="admin123"
+            placeholder="密码"
             required
             value={password}
             onInput={(e) => setPassword(e.currentTarget.value)}
