@@ -1,0 +1,65 @@
+/* Settings page */
+
+.page-settings .settings-form.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem 0.85rem;
+  margin-bottom: var(--space-3);
+}
+
+.page-settings .settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.page-settings .settings-form .span2 {
+  grid-column: 1 / -1;
+}
+
+.page-settings .settings-form input,
+.page-settings .settings-form select,
+.page-settings .settings-form textarea {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+
+.page-settings .card {
+  margin-bottom: var(--space-3);
+}
+
+.page-settings .card h2 {
+  margin: 0 0 0.55rem;
+  font-size: 1rem;
+}
+
+.page-settings label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-right: 0.75rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.page-settings label.inline input {
+  min-width: 14rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+
+@media (max-width: 700px) {
+  .page-settings .settings-form.grid {
+    grid-template-columns: 1fr;
+  }
+}
