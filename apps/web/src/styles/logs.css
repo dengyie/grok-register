@@ -1,0 +1,105 @@
+/* Logs page (RunLogs / #/logs) */
+
+.page-logs .run-header {
+  margin-top: 0.25rem;
+}
+
+.logs-paths {
+  margin: 0.15rem 0 0.5rem;
+  word-break: break-all;
+  font-size: 0.78rem;
+}
+
+.logs-log-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  min-height: 0;
+}
+
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+  position: static;
+  flex: 0 0 auto;
+  background: var(--panel);
+  padding: 0.35rem 0;
+}
+
+.log-toolbar h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  margin-right: auto;
+}
+
+.log-path-inline {
+  font-size: 0.78rem;
+}
+
+.logs-log {
+  min-height: 22rem;
+  max-height: calc(100vh - 16rem);
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.page-logs label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.page-logs label.inline.check {
+  color: var(--text);
+  cursor: pointer;
+}
+
+.page-logs label.inline select,
+.page-logs label.inline .field-control,
+.page-logs label.inline select {
+  min-width: 6.5rem;
+}
+
+.run-history-wrap {
+  margin-top: var(--space-3);
+}
+
+.run-history-wrap summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.run-history {
+  margin-top: 0.35rem;
+}
+
+.run-history-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.78rem;
+}
+
+.run-history-list li {
+  color: var(--muted);
+}
+
+.mono {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+
+@media (max-width: 640px) {
+  .logs-log {
+    min-height: 14rem;
+    max-height: 60vh;
+  }
+}
