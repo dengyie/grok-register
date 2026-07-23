@@ -22,6 +22,8 @@ a:hover { text-decoration: underline; }
   display: flex;
   flex-direction: column;
   padding: var(--space-4) var(--space-3);
+  grid-column: 1;
+  grid-row: 1;
 }
 .side-brand {
   display: flex;
@@ -97,8 +99,16 @@ a:hover { text-decoration: underline; }
 .main-wrap {
   min-width: 0;
   padding: var(--space-4) 1.15rem var(--space-6);
+  /* Explicit placement so extra shell chrome (toggle/backdrop) cannot steal
+     grid tracks from sidebar + main — see button.nav-toggle note below. */
+  grid-column: 2;
+  grid-row: 1;
 }
-.nav-toggle { display: none; }
+/* Higher specificity than .btn (components.css loads later and sets
+   display:inline-flex). Without this, nav-toggle stays in the 2-col grid as
+   cell (1,1), sidebar lands in the content column, and main-wrap is shoved
+   into a 220px-wide second row below the fold — "only menu visible". */
+button.nav-toggle { display: none; }
 .nav-backdrop { display: none; }
 
 /* ── Login gate ────────────────────────────────────────── */
@@ -159,8 +169,12 @@ a:hover { text-decoration: underline; }
 
 /* ── Responsive ────────────────────────────────────────── */
 @media (max-width: 900px) {
-  .app-shell { grid-template-columns: 1fr; }
-  .nav-toggle {
+  /* Block layout: position:fixed chrome does not reserve tracks (unlike grid). */
+  .app-shell {
+    display: block;
+    min-height: 100vh;
+  }
+  button.nav-toggle {
     display: inline-flex;
     position: fixed;
     top: var(--space-3);
@@ -176,6 +190,8 @@ a:hover { text-decoration: underline; }
     z-index: 40;
     height: 100vh;
     box-shadow: none;
+    grid-column: auto;
+    grid-row: auto;
   }
   .app-shell.nav-open .sidebar {
     transform: translateX(0);
@@ -192,7 +208,11 @@ a:hover { text-decoration: underline; }
     z-index: 35;
     cursor: pointer;
   }
-  .main-wrap { padding: calc(var(--space-6) + var(--space-4)) var(--space-3) var(--space-5); }
+  .main-wrap {
+    padding: calc(var(--space-6) + var(--space-4)) var(--space-3) var(--space-5);
+    grid-column: auto;
+    grid-row: auto;
+  }
   .page-head { gap: 0.55rem; }
   .kpi-grid { grid-template-columns: 1fr 1fr; }
 }
