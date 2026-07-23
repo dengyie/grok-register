@@ -20,7 +20,20 @@ export function headers(json = false) {
 }
 
 export async function api(path, opts = {}) {
-  const res = await fetch(path, { credentials: "same-origin", ...opts });
+  const callerHeaders = opts.headers || {};
+  const hasAuth = Object.keys(callerHeaders).some(
+    (k) => k.toLowerCase() === "authorization"
+  );
+  const token = getToken();
+  const merged = {
+    ...(token && !hasAuth ? { Authorization: `Bearer ${token}` } : {}),
+    ...callerHeaders,
+  };
+  const res = await fetch(path, {
+    credentials: "same-origin",
+    ...opts,
+    headers: merged,
+  });
   const text = await res.text();
   let body;
   try {
@@ -89,11 +102,10 @@ export const runLogs = (tail = 200, which = "auto") =>
 
 // Accounts
 export const listAccounts = (qs) => api(`/api/accounts?${qs}`);
-export const accountAction = (id, action) =>
-  api(`/api/accounts/${encodeURIComponent(id)}`, {
-    method: "POST",
-    headers: headers(true),
-    body: JSON.stringify({ action }),
+export const deleteAccount = (name) =>
+  api(`/api/accounts/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: headers(),
   });
 
 // Nodes
@@ -123,6 +135,17 @@ export const testCatalog = (body) =>
     headers: headers(true),
     body: JSON.stringify(body || {}),
   });
+export const deleteCatalogNode = (id) =>
+  api(`/api/nodes/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: headers(),
+  });
+export const patchCatalogNode = (id, body) =>
+  api(`/api/nodes/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: headers(true),
+    body: JSON.stringify(body),
+  });
 
 // Import multipart
 export const importNodesFile = (fd) => postMultipart("/api/import/nodes", fd);
@@ -131,8 +154,7 @@ export const importAuthsFile = (fd) => postMultipart("/api/import/auths", fd);
 export const importPackFile = (fd) => postMultipart("/api/import/pack", fd);
 
 // Ops
-export const selfcheck = () =>
-  api("/api/ops/selfcheck", { method: "POST", headers: headers(true) });
+export const selfcheck = () => api("/api/ops/selfcheck", { headers: headers() });
 export const cleanupOrphans = () =>
   api("/api/ops/cleanup-orphans?dry_run=false", {
     method: "POST",
